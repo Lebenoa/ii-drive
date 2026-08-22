@@ -57,25 +57,44 @@
     padding: 0;
     width: min(430px, calc(100vw - 40px));
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+    /* Closed (default) state; `allow-discrete` keeps display and the
+       overlay layer alive for the duration of the exit transition, so
+       the fade-out actually runs instead of vanishing at `close()`. */
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+    transition:
+      opacity 0.18s ease,
+      transform 0.18s ease,
+      overlay 0.18s ease allow-discrete,
+      display 0.18s ease allow-discrete;
+  }
+
+  dialog.modal[open] {
+    opacity: 1;
+    transform: none;
+
+    /* Entry point for the transition when the dialog first renders open. */
+    @starting-style {
+      opacity: 0;
+      transform: translateY(10px) scale(0.97);
+    }
   }
 
   dialog.modal::backdrop {
     background: rgba(6, 9, 15, 0.6);
     backdrop-filter: blur(3px);
+    opacity: 0;
+    transition:
+      opacity 0.18s ease,
+      overlay 0.18s ease allow-discrete,
+      display 0.18s ease allow-discrete;
   }
 
-  dialog.modal[open] {
-    animation: modal-in 0.16s ease;
-  }
+  dialog.modal[open]::backdrop {
+    opacity: 1;
 
-  @keyframes modal-in {
-    from {
+    @starting-style {
       opacity: 0;
-      transform: translateY(8px) scale(0.98);
-    }
-    to {
-      opacity: 1;
-      transform: none;
     }
   }
 
