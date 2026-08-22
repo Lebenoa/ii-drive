@@ -1,0 +1,27 @@
+{
+  "name": "ii-drive",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepare": "svelte-kit sync || true"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.70.3",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "svelte": "^5.46.4",
+    "typescript": "^5.9.0",
+    "vite": "^8.0.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.7.5",
+      "onFail": "ignore"
+    }
+  }
+}

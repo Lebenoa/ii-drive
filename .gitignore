@@ -1,0 +1,8 @@
+/target
+/data
+/config.toml
+*.session
+node_modules/
+.svelte-kit/
+web/dist/
+.env

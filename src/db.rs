@@ -1,0 +1,552 @@
+use serde::{Deserialize, Serialize};
+
+type Conn = surrealdb::engine::local::Db;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error(transparent)]
+    Sur(#[from] surrealdb::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Shape(String),
+}
+pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
+    if let Some(parent) = std::path::Path::new(path).parent().filter(|p| !p.is_empty()) {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let db = surrealdb::Surreal::new::<surrealdb::engine::local::SurrealKv>(path).await?;
+    db.use_ns("drive").await?;
+    db.use_db("drive").await?;
+    // SELECTs against a not-yet-created table error out; define up front so
+    // a fresh install serves an empty list instead of a 500.
+    let mut res = db
+        .query("DEFINE TABLE IF NOT EXISTS file; DEFINE TABLE IF NOT EXISTS folder; \
+                DEFINE TABLE IF NOT EXISTS setting")
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    let _ = res.take::<surrealdb::types::Value>(1usize)?;
+    Ok(db)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilePart {
+    pub message_id: i32,
+    /// Storage chat key holding this part's message.
+    pub chat: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRow {
+    pub uid: String,
+    pub name: String,
+    pub mime: String,
+    /// Total size across all parts.
+    pub size: i64,
+    /// First part's message id — kept for compatibility with old rows/tools.
+    pub message_id: i32,
+    /// First part's storage chat key.
+    pub chat: String,
+    pub created_at: i64,
+    /// Parent folder id, "" = root. Legacy rows default to root.
+    #[serde(default)]
+    pub folder: String,
+    /// One entry per uploaded message; single-part files have exactly one.
+    /// Legacy rows without `parts_json` synthesize one part from the columns.
+    #[serde(default)]
+    pub parts: Vec<FilePart>,
+}
+
+const TABLE: &str = "file";
+
+const ROW_COLS: &str = "uid, name, mime, size, message_id, chat, created_at, parts_json, folder";
+
+/// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
+/// unset fields as null) into "" instead of failing.
+fn null_as_empty<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+/// Query results are taken as raw `serde_json::Value` (which implements
+/// `SurrealValue`) and converted with serde; no custom trait impls needed.
+fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        uid: String,
+        name: String,
+        mime: String,
+        size: i64,
+        message_id: i32,
+        chat: String,
+        created_at: i64,
+        #[serde(default)]
+        parts_json: Option<String>,
+        // Older rows have no folder at all; SurrealDB may also project an
+        // unset field as null, so map both to "" (root).
+        #[serde(default, deserialize_with = "null_as_empty")]
+        folder: String,
+    }
+    let raw: Raw = serde_json::from_value(v)
+        .map_err(|e| DbError::Shape(format!("file row shape mismatch: {e}")))?;
+    let parts = match &raw.parts_json {
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| DbError::Shape(format!("parts shape mismatch: {e}")))?,
+        // Pre-split rows: the whole file is one message.
+        None => vec![FilePart {
+            message_id: raw.message_id,
+            chat: raw.chat.clone(),
+            size: raw.size,
+        }],
+    };
+    Ok(FileRow {
+        uid: raw.uid,
+        name: raw.name,
+        mime: raw.mime,
+        size: raw.size,
+        message_id: raw.message_id,
+        chat: raw.chat,
+        created_at: raw.created_at,
+        folder: raw.folder,
+        parts,
+    })
+}
+
+pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), DbError> {
+    let parts_json = serde_json::to_string(&row.parts)
+        .map_err(|e| DbError::Shape(format!("parts serialize: {e}")))?;
+    let _: Option<serde_json::Value> = db
+        .create(TABLE)
+        .content(serde_json::json!({
+            "uid": row.uid,
+            "name": row.name,
+            "mime": row.mime,
+            "size": row.size,
+            "message_id": row.message_id,
+            "chat": row.chat,
+            "created_at": row.created_at,
+            "parts_json": parts_json,
+            "folder": row.folder,
+        }))
+        .await?;
+    Ok(())
+}
+
+pub async fn get(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<Option<FileRow>, DbError> {
+    let mut res = db
+        .query(format!("SELECT {ROW_COLS} FROM file WHERE uid = $uid LIMIT 1"))
+        .bind(("uid", uid.to_string()))
+        .await?;
+    let mut rows: Vec<serde_json::Value> = res.take(0)?;
+    match rows.len() {
+        0 => Ok(None),
+        _ => Ok(Some(to_row(rows.swap_remove(0))?)),
+    }
+}
+
+pub async fn list(
+    db: &surrealdb::Surreal<Conn>,
+    q: &str,
+    folder: &str,
+    limit: u64,
+    offset: u64,
+) -> Result<Vec<FileRow>, DbError> {
+    let mut res = db
+        .query(format!(
+            // CONTAINS "" is true for every name, so one query serves both cases.
+            "SELECT {ROW_COLS} FROM file \
+             WHERE string::lowercase(name) CONTAINS $q AND folder = $folder \
+             ORDER BY created_at DESC \
+             LIMIT $limit START $offset"
+        ))
+        .bind(("q", q.to_lowercase()))
+        .bind(("folder", folder.to_string()))
+        .bind(("limit", limit.min(500) as i64))
+        .bind(("offset", offset as i64))
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    rows.into_iter().map(to_row).collect()
+}
+
+pub async fn delete(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u64, DbError> {
+    let mut res = db
+        .query("DELETE FROM file WHERE uid = $uid RETURN BEFORE")
+        .bind(("uid", uid.to_string()))
+        .await?;
+    let deleted: Vec<serde_json::Value> = res.take(0)?;
+    Ok(deleted.len() as u64)
+}
+
+/// A Telegram bot used for downloads. Several can be configured so
+/// download traffic spreads across accounts instead of hammering one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotInfo {
+    pub token: String,
+    pub username: String,
+    pub id: i64,
+}
+
+/// All configured bots; empty when none.
+pub async fn get_bots(db: &surrealdb::Surreal<Conn>) -> Result<Vec<BotInfo>, DbError> {
+    let mut res = db.query("SELECT bots_json FROM setting:bots").await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    match row.get("bots_json").and_then(|v| v.as_str()) {
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| DbError::Shape(format!("bots shape: {e}"))),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Replaces the whole bot pool.
+pub async fn set_bots(
+    db: &surrealdb::Surreal<Conn>,
+    bots: &[BotInfo],
+) -> Result<(), DbError> {
+    let json =
+        serde_json::to_string(bots).map_err(|e| DbError::Shape(format!("bots serialize: {e}")))?;
+    let mut res = db
+        .query("UPSERT setting:bots SET bots_json = $j")
+        .bind(("j", json))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
+/// Drops a single bot from the pool.
+pub async fn remove_bot(db: &surrealdb::Surreal<Conn>, id: i64) -> Result<(), DbError> {
+    let mut bots = get_bots(db).await?;
+    bots.retain(|b| b.id != id);
+    set_bots(db, &bots).await
+}
+
+/// A user-created directory; `parent` is a folder id, "" = root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderRow {
+    pub uid: String,
+    pub name: String,
+    pub parent: String,
+}
+
+pub async fn list_folders(db: &surrealdb::Surreal<Conn>) -> Result<Vec<FolderRow>, DbError> {
+    let mut res = db
+        .query("SELECT uid, name, parent FROM folder ORDER BY name")
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    rows.into_iter()
+        .map(|v| {
+            serde_json::from_value(v)
+                .map_err(|e| DbError::Shape(format!("folder row shape mismatch: {e}")))
+        })
+        .collect()
+}
+
+pub async fn get_folder(
+    db: &surrealdb::Surreal<Conn>,
+    uid: &str,
+) -> Result<Option<FolderRow>, DbError> {
+    let mut res = db
+        .query("SELECT uid, name, parent FROM folder WHERE uid = $uid LIMIT 1")
+        .bind(("uid", uid.to_string()))
+        .await?;
+    let mut rows: Vec<serde_json::Value> = res.take(0)?;
+    match rows.len() {
+        0 => Ok(None),
+        _ => serde_json::from_value(rows.swap_remove(0))
+            .map(Some)
+            .map_err(|e| DbError::Shape(format!("folder row shape mismatch: {e}"))),
+    }
+}
+
+pub async fn create_folder(
+    db: &surrealdb::Surreal<Conn>,
+    uid: &str,
+    name: &str,
+    parent: &str,
+) -> Result<(), DbError> {
+    let _: Option<serde_json::Value> = db
+        .create("folder")
+        .content(serde_json::json!({
+            "uid": uid,
+            "name": name,
+            "parent": parent,
+        }))
+        .await?;
+    Ok(())
+}
+
+/// True when the folder still holds files or subfolders.
+pub async fn folder_is_empty(
+    db: &surrealdb::Surreal<Conn>,
+    uid: &str,
+) -> Result<bool, DbError> {
+    // count() yields a {count: 0} row even for empty sets, so read the
+    // numbers instead of checking for absent rows.
+    let mut res = db
+        .query(
+            "SELECT count() AS n FROM file WHERE folder = $uid GROUP ALL; \
+             SELECT count() AS n FROM folder WHERE parent = $uid GROUP ALL",
+        )
+        .bind(("uid", uid.to_string()))
+        .await?;
+    let files: Vec<serde_json::Value> = res.take(0)?;
+    let subs: Vec<serde_json::Value> = res.take(1)?;
+    let total = |rows: &[serde_json::Value]| {
+        rows.first()
+            .and_then(|r| r.get("n"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
+    Ok(total(&files) + total(&subs) == 0)
+}
+
+pub async fn delete_folder(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u64, DbError> {
+    let mut res = db
+        .query("DELETE FROM folder WHERE uid = $uid RETURN BEFORE")
+        .bind(("uid", uid.to_string()))
+        .await?;
+    let deleted: Vec<serde_json::Value> = res.take(0)?;
+    Ok(deleted.len() as u64)
+}
+
+/// Upload-split threshold in bytes (0 = never split); global setting.
+pub async fn get_split(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
+    let mut res = db.query("SELECT split_bytes FROM setting:upload").await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|r| r.get("split_bytes").cloned())
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0))
+}
+
+pub async fn set_split(db: &surrealdb::Surreal<Conn>, bytes: u64) -> Result<(), DbError> {
+    let mut res = db
+        .query("UPSERT setting:upload SET split_bytes = $b")
+        .bind(("b", bytes as i64))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
+/// One selected storage channel for a user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelSel {
+    /// Chat key used for peer resolution: "me", "@username" or "-100<id>".
+    pub chat: String,
+    pub title: String,
+}
+
+/// Channels are stored on one schemaless row per user; the JSON payload keeps
+/// the shape flexible without schema migrations.
+fn setting_id(user_key: &str) -> String {
+    format!(
+        "setting:storage_{}",
+        user_key.replace([':', '-'], "_")
+    )
+}
+
+/// Channels the user picked as upload targets; empty when none chosen yet.
+pub async fn get_channels(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+) -> Result<Vec<ChannelSel>, DbError> {
+    let mut res = db
+        .query(format!("SELECT chats_json FROM {}", setting_id(user_key)))
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    match row.get("chats_json").and_then(|v| v.as_str()) {
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| DbError::Shape(format!("channels shape: {e}"))),
+        None => Ok(Vec::new()),
+    }
+}
+
+pub async fn set_channels(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+    chats: Vec<ChannelSel>,
+) -> Result<(), DbError> {
+    let json = serde_json::to_string(&chats)
+        .map_err(|e| DbError::Shape(format!("channels serialize: {e}")))?;
+    let mut res = db
+        .query(format!("UPSERT {} SET chats_json = $j", setting_id(user_key)))
+        .bind(("j", json))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn temp_db() -> (surrealdb::Surreal<Conn>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.surrealkv");
+        let db = open(path.to_str().expect("utf8 path"))
+            .await
+            .expect("open test db");
+        (db, dir)
+    }
+
+    fn row(uid: &str, name: &str, created_at: i64) -> FileRow {
+        FileRow {
+            uid: uid.to_string(),
+            name: name.to_string(),
+            mime: "application/octet-stream".to_string(),
+            size: 42,
+            message_id: 7,
+            chat: "me".to_string(),
+            created_at,
+            folder: String::new(),
+            parts: vec![FilePart {
+                message_id: 7,
+                chat: "me".to_string(),
+                size: 42,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn crud_roundtrip() {
+        let (db, _dir) = temp_db().await;
+
+        insert(&db, &row("01A", "hello.txt", 100)).await.unwrap();
+        insert(&db, &row("01B", "world.bin", 200)).await.unwrap();
+
+        let got = get(&db, "01A").await.unwrap().expect("row exists");
+        assert_eq!(got.name, "hello.txt");
+        assert_eq!(got.size, 42);
+
+        assert!(get(&db, "missing").await.unwrap().is_none());
+
+        let all = list(&db, "", "", 100, 0).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].uid, "01B", "newest first");
+
+        let hits = list(&db, "hello", "", 100, 0).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].uid, "01A");
+
+        let paged = list(&db, "", "", 1, 1).await.unwrap();
+        assert_eq!(paged.len(), 1);
+        assert_eq!(paged[0].uid, "01A");
+
+        assert_eq!(delete(&db, "01A").await.unwrap(), 1);
+        assert_eq!(delete(&db, "01A").await.unwrap(), 0);
+        assert!(get(&db, "01A").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn channel_selection_roundtrip() {
+        let (db, _dir) = temp_db().await;
+
+        assert!(get_channels(&db, "12345").await.unwrap().is_empty());
+
+        let sel = vec![
+            ChannelSel { chat: "@mychannel".into(), title: "My Channel".into() },
+            ChannelSel { chat: "-1001234567890".into(), title: "Archive".into() },
+        ];
+        set_channels(&db, "12345", sel.clone()).await.unwrap();
+        let got = get_channels(&db, "12345").await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].chat, "@mychannel");
+
+        // Per-user isolation.
+        assert!(get_channels(&db, "99999").await.unwrap().is_empty());
+
+        set_channels(&db, "12345", vec![]).await.unwrap();
+        assert!(get_channels(&db, "12345").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn split_setting_roundtrip() {
+        let (db, _dir) = temp_db().await;
+        assert_eq!(get_split(&db).await.unwrap(), 0, "default is off");
+
+        set_split(&db, 250 * 1024 * 1024).await.unwrap();
+        assert_eq!(get_split(&db).await.unwrap(), 250 * 1024 * 1024);
+
+        set_split(&db, 0).await.unwrap();
+        assert_eq!(get_split(&db).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn multi_part_row_and_legacy_compat() {
+        let (db, _dir) = temp_db().await;
+
+        // A split file: two parts across two chats.
+        let mut row = row("01S", "big.bin", 300);
+        row.size = 300;
+        row.message_id = 11;
+        row.chat = "-1001".into();
+        row.parts = vec![
+            FilePart { message_id: 11, chat: "-1001".into(), size: 150 },
+            FilePart { message_id: 12, chat: "-1002".into(), size: 150 },
+        ];
+        insert(&db, &row).await.unwrap();
+        let got = get(&db, "01S").await.unwrap().unwrap();
+        assert_eq!(got.parts.len(), 2);
+        assert_eq!(got.parts[1].chat, "-1002");
+        assert_eq!(got.message_id, 11);
+
+        // A pre-split row (no parts_json) reads back as a single part.
+        db.query(
+            "CREATE file SET uid = 'old', name = 'legacy', mime = 'm', size = 5, \
+             message_id = 9, chat = 'me', created_at = 1",
+        )
+        .await
+        .unwrap();
+        let old = get(&db, "old").await.unwrap().unwrap();
+        assert_eq!(old.parts.len(), 1);
+        assert_eq!(old.parts[0].message_id, 9);
+        assert_eq!(old.parts[0].size, 5);
+        // Legacy rows also land in the root folder.
+        assert_eq!(old.folder, "");
+    }
+
+    #[tokio::test]
+    async fn folders_crud_and_file_filtering() {
+        let (db, _dir) = temp_db().await;
+
+        create_folder(&db, "F1", "Docs", "").await.unwrap();
+        create_folder(&db, "F2", "Invoices", "F1").await.unwrap();
+        assert!(get_folder(&db, "F2").await.unwrap().unwrap().parent == "F1");
+
+        let mut r = row("01F", "tax.pdf", 10);
+        r.folder = "F1".into();
+        insert(&db, &r).await.unwrap();
+        insert(&db, &row("01R", "root.txt", 20)).await.unwrap();
+
+        let in_f1 = list(&db, "", "F1", 100, 0).await.unwrap();
+        assert_eq!(in_f1.len(), 1);
+        assert_eq!(in_f1[0].uid, "01F");
+        let in_root = list(&db, "", "", 100, 0).await.unwrap();
+        assert_eq!(in_root.len(), 1);
+        assert_eq!(in_root[0].uid, "01R");
+
+        // Non-empty folders refuse deletion; empty ones go through.
+        assert!(!folder_is_empty(&db, "F1").await.unwrap());
+        assert!(folder_is_empty(&db, "F2").await.unwrap());
+        assert_eq!(delete_folder(&db, "F2").await.unwrap(), 1);
+        assert_eq!(delete_folder(&db, "F2").await.unwrap(), 0);
+
+        let names: Vec<String> = list_folders(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(names, vec!["Docs"]);
+    }
+}

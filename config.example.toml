@@ -1,0 +1,43 @@
+# ii-task — Telegram Drive configuration
+# Copy this file to config.toml and fill in your values.
+
+# HTTP server bind address
+host = "127.0.0.1"
+port = 8080
+
+# Telegram API credentials — create an app at https://my.telegram.org/apps
+api_id = 0
+api_hash = ""
+
+# Secret used to sign session tokens (NOT a login password — logging in is
+# done through Telegram). Use a long random string; anyone who knows it can
+# forge tokens.
+secret = "change-me-to-a-long-random-string"
+
+# Phone numbers allowed to log in via Telegram. Login sends a Telegram code
+# to the number, so possession of that Telegram account is the credential.
+# Formatting differences ("+1 555 010 2030" vs "+15550102030") don't matter.
+# An empty list means nobody can log in.
+allowed_phones = ["+15551234567"]
+
+# How long issued login tokens stay valid, in seconds (default 30 days)
+token_ttl_secs = 2592000
+
+# Embedded SurrealDB storage folder (created automatically)
+db_path = "data/drive.surrealkv"
+
+# Telegram MTProto session file (created automatically after first login)
+session_path = "data/session.db"
+
+# Where uploaded files are stored inside Telegram.
+# "me" = your Saved Messages. Alternatively a channel/group @username
+# that this account can post to (recommended: a private channel).
+storage_chat = "me"
+
+# Maximum size of a single upload. Free Telegram accounts cap at 2 GiB.
+# Accepts plain byte counts ("2147483648") or suffixed forms:
+# "2GiB", "2GB" (= 2_000_000_000), "500MiB", "512MB", "1024KiB", "1024KB"
+max_file_size = "2GiB"
+
+# Folder containing the built web UI (svelte app). Served at "/".
+web_dist = "web/dist"

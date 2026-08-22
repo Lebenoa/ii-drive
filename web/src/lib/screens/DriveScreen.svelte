@@ -1,0 +1,703 @@
+<script lang="ts">
+    import {
+        createFolder,
+        deleteFolder,
+        listFiles,
+        listFolders,
+        uploadFile,
+        type DriveFile,
+        type Folder,
+        type TgUser,
+    } from "$lib/api";
+    import Drive from "../components/TopBar.svelte";
+    import FileTable from "../components/FileTable.svelte";
+    import Modal from "../components/Modal.svelte";
+    import { closeAttrs, openAttrs, openDialog } from "$lib/invoker";
+
+    let { user, onLogout }: { user: TgUser | null; onLogout: () => void } =
+        $props();
+
+    let folders = $state<Folder[]>([]);
+    let current = $state(""); // folder uid, '' = root
+    let q = $state("");
+    let debouncedQ = $state("");
+    let files = $state<DriveFile[]>([]);
+    let loading = $state(false);
+    let errorMsg = $state("");
+    let sidebarError = $state("");
+    let creating = $state(false);
+    let deletingFolder = $state("");
+    let reloadTick = $state(0);
+    let seq = 0;
+
+    // New-folder modal state.
+    const NEW_FOLDER_DIALOG = "dlg-new-folder";
+    let newName = $state("");
+
+    // Delete-folder modal state.
+    const DEL_FOLDER_DIALOG = "dlg-del-folder";
+    let pendingFolder = $state<Folder | null>(null);
+
+    // Upload queue (lives here now that the file display is the drop zone).
+    type QueueItem = {
+        key: number;
+        name: string;
+        progress: number;
+        state: "pending" | "uploading" | "done" | "error";
+        error: string;
+    };
+    let queue = $state<QueueItem[]>([]);
+    let dragging = $state(false);
+    let input = $state<HTMLInputElement | null>(null);
+    const filesByKey = new Map<number, File>();
+    let nextKey = 1;
+    let pumping = false;
+
+    // Folder tree, flattened depth-first with a depth per entry for indentation.
+    let tree = $derived.by(() => {
+        const byParent = new Map<string, Folder[]>();
+        for (const f of folders) {
+            const list = byParent.get(f.parent) ?? [];
+            list.push(f);
+            byParent.set(f.parent, list);
+        }
+        const out: { node: Folder; depth: number }[] = [];
+        const walk = (parent: string, depth: number): void => {
+            for (const f of byParent.get(parent) ?? []) {
+                out.push({ node: f, depth });
+                walk(f.uid, depth + 1);
+            }
+        };
+        walk("", 0);
+        return out;
+    });
+
+    function folderName(uid: string): string {
+        return uid === ""
+            ? "All files"
+            : (folders.find((f) => f.uid === uid)?.name ?? "");
+    }
+
+    // debounce the search box (300ms) into the value actually queried
+    $effect(() => {
+        const value = q;
+        const t = setTimeout(() => (debouncedQ = value), 300);
+        return () => clearTimeout(t);
+    });
+
+    $effect(() => {
+        const query = debouncedQ;
+        const folder = current;
+        void reloadTick;
+        const mySeq = ++seq;
+        loading = true;
+        listFiles(query, folder)
+            .then((res) => {
+                if (mySeq !== seq) return;
+                files = res.files;
+                errorMsg = "";
+            })
+            .catch((err: unknown) => {
+                if (mySeq !== seq) return;
+                errorMsg = err instanceof Error ? err.message : String(err);
+            })
+            .finally(() => {
+                if (mySeq === seq) loading = false;
+            });
+    });
+
+    async function refreshFolders(): Promise<void> {
+        try {
+            folders = await listFolders();
+            sidebarError = "";
+        } catch (err) {
+            sidebarError = err instanceof Error ? err.message : String(err);
+        }
+    }
+
+    $effect(() => {
+        void refreshFolders();
+    });
+
+    async function addFolder(name: string): Promise<void> {
+        if (creating) return;
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        creating = true;
+        try {
+            await createFolder(trimmed, current);
+            await refreshFolders();
+        } catch (err) {
+            sidebarError = err instanceof Error ? err.message : String(err);
+        } finally {
+            creating = false;
+        }
+    }
+
+    async function dropFolder(uid: string): Promise<void> {
+        if (deletingFolder) return;
+        deletingFolder = uid;
+        try {
+            await deleteFolder(uid);
+            if (current === uid) current = "";
+            await refreshFolders();
+        } catch (err) {
+            sidebarError = err instanceof Error ? err.message : String(err);
+        } finally {
+            deletingFolder = "";
+        }
+    }
+
+    function enqueue(list: FileList | File[]): void {
+        for (const file of Array.from(list)) {
+            const key = nextKey++;
+            filesByKey.set(key, file);
+            queue.push({
+                key,
+                name: file.name,
+                progress: 0,
+                state: "pending",
+                error: "",
+            });
+        }
+        void pump();
+    }
+
+    async function pump(): Promise<void> {
+        if (pumping) return;
+        pumping = true;
+        try {
+            while (true) {
+                const item = queue.find((i) => i.state === "pending");
+                if (!item) break;
+                const file = filesByKey.get(item.key);
+                item.state = "uploading";
+                if (!file) {
+                    item.state = "error";
+                    item.error = "File handle lost";
+                    continue;
+                }
+                try {
+                    await uploadFile(
+                        file,
+                        (pct) => {
+                            item.progress = pct;
+                        },
+                        current,
+                    );
+                    item.state = "done";
+                    item.progress = 100;
+                    reloadTick++;
+                } catch (err) {
+                    item.state = "error";
+                    item.error =
+                        err instanceof Error ? err.message : String(err);
+                }
+            }
+        } finally {
+            pumping = false;
+        }
+    }
+
+    function clearFinished(): void {
+        for (const item of queue) filesByKey.delete(item.key);
+        queue = queue.filter(
+            (i) => i.state === "uploading" || i.state === "pending",
+        );
+    }
+
+    function onDrop(e: DragEvent): void {
+        e.preventDefault();
+        dragging = false;
+        if (e.dataTransfer && e.dataTransfer.files.length > 0)
+            enqueue(e.dataTransfer.files);
+    }
+
+    function onDragOver(e: DragEvent): void {
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+        dragging = true;
+    }
+
+    function pick(e: Event): void {
+        const el = e.currentTarget as HTMLInputElement;
+        if (el.files && el.files.length > 0) enqueue(el.files);
+        el.value = "";
+    }
+</script>
+
+<Drive {user} {onLogout}>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="side-head">
+                <span class="side-title">Folders</span>
+                <button
+                    class="icon-btn"
+                    type="button"
+                    title="New folder in current location"
+                    disabled={creating}
+                    {...openAttrs(NEW_FOLDER_DIALOG)}
+                    onclick={() => {
+                        newName = "";
+                        if (!("commandFor" in HTMLButtonElement.prototype))
+                            openDialog(NEW_FOLDER_DIALOG);
+                    }}
+                >
+                    +
+                </button>
+            </div>
+            <nav class="folder-list">
+                <button
+                    class="folder-item root"
+                    class:active={current === ""}
+                    type="button"
+                    onclick={() => (current = "")}
+                >
+                    <span class="f-ico">📁</span><span class="f-name"
+                        >All files</span
+                    >
+                </button>
+                {#each tree as { node, depth } (node.uid)}
+                    <button
+                        class="folder-item"
+                        class:active={current === node.uid}
+                        class:disabled-current={deletingFolder === node.uid}
+                        style={`padding-left:${12 + depth * 16}px`}
+                        type="button"
+                        onclick={() => (current = node.uid)}
+                    >
+                        <span class="f-ico">📁</span><span
+                            class="f-name"
+                            title={node.name}>{node.name}</span
+                        >
+                        <span
+                            class="f-del"
+                            role="button"
+                            tabindex="-1"
+                            title={deletingFolder === node.uid
+                                ? "Deleting…"
+                                : "Delete folder"}
+                            onclick={(e) => {
+                                e.stopPropagation();
+                                pendingFolder = node;
+                                if (
+                                    !(
+                                        "commandFor" in
+                                        HTMLButtonElement.prototype
+                                    )
+                                ) {
+                                    openDialog(DEL_FOLDER_DIALOG);
+                                }
+                            }}
+                            onkeydown={(e) => e.stopPropagation()}
+                        >
+                            {deletingFolder === node.uid ? "…" : "✕"}
+                        </span>
+                    </button>
+                {/each}
+            </nav>
+            {#if sidebarError}<p class="error-text side-error">
+                    {sidebarError}
+                </p>{/if}
+        </aside>
+
+        <section
+            class="file-area"
+            class:dragging
+            role="region"
+            aria-label="Files — drop here to upload into the current folder"
+            ondragover={onDragOver}
+            ondragleave={() => (dragging = false)}
+            ondrop={onDrop}
+        >
+            <div class="area-head">
+                <h2 class="area-title">{folderName(current)}</h2>
+                <div class="search-row">
+                    <input
+                        class="field search"
+                        type="search"
+                        placeholder="Search in this folder…"
+                        bind:value={q}
+                        aria-label="Search files"
+                    />
+                    {#if loading}<div
+                            class="spinner small"
+                            aria-hidden="true"
+                        ></div>{/if}
+                    <button
+                        class="btn"
+                        type="button"
+                        onclick={() => input?.click()}>Upload</button
+                    >
+                </div>
+            </div>
+            <input
+                bind:this={input}
+                class="hidden-input"
+                type="file"
+                multiple
+                onchange={pick}
+            />
+
+            {#if queue.length > 0}
+                <ul class="queue">
+                    {#each queue as item (item.key)}
+                        <li class="q-item" class:error={item.state === "error"}>
+                            <div class="q-top">
+                                <span class="q-name" title={item.name}
+                                    >{item.name}</span
+                                >
+                                <span
+                                    class="q-state"
+                                    class:ok={item.state === "done"}
+                                >
+                                    {#if item.state === "pending"}
+                                        queued
+                                    {:else if item.state === "uploading"}
+                                        {item.progress}%
+                                    {:else if item.state === "done"}
+                                        ✓
+                                    {:else}
+                                        ✗
+                                    {/if}
+                                </span>
+                            </div>
+                            <div class="bar">
+                                <div
+                                    class="fill"
+                                    class:err={item.state === "error"}
+                                    class:done={item.state === "done"}
+                                    style={`width:${item.progress}%`}
+                                ></div>
+                            </div>
+                            {#if item.state === "error"}<p class="error-text">
+                                    {item.error}
+                                </p>{/if}
+                        </li>
+                    {/each}
+                    {#if queue.every((i) => i.state === "done" || i.state === "error")}
+                        <li>
+                            <button
+                                class="btn clear-btn"
+                                type="button"
+                                onclick={clearFinished}
+                            >
+                                Clear finished
+                            </button>
+                        </li>
+                    {/if}
+                </ul>
+            {/if}
+
+            {#if errorMsg}
+                <p class="error-text">{errorMsg}</p>
+            {:else}
+                <FileTable {files} onDeleted={() => reloadTick++} />
+            {/if}
+
+            <div class="drop-hint muted" aria-hidden="true">
+                Drop files to upload here
+            </div>
+        </section>
+    </div>
+
+    <Modal
+        id={NEW_FOLDER_DIALOG}
+        title="New folder"
+        onclose={(rv) => {
+            if (rv === "create") void addFolder(newName);
+        }}
+    >
+        <p class="muted modal-hint">
+            Create a folder inside "{folderName(current)}".
+        </p>
+        <input
+            class="field"
+            type="text"
+            placeholder="Folder name"
+            maxlength="128"
+            bind:value={newName}
+            autofocus
+        />
+        {#snippet actions()}
+            <button class="btn" type="submit" {...closeAttrs(NEW_FOLDER_DIALOG)}>
+                Cancel
+            </button>
+            <button
+                class="btn btn-primary"
+                type="submit"
+                value="create"
+                disabled={!newName.trim()}
+            >
+                Create
+            </button>
+        {/snippet}
+    </Modal>
+
+    <Modal
+        id={DEL_FOLDER_DIALOG}
+        title="Delete folder"
+        onclose={(rv) => {
+            if (rv === "delete" && pendingFolder)
+                void dropFolder(pendingFolder.uid);
+            pendingFolder = null;
+        }}
+    >
+        {#if pendingFolder}
+            <p>
+                Delete <strong>{pendingFolder.name}</strong>? The folder must be
+                empty — files and subfolders inside it are kept and must be
+                removed first.
+            </p>
+        {/if}
+        {#snippet actions()}
+            <button class="btn" type="submit" {...closeAttrs(DEL_FOLDER_DIALOG)}>
+                Cancel
+            </button>
+            <button class="btn btn-danger" type="submit" value="delete"
+                >Delete</button
+            >
+        {/snippet}
+    </Modal>
+</Drive>
+
+<style>
+    .layout {
+        display: flex;
+        gap: 20px;
+        align-items: flex-start;
+    }
+
+    .sidebar {
+        width: 230px;
+        flex-shrink: 0;
+        position: sticky;
+        top: 76px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+        padding: 10px 8px;
+    }
+
+    .side-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 2px 6px 8px;
+    }
+
+    .side-title {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: var(--muted);
+    }
+
+    .folder-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .folder-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        border: none;
+        background: none;
+        color: var(--text);
+        font: inherit;
+        font-size: 13.5px;
+        text-align: left;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+
+    .folder-item:hover {
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .folder-item.active {
+        background: rgba(91, 157, 255, 0.14);
+        font-weight: 600;
+    }
+
+    .f-ico {
+        flex-shrink: 0;
+    }
+
+    .f-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        flex: 1;
+    }
+
+    .f-del {
+        color: var(--muted);
+        padding: 0 4px;
+        border-radius: 4px;
+        flex-shrink: 0;
+    }
+
+    .f-del:hover {
+        color: var(--danger);
+        background: rgba(255, 255, 255, 0.06);
+    }
+
+    .side-error {
+        font-size: 12px;
+        margin: 8px 6px 0;
+    }
+
+    .file-area {
+        flex: 1;
+        min-width: 0;
+        border: 2px dashed transparent;
+        border-radius: var(--radius);
+        padding: 4px;
+        transition:
+            border-color 0.15s ease,
+            background 0.15s ease;
+    }
+
+    .file-area.dragging {
+        border-color: var(--accent);
+        background: rgba(91, 157, 255, 0.06);
+    }
+
+    .area-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+    }
+
+    .area-title {
+        margin: 0;
+        font-size: 17px;
+    }
+
+    .search-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+
+    .search {
+        width: min(300px, 40vw);
+    }
+
+    .spinner.small {
+        width: 16px;
+        height: 16px;
+        border-width: 2px;
+    }
+
+    .hidden-input {
+        display: none;
+    }
+
+    .queue {
+        list-style: none;
+        margin: 0 0 14px;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .q-item {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 12px;
+    }
+
+    .q-item.error {
+        border-color: #5b2730;
+    }
+
+    .q-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 13px;
+        margin-bottom: 6px;
+    }
+
+    .q-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .q-state {
+        color: var(--muted);
+        flex-shrink: 0;
+    }
+
+    .q-state.ok {
+        color: var(--ok);
+    }
+
+    .bar {
+        height: 4px;
+        border-radius: 2px;
+        background: #10141c;
+        overflow: hidden;
+    }
+
+    .fill {
+        height: 100%;
+        background: var(--accent);
+        border-radius: 2px;
+        transition: width 0.15s ease;
+    }
+
+    .fill.done {
+        background: var(--ok);
+    }
+
+    .fill.err {
+        background: var(--danger);
+    }
+
+    .clear-btn {
+        font-size: 13px;
+        padding: 5px 12px;
+    }
+
+    .drop-hint {
+        text-align: center;
+        font-size: 12px;
+        padding: 10px 0 2px;
+        opacity: 0.7;
+    }
+
+    .file-area.dragging .drop-hint {
+        opacity: 1;
+        color: var(--accent);
+    }
+
+    @media (max-width: 720px) {
+        .layout {
+            flex-direction: column;
+        }
+
+        .sidebar {
+            width: 100%;
+            position: static;
+        }
+    }
+
+    .modal-hint {
+        margin: 0 0 10px;
+        font-size: 12.5px;
+    }
+</style>
