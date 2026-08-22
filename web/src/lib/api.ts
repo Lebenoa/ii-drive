@@ -185,6 +185,24 @@ export async function saveChannels(channels: ChannelInfo[]): Promise<void> {
   await request('/api/channels', { method: 'POST', body: { channels } });
 }
 
+export interface RouteRule {
+  /** mime prefix, e.g. "image/" or "application/pdf" */
+  mime: string;
+  /** target folder uid */
+  folder: string;
+}
+
+/** GET /api/rules — this user's auto-upload routing rules (ordered) */
+export async function getRules(): Promise<RouteRule[]> {
+  const res = await request<{ rules: RouteRule[] }>('/api/rules');
+  return res.rules;
+}
+
+/** PUT /api/rules */
+export async function saveRules(rules: RouteRule[]): Promise<void> {
+  await request<{ ok: true }>('/api/rules', { method: 'PUT', body: { rules } });
+}
+
 export interface Settings {
   /** files larger than this many MiB upload as parallel parts; 0 = off */
   split_mb: number;

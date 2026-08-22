@@ -445,6 +445,25 @@ pub async fn upload_file(
         )));
     }
     let (name, mime) = meta_rx.borrow().clone().unwrap_or_default();
+    // Auto-upload routing: when no folder was chosen, the first per-user
+    // rule whose mime prefix matches claims the file. Stale rule folders
+    // (deleted since) fall through to the root.
+    let mut folder = folder;
+    if folder.is_empty()
+        && !mime.is_empty()
+        && let Some(uid) = state.tg.current_user_id().await
+            && let Ok(rules) = crate::db::get_rules(&state.db, &uid.to_string()).await
+            && let Some(rule) = rules
+                .iter()
+                .find(|r| mime.starts_with(r.mime.trim()))
+            && crate::db::get_folder(&state.db, &rule.folder)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            folder = rule.folder.clone();
+    }
     // Telegram makes no stripped thumbnail for audio; pull embedded cover
     // art (ID3 APIC / FLAC PICTURE) from the buffered stream head instead.
     if thumb_b64.is_none()

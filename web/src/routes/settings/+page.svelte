@@ -3,12 +3,17 @@
   import {
     addBot,
     getBots,
+    getRules,
     getSettings,
     getToken,
+    listFolders,
     removeBot,
+    saveRules,
     saveSettings,
     type BotAddResult,
     type BotEntry,
+    type Folder,
+    type RouteRule,
   } from '$lib/api';
   import Channels from '$lib/components/ChannelPicker.svelte';
 
@@ -25,6 +30,49 @@
   let splitSaving = $state(false);
   let splitMsg = $state('');
   let splitError = $state('');
+
+  // Auto-upload routing rules (mime prefix -> folder), ordered.
+  let rules = $state<RouteRule[]>([]);
+  let folders = $state<Folder[]>([]);
+  let rulesLoaded = $state(false);
+  let rulesSaving = $state(false);
+  let rulesMsg = $state('');
+  let rulesError = $state('');
+
+  const MIME_PRESETS = ['image/', 'video/', 'audio/', 'application/pdf', 'text/'];
+
+  function addRule(): void {
+    rules = [...rules, { mime: 'image/', folder: folders[0]?.uid ?? '' }];
+    rulesMsg = '';
+    rulesError = '';
+  }
+
+  function removeRule(i: number): void {
+    rules = rules.filter((_, idx) => idx !== i);
+  }
+
+  function folderName(uid: string): string {
+    return folders.find((f) => f.uid === uid)?.name ?? uid;
+  }
+
+  async function saveRouting(): Promise<void> {
+    if (rulesSaving) return;
+    rulesSaving = true;
+    rulesMsg = '';
+    rulesError = '';
+    try {
+      const cleaned = rules
+        .map((r) => ({ mime: r.mime.trim(), folder: r.folder }))
+        .filter((r) => r.mime !== '' && r.folder !== '');
+      await saveRules(cleaned);
+      rules = cleaned;
+      rulesMsg = 'Saved.';
+    } catch (err) {
+      rulesError = err instanceof Error ? err.message : String(err);
+    } finally {
+      rulesSaving = false;
+    }
+  }
 
   const SPLIT_PRESETS = [0, 250, 500, 1024];
 
@@ -43,6 +91,8 @@
         const s = await getSettings();
         splitMb = s.split_mb;
         splitLoaded = true;
+        [rules, folders] = await Promise.all([getRules(), listFolders()]);
+        rulesLoaded = true;
       } catch (err) {
         goto('/login');
         return;
@@ -175,6 +225,67 @@
           </p>
           {#if splitMsg}<p class="ok-text">{splitMsg}</p>{/if}
           {#if splitError}<p class="error-text">{splitError}</p>{/if}
+        {:else}
+          <p class="muted">Loading…</p>
+        {/if}
+      </section>
+
+      <section class="card section">
+        <h2>Auto-upload routing</h2>
+        <p class="muted hint">
+          Files uploaded to the root folder are sorted automatically: the
+          first rule whose type prefix matches claims the file. Explicit
+          folder picks in the drive always win over rules.
+        </p>
+        {#if rulesLoaded}
+          {#if rules.length > 0}
+            <ul class="rule-list">
+              {#each rules as rule, i (i)}
+                <li class="rule-row">
+                  <input
+                    class="field rule-mime"
+                    list="mime-presets"
+                    placeholder="image/"
+                    bind:value={rule.mime}
+                  />
+                  <span class="muted">→</span>
+                  <select class="field rule-folder" bind:value={rule.folder}>
+                    {#each folders as f (f.uid)}
+                      <option value={f.uid}>{f.name}</option>
+                    {/each}
+                  </select>
+                  <button class="icon-btn danger" type="button" title="Remove rule" onclick={() => removeRule(i)}>
+                    ✕
+                  </button>
+                </li>
+              {/each}
+            </ul>
+            <datalist id="mime-presets">
+              {#each MIME_PRESETS as p (p)}
+                <option value={p}></option>
+              {/each}
+            </datalist>
+          {:else}
+            <p class="muted">No rules — uploads to the root stay in the root.</p>
+          {/if}
+          <div class="rule-actions">
+            <button class="btn ghost" type="button" onclick={addRule} disabled={folders.length === 0}>
+              + Add rule
+            </button>
+            <button
+              class="btn btn-primary"
+              type="button"
+              disabled={rulesSaving || folders.length === 0}
+              onclick={() => void saveRouting()}
+            >
+              {rulesSaving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+          {#if folders.length === 0}
+            <p class="muted hint">Create a folder in the drive first.</p>
+          {/if}
+          {#if rulesMsg}<p class="ok-text">{rulesMsg}</p>{/if}
+          {#if rulesError}<p class="error-text">{rulesError}</p>{/if}
         {:else}
           <p class="muted">Loading…</p>
         {/if}
@@ -360,6 +471,36 @@
   .preset.active {
     border-color: var(--accent, inherit);
     font-weight: 600;
+  }
+
+  .rule-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .rule-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .rule-mime {
+    flex: 1;
+    margin: 0;
+  }
+
+  .rule-folder {
+    flex: 1;
+    margin: 0;
+  }
+
+  .rule-actions {
+    display: flex;
+    gap: 8px;
   }
 
   .ok-text {

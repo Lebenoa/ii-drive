@@ -6,6 +6,6 @@ pub use files::{
     file_link, file_thumb, move_file, raw_file, set_visibility, upload_file,
 };
 pub use session::{
-    add_bot, auth_code, auth_password, auth_phone, create_channel, get_settings, list_bots,
-    list_channels, me, remove_bot, save_settings, select_channels,
+    add_bot, auth_code, auth_password, auth_phone, create_channel, get_rules, get_settings, list_bots,
+    list_channels, me, remove_bot, save_rules, save_settings, select_channels,
 };

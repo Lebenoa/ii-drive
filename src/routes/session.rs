@@ -264,6 +264,49 @@ pub async fn me(State(state): State<AppState>) -> ApiResult<Json<serde_json::Val
     })))
 }
 
+#[derive(Deserialize)]
+pub struct RulesBody {
+    #[serde(default)]
+    pub rules: Vec<crate::db::RouteRule>,
+}
+
+/// GET /api/rules — this user's auto-upload routing rules (ordered).
+pub async fn get_rules(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let Some(uid) = state.tg.current_user_id().await else {
+        return Err(ApiError::bad_request("Telegram is not connected"));
+    };
+    let rules = crate::db::get_rules(&state.db, &uid.to_string()).await?;
+    Ok(Json(json!({ "rules": rules })))
+}
+
+/// PUT /api/rules — first-match-wins prefix rules; every target folder
+/// must exist, so stale folders cannot silently eat uploads.
+pub async fn save_rules(
+    State(state): State<AppState>,
+    Json(body): Json<RulesBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(uid) = state.tg.current_user_id().await else {
+        return Err(ApiError::bad_request("Telegram is not connected"));
+    };
+    if body.rules.len() > 32 {
+        return Err(ApiError::bad_request("at most 32 routing rules"));
+    }
+    for r in &body.rules {
+        let mime = r.mime.trim();
+        if mime.is_empty() || mime.len() > 64 {
+            return Err(ApiError::bad_request("rule mime must be 1-64 characters"));
+        }
+        if crate::db::get_folder(&state.db, &r.folder).await?.is_none() {
+            return Err(ApiError::bad_request(format!(
+                "folder `{}` not found",
+                r.folder
+            )));
+        }
+    }
+    crate::db::set_rules(&state.db, &uid.to_string(), &body.rules).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 const MB: u64 = 1024 * 1024;
 
 /// GET /api/settings — upload-split threshold in MiB (0 = never split).

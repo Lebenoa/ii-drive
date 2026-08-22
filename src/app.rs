@@ -38,6 +38,10 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::routes::get_settings).put(crate::routes::save_settings),
         )
         .route(
+            "/api/rules",
+            get(crate::routes::get_rules).put(crate::routes::save_rules),
+        )
+        .route(
             "/api/files",
             get(crate::routes::list_files).post(crate::routes::upload_file),
         )

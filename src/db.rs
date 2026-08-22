@@ -510,6 +510,49 @@ pub async fn counts(db: &surrealdb::Surreal<Conn>) -> Result<(u64, u64), DbError
     Ok((n(&files), n(&folders)))
 }
 
+/// One auto-upload routing rule: files whose mime starts with `mime` land
+/// in `folder`. Order matters — first match wins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteRule {
+    pub mime: String,
+    pub folder: String,
+}
+
+/// Per-user routing rules, ordered; empty when none configured.
+pub async fn get_rules(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+) -> Result<Vec<RouteRule>, DbError> {
+    let id = format!("setting:rules_{}", user_key.replace([':', '-'], "_"));
+    let mut res = db.query(format!("SELECT rules_json FROM {id}")).await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    match row.get("rules_json").and_then(|v| v.as_str()) {
+        Some(s) => {
+            serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}")))
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+pub async fn set_rules(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+    rules: &[RouteRule],
+) -> Result<(), DbError> {
+    let json = serde_json::to_string(rules)
+        .map_err(|e| DbError::Shape(format!("rules serialize: {e}")))?;
+    let id = format!("setting:rules_{}", user_key.replace([':', '-'], "_"));
+    let mut res = db
+        .query(format!("UPSERT {id} SET rules_json = $j"))
+        .bind(("j", json))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
 /// Upload-split threshold in bytes (0 = never split); global setting.
 pub async fn get_split(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
     let mut res = db.query("SELECT split_bytes FROM setting:upload").await?;
@@ -665,6 +708,33 @@ mod tests {
 
         set_channels(&db, "12345", vec![]).await.unwrap();
         assert!(get_channels(&db, "12345").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn routing_rules_roundtrip() {
+        let (db, _dir) = temp_db().await;
+        assert!(get_rules(&db, "111").await.unwrap().is_empty());
+
+        set_rules(
+            &db,
+            "111",
+            &[
+                RouteRule { mime: "image/".into(), folder: "F1".into() },
+                RouteRule { mime: "application/pdf".into(), folder: "F2".into() },
+            ],
+        )
+        .await
+        .unwrap();
+        let got = get_rules(&db, "111").await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].mime, "image/");
+        assert_eq!(got[1].folder, "F2");
+
+        // Per-user isolation.
+        assert!(get_rules(&db, "222").await.unwrap().is_empty());
+
+        set_rules(&db, "111", &[]).await.unwrap();
+        assert!(get_rules(&db, "111").await.unwrap().is_empty());
     }
 
     #[tokio::test]
