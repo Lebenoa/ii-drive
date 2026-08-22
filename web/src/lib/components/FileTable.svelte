@@ -129,8 +129,16 @@
   const PREVIEW_DIALOG = 'dlg-preview';
   let previewFile = $state<DriveFile | null>(null);
 
+  function previewable(file: DriveFile): boolean {
+    return (
+      file.mime.startsWith('image/') ||
+      file.mime.startsWith('video/') ||
+      file.mime.startsWith('audio/')
+    );
+  }
+
   function openPreview(file: DriveFile): void {
-    if (!file.mime.startsWith('image/') && !file.mime.startsWith('video/')) return;
+    if (!previewable(file)) return;
     previewFile = file;
     if (!('showModal' in HTMLDialogElement.prototype)) openDialog(PREVIEW_DIALOG);
   }
@@ -263,7 +271,7 @@
         </label>
         <div
           class="g-thumb"
-          class:previewable={file.mime.startsWith('image/') || file.mime.startsWith('video/')}
+          class:previewable={previewable(file)}
           role="button"
           tabindex="0"
           {...openAttrs(PREVIEW_DIALOG)}
@@ -395,7 +403,7 @@
           <td class="c-name" title={file.name}>
               <button
                 class="name-btn"
-                class:previewable={file.mime.startsWith('image/') || file.mime.startsWith('video/')}
+                class:previewable={previewable(file)}
                 type="button"
                 {...openAttrs(PREVIEW_DIALOG)}
                 onclick={() => openPreview(file)}
@@ -463,6 +471,14 @@
     <div class="pv-media">
       {#if previewFile.mime.startsWith('video/')}
         <video controls autoplay src={rawUrl(previewFile.id, false, previewFile.public)}></video>
+      {:else if previewFile.mime.startsWith('audio/')}
+        <div class="pv-audio">
+          {#if previewFile.has_thumb && !brokenThumbs.has(previewFile.id)}
+            <img src={thumbUrl(previewFile.id, previewFile.public)} alt="" />
+          {/if}
+          <span class="pv-audio-name" title={previewFile.name}>{previewFile.name}</span>
+          <audio controls autoplay src={rawUrl(previewFile.id, false, previewFile.public)}></audio>
+        </div>
       {:else}
         <img src={rawUrl(previewFile.id, false, previewFile.public)} alt={previewFile.name} />
       {/if}
@@ -552,6 +568,35 @@
     max-height: 100%;
     object-fit: contain;
     border-radius: 6px;
+  }
+
+  .pv-audio {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    max-width: min(480px, 90vw);
+  }
+
+  .pv-audio img {
+    width: min(280px, 50dvh);
+    height: min(280px, 50dvh);
+    object-fit: cover;
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .pv-audio-name {
+    font-size: 14px;
+    font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pv-audio audio {
+    width: 100%;
   }
 
   .pv-bar {
