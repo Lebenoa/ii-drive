@@ -172,7 +172,7 @@
           Uploads are spread across the selected channels. You can also create a
           brand-new channel here.
         </p>
-        <Channels onDone={null} redirectOnSave={false} />
+        <Channels onDone={null} redirectOnSave={false} embedded />
       </section>
 
       <section class="card section">

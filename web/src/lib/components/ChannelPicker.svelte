@@ -4,7 +4,8 @@
   let {
     onDone = null,
     redirectOnSave = true,
-  }: { onDone?: (() => void) | null; redirectOnSave?: boolean } = $props();
+    embedded = false,
+  }: { onDone?: (() => void) | null; redirectOnSave?: boolean; embedded?: boolean } = $props();
 
   let available = $state<ChannelInfo[]>([]);
   let selectedChats = $state<string[]>([]);
@@ -77,11 +78,13 @@
   }
 </script>
 
-<div class="center-screen">
-  <div class="card picker-card">
-    <h1 class="brand">ii-drive</h1>
-    <p class="muted tagline">Choose where your files are stored</p>
-    <p class="muted hint">Pick one or more channels. Uploads are spread across them.</p>
+<div class={embedded ? 'embed' : 'center-screen'}>
+  <div class="card picker-card" class:bare={embedded}>
+    {#if !embedded}
+      <h1 class="brand">ii-drive</h1>
+      <p class="muted tagline">Choose where your files are stored</p>
+      <p class="muted hint">Pick one or more channels. Uploads are spread across them.</p>
+    {/if}
 
     {#if loading}
       <p class="muted">Loading your chats…</p>
@@ -144,6 +147,20 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+  }
+
+  /* Embedded in settings: the section card already provides chrome —
+     drop ours and fill the width. */
+  .picker-card.bare {
+    width: 100%;
+    border: none;
+    background: none;
+    padding: 0;
+    gap: 8px;
+  }
+
+  .picker-card.bare .list {
+    max-height: 240px;
   }
 
   .brand {
