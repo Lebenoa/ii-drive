@@ -26,11 +26,57 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     let _ = res.take::<surrealdb::types::Value>(1usize)?;
-    let dropped = purge_legacy_rows(&db).await?;
-    if dropped > 0 {
-        tracing::warn!("dropped {dropped} pre-folder file rows (messages stay in Telegram)");
-    }
+    migrate(&db).await?;
     Ok(db)
+}
+
+/// Latest schema version; a database without a recorded version is v1.
+const SCHEMA_LATEST: u64 = 2;
+
+async fn schema_version(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
+    let mut res = db.query("SELECT version FROM setting:schema").await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.get("version"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1))
+}
+
+async fn set_schema_version(db: &surrealdb::Surreal<Conn>, v: u64) -> Result<(), DbError> {
+    let mut res = db
+        .query("UPSERT setting:schema SET version = $v")
+        .bind(("v", v as i64))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
+/// Runs every migration above the stored version, in order, recording each
+/// one as it lands. Append a new `v == N` arm (and bump SCHEMA_LATEST)
+/// to add a migration; never renumber or edit shipped steps.
+pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
+    let mut v = schema_version(db).await?;
+    while v < SCHEMA_LATEST {
+        v += 1;
+        match v {
+            2 => {
+                // folder becomes non-optional: drop rows from before the
+                // feature. Their Telegram messages are NOT deleted.
+                let dropped = purge_legacy_rows(db).await?;
+                if dropped > 0 {
+                    tracing::warn!(
+                        "migration v2: dropped {dropped} pre-folder file rows \
+                         (messages stay in Telegram)"
+                    );
+                }
+            }
+            other => return Err(DbError::Shape(format!("no migration to version {other}"))),
+        }
+        set_schema_version(db, v).await?;
+        tracing::info!("database migrated to schema v{v}");
+    }
+    Ok(v)
 }
 
 /// Deletes rows written before the folder feature existed (no `folder`
@@ -602,6 +648,29 @@ mod tests {
         assert_eq!(root.len(), 1);
         assert_eq!(root[0].uid, "01N");
         assert!(get(&db, "leg").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn migrations_run_once_and_record_version() {
+        let (db, _dir) = temp_db().await;
+        // temp_db opened (and migrated) at the latest version.
+        assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
+
+        // Rewind to v1 with a legacy row, as an old database would look.
+        set_schema_version(&db, 1).await.unwrap();
+        db.query(
+            "CREATE file SET uid = 'leg', name = 'legacy.bin', mime = 'm', size = 9, \
+             message_id = 3, chat = 'me', created_at = 1",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
+        assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
+        assert!(get(&db, "leg").await.unwrap().is_none(), "v2 purged it");
+
+        // A second run is a no-op.
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
     }
 }
 
