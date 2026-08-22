@@ -447,20 +447,24 @@ pub async fn upload_file(
         return Err(e.into());
     }
 
-    // Videos get a first-frame thumbnail in the background (ffmpeg).
-    if row.thumb.is_none() && row.mime.starts_with("video/") {
+    // Videos get a first-frame thumbnail and non-JPEG images a converted
+    // one in the background (ffmpeg); JPEGs usually arrive with a stripped
+    // Telegram thumb already stored above.
+    if row.thumb.is_none()
+        && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
+    {
         let st = state.clone();
         let uid = row.uid.clone();
         let part0 = row.parts[0].clone();
         tokio::spawn(async move {
-            extract_video_thumb(&st, &uid, part0).await;
+            extract_media_thumb(&st, &uid, part0).await;
         });
     }
 
     Ok(Json(serde_json::json!({ "file": FileDto::from(row) })))
 }
 
-/// Cap on how much of a video we download for first-frame extraction.
+/// Cap on how much of a file we download for thumbnail extraction.
 /// MP4s with the index at the end (no faststart) simply fail past this.
 const VIDEO_PEEK_CAP: u64 = 128 * 1024 * 1024;
 
@@ -478,16 +482,17 @@ fn ffmpeg_available() -> bool {
     })
 }
 
-/// Downloads the first part of a freshly uploaded video (bounded), decodes
-/// its first frame with ffmpeg, and stores the JPEG as the row thumbnail.
-/// Runs in the background; failures are logged and simply leave no thumb.
-pub async fn extract_video_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
+/// Downloads the first part of a freshly uploaded video or image (bounded),
+/// extracts a 320px WebP thumbnail with ffmpeg (first frame for video,
+/// downscale for images), and stores it on the row. Runs in the background;
+/// failures are logged and simply leave no thumb.
+pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
     if !ffmpeg_available() {
         tracing::info!("ffmpeg not found — skipping video thumbnail for {uid}");
         return;
     }
     if part0.size as u64 > VIDEO_PEEK_CAP {
-        tracing::info!("video {uid} too large for thumbnail extraction, skipping");
+        tracing::info!("file {uid} too large for thumbnail extraction, skipping");
         return;
     }
 
@@ -533,7 +538,23 @@ pub async fn extract_video_thumb(state: &AppState, uid: &str, part0: crate::db::
     let jpeg = tokio::process::Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(&path)
-        .args(["-frames:v", "1", "-vf", "scale=320:-2", "-f", "mjpeg", "pipe:1"])
+        // WebP: smallest dependable encoder across ffmpeg builds (AVIF
+        // needs libaom, often absent). 320px at q78 lands ~5-15 KB.
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=320:-2",
+            "-f",
+            "webp",
+            "-lossless",
+            "0",
+            "-compression_level",
+            "6",
+            "-quality",
+            "78",
+            "pipe:1",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -543,7 +564,10 @@ pub async fn extract_video_thumb(state: &AppState, uid: &str, part0: crate::db::
     let jpeg = match jpeg {
         Ok(out) if out.status.success() && !out.stdout.is_empty() => out.stdout,
         Ok(out) => {
-            tracing::info!("ffmpeg produced no frame for {uid} (status {:?})", out.status.code());
+            tracing::info!(
+                "ffmpeg produced no thumbnail for {uid} (status {:?})",
+                out.status.code()
+            );
             return;
         }
         Err(e) => {
@@ -554,7 +578,7 @@ pub async fn extract_video_thumb(state: &AppState, uid: &str, part0: crate::db::
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
     match crate::db::set_thumb(&state.db, uid, &b64).await {
-        Ok(true) => tracing::info!("video thumbnail stored for {uid}"),
+        Ok(true) => tracing::info!("thumbnail stored for {uid}"),
         Ok(false) => tracing::warn!("row {uid} vanished before thumb stored"),
         Err(e) => tracing::warn!("thumb store failed for {uid}: {e}"),
     }
@@ -706,19 +730,21 @@ pub async fn file_thumb(
         .thumb
         .ok_or_else(|| ApiError::not_found("no thumbnail"))?;
     use base64::Engine as _;
-    let jpeg = base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .map_err(|e| ApiError::internal(format!("thumb decode: {e}")))?;
 
-    let ctype = if jpeg.starts_with(&[0x89, b'P', b'N', b'G']) {
+    let ctype = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         "image/png"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
     } else {
         "image/jpeg"
     };
     Response::builder()
         .header(header::CONTENT_TYPE, ctype)
         .header(header::CACHE_CONTROL, "private, max-age=86400, immutable")
-        .header(header::CONTENT_LENGTH, jpeg.len())
-        .body(Body::from(jpeg))
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("response build: {e}")))
 }
