@@ -34,13 +34,7 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
 const SCHEMA_LATEST: u64 = 3;
 
 async fn schema_version(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
-    let mut res = db.query("SELECT version FROM setting:schema").await?;
-    let rows: Vec<serde_json::Value> = res.take(0)?;
-    Ok(rows
-        .first()
-        .and_then(|r| r.get("version"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1))
+    Ok(schema_version_recorded(db).await?.unwrap_or(1))
 }
 
 async fn set_schema_version(db: &surrealdb::Surreal<Conn>, v: u64) -> Result<(), DbError> {
@@ -52,10 +46,48 @@ async fn set_schema_version(db: &surrealdb::Surreal<Conn>, v: u64) -> Result<(),
     Ok(())
 }
 
+/// Some(version) when `setting:schema` exists, None on a database that has
+/// never been through migrate().
+async fn schema_version_recorded(
+    db: &surrealdb::Surreal<Conn>,
+) -> Result<Option<u64>, DbError> {
+    let mut res = db.query("SELECT version FROM setting:schema").await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.get("version"))
+        .and_then(|v| v.as_u64()))
+}
+
+/// True when the store holds no user data at all (fresh install). An old
+/// pre-versioning database with rows is NOT virgin and must migrate.
+async fn store_is_virgin(db: &surrealdb::Surreal<Conn>) -> Result<bool, DbError> {
+    let mut res = db
+        .query("SELECT count() AS n FROM file GROUP ALL; SELECT count() AS n FROM folder GROUP ALL")
+        .await?;
+    let files: Vec<serde_json::Value> = res.take(0)?;
+    let folders: Vec<serde_json::Value> = res.take(1)?;
+    let n = |rows: &[serde_json::Value]| {
+        rows.first()
+            .and_then(|r| r.get("n"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
+    Ok(n(&files) + n(&folders) == 0)
+}
+
 /// Runs every migration above the stored version, in order, recording each
 /// one as it lands. Append a new `v == N` arm (and bump SCHEMA_LATEST)
 /// to add a migration; never renumber or edit shipped steps.
+///
+/// A brand-new store (no schema record and no rows at all) is stamped at
+/// the latest version directly — migrations only exist for old data.
 pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
+    if schema_version_recorded(db).await?.is_none() && store_is_virgin(db).await? {
+        set_schema_version(db, SCHEMA_LATEST).await?;
+        tracing::info!("fresh database initialized at schema v{SCHEMA_LATEST}");
+        return Ok(SCHEMA_LATEST);
+    }
     let mut v = schema_version(db).await?;
     while v < SCHEMA_LATEST {
         v += 1;
@@ -712,6 +744,15 @@ mod tests {
         assert!(!get(&db, "01V").await.unwrap().unwrap().public);
 
         assert!(!set_public(&db, "missing", true).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn fresh_store_stamps_latest_directly() {
+        let (db, _dir) = temp_db().await;
+        // temp_db already ran open(); a virgin store must land on the
+        // latest version without any migration noise.
+        assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
     }
 
     #[tokio::test]
