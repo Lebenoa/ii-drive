@@ -47,6 +47,7 @@
         error: string;
     };
     let queue = $state<QueueItem[]>([]);
+  let panelCollapsed = $state(false);
     let dragging = $state(false);
     let input = $state<HTMLInputElement | null>(null);
     const filesByKey = new Map<number, File>();
@@ -339,55 +340,6 @@
                 onchange={pick}
             />
 
-            {#if queue.length > 0}
-                <ul class="queue">
-                    {#each queue as item (item.key)}
-                        <li class="q-item" class:error={item.state === "error"}>
-                            <div class="q-top">
-                                <span class="q-name" title={item.name}
-                                    >{item.name}</span
-                                >
-                                <span
-                                    class="q-state"
-                                    class:ok={item.state === "done"}
-                                >
-                                    {#if item.state === "pending"}
-                                        queued
-                                    {:else if item.state === "uploading"}
-                                        {item.progress}%
-                                    {:else if item.state === "done"}
-                                        ✓
-                                    {:else}
-                                        ✗
-                                    {/if}
-                                </span>
-                            </div>
-                            <div class="bar">
-                                <div
-                                    class="fill"
-                                    class:err={item.state === "error"}
-                                    class:done={item.state === "done"}
-                                    style={`width:${item.progress}%`}
-                                ></div>
-                            </div>
-                            {#if item.state === "error"}<p class="error-text">
-                                    {item.error}
-                                </p>{/if}
-                        </li>
-                    {/each}
-                    {#if queue.every((i) => i.state === "done" || i.state === "error")}
-                        <li>
-                            <button
-                                class="btn clear-btn"
-                                type="button"
-                                onclick={clearFinished}
-                            >
-                                Clear finished
-                            </button>
-                        </li>
-                    {/if}
-                </ul>
-            {/if}
 
             {#if errorMsg}
                 <p class="error-text">{errorMsg}</p>
@@ -399,6 +351,78 @@
                 Drop files to upload here
             </div>
         </section>
+
+        {#if queue.length > 0}
+            <div class="uploads-panel" class:collapsed={panelCollapsed}>
+                <button
+                    class="up-head"
+                    type="button"
+                    onclick={() => (panelCollapsed = !panelCollapsed)}
+                    aria-expanded={!panelCollapsed}
+                >
+                    <span class="up-title">
+                        {#if queue.filter((i) => i.state === "uploading" || i.state === "pending").length > 0}
+                            Uploading {queue.filter((i) => i.state === "uploading" || i.state === "pending").length} of {queue.length}
+                        {:else}
+                            Uploads ({queue.length})
+                        {/if}
+                    </span>
+                    {#if queue.every((i) => i.state === "done" || i.state === "error")}
+                        <span
+                            class="up-clear"
+                            role="button"
+                            tabindex="-1"
+                            title="Clear finished"
+                            onclick={(e) => {
+                                e.stopPropagation();
+                                clearFinished();
+                            }}
+                            onkeydown={(e) => e.stopPropagation()}
+                        >
+                            ✕
+                        </span>
+                    {:else}
+                        <span class="up-chevron">{panelCollapsed ? "▲" : "▼"}</span>
+                    {/if}
+                </button>
+                {#if !panelCollapsed}
+                    <ul class="queue">
+                        {#each queue as item (item.key)}
+                            <li class="q-item" class:error={item.state === "error"}>
+                                <div class="q-top">
+                                    <span class="q-name" title={item.name}>{item.name}</span>
+                                    <span
+                                        class="q-state"
+                                        class:ok={item.state === "done"}
+                                    >
+                                        {#if item.state === "pending"}
+                                            queued
+                                        {:else if item.state === "uploading"}
+                                            {item.progress}%
+                                        {:else if item.state === "done"}
+                                            ✓
+                                        {:else}
+                                            ✗
+                                        {/if}
+                                    </span>
+                                </div>
+                                <div class="bar">
+                                    <div
+                                        class="fill"
+                                        class:err={item.state === "error"}
+                                        class:done={item.state === "done"}
+                                        style={`width:${item.progress}%`}
+                                    ></div>
+                                </div>
+                                {#if item.state === "error"}
+                                    <p class="error-text">{item.error}</p>
+                                {/if}
+                            </li>
+                        {/each}
+                    </ul>
+                {/if}
+            </div>
+        {/if}
 
         <!-- Phones have no drag &amp; drop: dedicated upload button. -->
         <button
@@ -708,6 +732,10 @@
         .sidebar {
             width: 100%;
             position: static;
+        }
+
+        .uploads-panel {
+            bottom: 86px;
         }
 
         .upload-fab {
