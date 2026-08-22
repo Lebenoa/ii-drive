@@ -393,27 +393,33 @@
 
   .content {
     width: min(720px, 100%);
-    margin: 24px auto;
-    padding: 0 20px;
+    margin: 16px auto;
+    padding: 0 16px;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 14px;
+  }
+
+  /* Cards here carry mostly single controls — tighten the generous
+     global card padding instead of shipping empty margins. */
+  .section {
+    padding: 16px 18px;
   }
 
   .section h2 {
-    margin: 0 0 6px;
-    font-size: 17px;
+    margin: 0 0 4px;
+    font-size: 16px;
   }
 
   .hint {
     font-size: 12.5px;
-    margin: 0 0 14px;
+    margin: 0 0 10px;
   }
 
   .bot-row {
     display: flex;
     gap: 8px;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
   }
 
   .bot-row .field {
@@ -460,7 +466,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
   }
 
   .split-input {
@@ -476,10 +482,10 @@
   .rule-list {
     list-style: none;
     padding: 0;
-    margin: 0 0 10px;
+    margin: 0 0 8px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
 
   .rule-row {
@@ -501,6 +507,7 @@
   .rule-actions {
     display: flex;
     gap: 8px;
+    margin-top: 4px;
   }
 
   .ok-text {
