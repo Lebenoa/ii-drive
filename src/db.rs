@@ -26,7 +26,22 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     let _ = res.take::<surrealdb::types::Value>(1usize)?;
+    let dropped = purge_legacy_rows(&db).await?;
+    if dropped > 0 {
+        tracing::warn!("dropped {dropped} pre-folder file rows (messages stay in Telegram)");
+    }
     Ok(db)
+}
+
+/// Deletes rows written before the folder feature existed (no `folder`
+/// field). Their Telegram messages are NOT deleted, so the files remain
+/// in the storage channel even though the drive forgets them.
+pub async fn purge_legacy_rows(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
+    let mut res = db
+        .query("DELETE FROM file WHERE folder IS NONE RETURN BEFORE")
+        .await?;
+    let deleted: Vec<serde_json::Value> = res.take(0)?;
+    Ok(deleted.len() as u64)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,19 +169,11 @@ pub async fn list(
     limit: u64,
     offset: u64,
 ) -> Result<Vec<FileRow>, DbError> {
-    // Rows written before the folder feature have no `folder` field, and
-    // SurrealQL `folder = ""` does not match a missing field — treat those
-    // as root so legacy files stay visible.
-    let folder_clause = if folder.is_empty() {
-        "(folder = $folder OR folder IS NONE)"
-    } else {
-        "folder = $folder"
-    };
     let mut res = db
         .query(format!(
             // CONTAINS "" is true for every name, so one query serves both cases.
             "SELECT {ROW_COLS} FROM file \
-             WHERE string::lowercase(name) CONTAINS $q AND {folder_clause} \
+             WHERE string::lowercase(name) CONTAINS $q AND folder = $folder \
              ORDER BY created_at DESC \
              LIMIT $limit START $offset"
         ))
@@ -577,24 +584,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_rows_without_folder_list_in_root() {
+    async fn legacy_rows_without_folder_are_purged() {
         let (db, _dir) = temp_db().await;
 
         // A row written before the folder feature existed: no folder field.
         db.query(
-            "CREATE file SET uid = 'leg', name = 'legacy.bin', mime = 'm', size = 9,              message_id = 3, chat = 'me', created_at = 1",
+            "CREATE file SET uid = 'leg', name = 'legacy.bin', mime = 'm', size = 9, \
+             message_id = 3, chat = 'me', created_at = 1",
         )
         .await
         .unwrap();
+        insert(&db, &row("01N", "new.bin", 20)).await.unwrap();
 
+        // The startup purge drops only rows without a folder.
+        assert_eq!(purge_legacy_rows(&db).await.unwrap(), 1);
         let root = list(&db, "", "", 100, 0).await.unwrap();
-        assert_eq!(root.len(), 1, "missing folder field means root");
-        assert_eq!(root[0].uid, "leg");
-
-        // A named folder must not pick up legacy rows.
-        create_folder(&db, "F9", "Sub", "").await.unwrap();
-        let sub = list(&db, "", "F9", 100, 0).await.unwrap();
-        assert!(sub.is_empty());
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].uid, "01N");
+        assert!(get(&db, "leg").await.unwrap().is_none());
     }
 }
 
