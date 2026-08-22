@@ -7,15 +7,10 @@
         uploadFile,
         type DriveFile,
         type Folder,
-        type TgUser,
     } from "$lib/api";
-    import Drive from "../components/TopBar.svelte";
     import FileTable from "../components/FileTable.svelte";
     import Modal from "../components/Modal.svelte";
     import { closeAttrs, openAttrs, openDialog } from "$lib/invoker";
-
-    let { user, onLogout }: { user: TgUser | null; onLogout: () => void } =
-        $props();
 
     let folders = $state<Folder[]>([]);
     let current = $state(""); // folder uid, '' = root
@@ -299,7 +294,7 @@
     }
 </script>
 
-<Drive {user} {onLogout}>
+<div class="shell-body">
     <div class="layout">
         {#if sidebarOpen}
             <div
@@ -617,7 +612,7 @@
             >
         {/snippet}
     </Modal>
-</Drive>
+</div>
 
 <style>
     .layout {

@@ -52,10 +52,6 @@
     })();
   });
 
-  function handleLogout(): void {
-    clearToken();
-    goto('/login');
-  }
 </script>
 
 {#if booting}
@@ -68,7 +64,7 @@
     <button class="btn btn-primary" type="button" onclick={() => retryTick++}>Retry</button>
   </div>
 {:else if me}
-  <Drive user={me.user} onLogout={handleLogout} />
+  <Drive />
 {/if}
 
 <style>
