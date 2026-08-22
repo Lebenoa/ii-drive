@@ -54,6 +54,41 @@
   let pasting = $state(false);
   let pasteError = $state('');
 
+  let dropTarget = $state('');
+  let dropping = $state(false);
+
+  async function dropOnFolder(e: DragEvent, folder: string): Promise<void> {
+    e.preventDefault();
+    dropping = false;
+    dropTarget = '';
+    const raw = e.dataTransfer?.getData('application/x-ii-files');
+    if (!raw) return; // external file drop — handled by the file-area zone
+    let ids: string[];
+    try {
+      ids = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (ids.includes('') || !Array.isArray(ids)) return;
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await moveFile(id, folder);
+      } catch {
+        failed++;
+      }
+    }
+    if (failed === 0) reloadTick++;
+    else sidebarError = `${failed} file(s) failed to move`;
+  }
+
+  function folderDragOver(e: DragEvent, folder: string): void {
+    if (!e.dataTransfer?.types.includes('application/x-ii-files')) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    dropTarget = folder;
+  }
+
   function cutFiles(ids: string[]): void {
     cutIds = new Set(ids);
     pasteError = '';
@@ -282,8 +317,12 @@
                 <button
                     class="folder-item"
                     class:active={current === ""}
+                    class:drop={dropTarget === ""}
                     type="button"
                     onclick={() => (current = "")}
+                    ondragover={(e) => folderDragOver(e, "")}
+                    ondragleave={() => (dropTarget = "")}
+                    ondrop={(e) => void dropOnFolder(e, "")}
                 >
                     <span class="f-ico">📁</span><span class="f-name"
                         >All files</span
@@ -293,9 +332,13 @@
                     <button
                         class="folder-item"
                         class:active={current === node.uid}
-                                        style={`padding-left:${12 + depth * 16}px`}
+                        class:drop={dropTarget === node.uid}
+                        style={`padding-left:${12 + depth * 16}px`}
                         type="button"
                         onclick={() => (current = node.uid)}
+                        ondragover={(e) => folderDragOver(e, node.uid)}
+                        ondragleave={() => (dropTarget = "")}
+                        ondrop={(e) => void dropOnFolder(e, node.uid)}
                     >
                         <span class="f-ico">📁</span><span
                             class="f-name"
@@ -607,6 +650,11 @@
 
     .folder-item:hover {
         background: rgba(255, 255, 255, 0.05);
+    }
+
+    .folder-item.drop {
+        border: 1px dashed var(--accent);
+        background: rgba(91, 157, 255, 0.12);
     }
 
     .folder-item.active {

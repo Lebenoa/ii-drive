@@ -24,6 +24,16 @@
   let bulkBusy = $state(false);
   let bulkError = $state('');
 
+  function dragIds(file: DriveFile): string[] {
+    return selected.has(file.id) ? [...selected] : [file.id];
+  }
+
+  function onDragStart(e: DragEvent, file: DriveFile): void {
+    const ids = dragIds(file);
+    e.dataTransfer?.setData('application/x-ii-files', JSON.stringify(ids));
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
   function toggleSelect(id: string): void {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -205,7 +215,13 @@
 {#if view === 'grid'}
   <div class="grid">
     {#each files as file (file.id)}
-      <div class="card-f" class:selected={selected.has(file.id)} class:cut={cutIds.has(file.id)}>
+      <div
+          class="card-f"
+          class:selected={selected.has(file.id)}
+          class:cut={cutIds.has(file.id)}
+          draggable="true"
+          ondragstart={(e) => onDragStart(e, file)}
+        >
         <label class="g-check">
           <input
             type="checkbox"
@@ -298,7 +314,12 @@
     </thead>
     <tbody>
       {#each files as file (file.id)}
-        <tr class:selected={selected.has(file.id)} class:cut={cutIds.has(file.id)}>
+        <tr
+          class:selected={selected.has(file.id)}
+          class:cut={cutIds.has(file.id)}
+          draggable="true"
+          ondragstart={(e) => onDragStart(e, file)}
+        >
           <td class="c-sel">
             <input
               type="checkbox"
