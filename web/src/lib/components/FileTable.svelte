@@ -70,7 +70,7 @@
     {#each files as file (file.id)}
       <tr>
         <td class="c-icon">
-          {#if file.mime.startsWith('image/') && file.has_thumb && !brokenThumbs.has(file.id)}
+          {#if file.has_thumb && !brokenThumbs.has(file.id)}
             <img
               class="thumb"
               src={thumbUrl(file.id, file.public)}

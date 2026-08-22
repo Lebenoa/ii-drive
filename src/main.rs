@@ -1,4 +1,5 @@
 mod app;
+mod art;
 mod auth;
 mod config;
 mod db;

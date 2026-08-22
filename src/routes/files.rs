@@ -20,6 +20,9 @@ pub async fn health() -> Json<serde_json::Value> {
 /// deliver the error response; beyond this the connection is simply closed.
 const DRAIN_CAP: u64 = 32 * 1024 * 1024;
 
+/// How much of the stream head to buffer for cover-art extraction.
+const HEAD_CAP: usize = 512 * 1024;
+
 /// Public upload limits so clients can pre-check files before transferring.
 pub async fn limits(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "max_file_size": state.config.max_file_size }))
@@ -263,6 +266,7 @@ pub async fn upload_file(
     }
 
     let mut fed: u64 = 0;
+    let mut head: Vec<u8> = Vec::new();
     let feed: Result<(), ApiError> = async {
         loop {
             let Some(mut f) = multipart
@@ -287,6 +291,12 @@ pub async fn upload_file(
                     Ok(Some(chunk)) => {
                         let before = fed;
                         fed += chunk.len() as u64;
+                        // Keep the stream head: cover art lives in tags at
+                        // the start of audio files (ID3 / FLAC metadata).
+                        if head.len() < HEAD_CAP {
+                            let take = (HEAD_CAP - head.len()).min(chunk.len());
+                            head.extend_from_slice(&chunk[..take]);
+                        }
                         if fed > max {
                             return Err(ApiError::too_large(format!(
                                 "file exceeds limit of {max} bytes"
@@ -355,6 +365,10 @@ pub async fn upload_file(
         return Err(err);
     }
     drop(txs);
+    let mime_is_audio = meta_rx
+        .borrow()
+        .as_ref()
+        .is_some_and(|(_, m)| m.starts_with("audio/"));
 
     // Collect one message id per part; on any failure, roll back the parts
     // that did land so no orphan stays behind.
@@ -391,6 +405,16 @@ pub async fn upload_file(
     if let Some(e) = first_err {
         cleanup_parts(&state, &parts).await;
         return Err(ApiError::bad_request(e));
+    }
+
+    // Telegram makes no stripped thumbnail for audio; pull embedded cover
+    // art (ID3 APIC / FLAC PICTURE) from the buffered stream head instead.
+    if thumb_b64.is_none()
+        && mime_is_audio
+        && let Some(img) = crate::art::extract(&head)
+    {
+        use base64::Engine as _;
+        thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(img));
     }
 
     if fed != declared {
@@ -576,8 +600,13 @@ pub async fn file_thumb(
         .decode(b64)
         .map_err(|e| ApiError::internal(format!("thumb decode: {e}")))?;
 
+    let ctype = if jpeg.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
     Response::builder()
-        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CONTENT_TYPE, ctype)
         .header(header::CACHE_CONTROL, "private, max-age=86400, immutable")
         .header(header::CONTENT_LENGTH, jpeg.len())
         .body(Body::from(jpeg))
