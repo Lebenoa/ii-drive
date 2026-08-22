@@ -126,6 +126,15 @@
   const DELETE_DIALOG = 'dlg-delete-file';
   let pendingFile = $state<DriveFile | null>(null);
 
+  const PREVIEW_DIALOG = 'dlg-preview';
+  let previewFile = $state<DriveFile | null>(null);
+
+  function openPreview(file: DriveFile): void {
+    if (!file.mime.startsWith('image/') && !file.mime.startsWith('video/')) return;
+    previewFile = file;
+    if (!('showModal' in HTMLDialogElement.prototype)) openDialog(PREVIEW_DIALOG);
+  }
+
   async function copyLink(file: DriveFile): Promise<void> {
     // Private files get a time-limited single-file link, never the session
     // token that ?token= would leak.
@@ -252,7 +261,17 @@
             onchange={() => toggleSelect(file.id)}
           />
         </label>
-        <div class="g-thumb">
+        <div
+          class="g-thumb"
+          class:previewable={file.mime.startsWith('image/') || file.mime.startsWith('video/')}
+          role="button"
+          tabindex="0"
+          {...openAttrs(PREVIEW_DIALOG)}
+          onclick={() => openPreview(file)}
+          onkeydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') openPreview(file);
+          }}
+        >
           {#if file.has_thumb && !brokenThumbs.has(file.id)}
             <img
               class="g-img"
@@ -373,7 +392,17 @@
               <span title={file.mime}>{mimeIcon(file.mime, file.name)}</span>
             {/if}
           </td>
-          <td class="c-name" title={file.name}>{file.name}</td>
+          <td class="c-name" title={file.name}>
+              <button
+                class="name-btn"
+                class:previewable={file.mime.startsWith('image/') || file.mime.startsWith('video/')}
+                type="button"
+                {...openAttrs(PREVIEW_DIALOG)}
+                onclick={() => openPreview(file)}
+              >
+                {file.name}
+              </button>
+            </td>
           <td class="c-size">{humanSize(file.size)}</td>
           <td class="c-date muted" title={new Date(file.created_at * 1000).toLocaleString()}>
             {relTime(file.created_at)}
@@ -423,6 +452,30 @@
   </table>
 {/if}
 
+<dialog
+  id={PREVIEW_DIALOG}
+  class="preview"
+  onclick={(e: MouseEvent) => {
+    if (e.target === e.currentTarget) e.currentTarget.close();
+  }}
+>
+  {#if previewFile}
+    <div class="pv-media">
+      {#if previewFile.mime.startsWith('video/')}
+        <video controls autoplay src={rawUrl(previewFile.id, false, previewFile.public)}></video>
+      {:else}
+        <img src={rawUrl(previewFile.id, false, previewFile.public)} alt={previewFile.name} />
+      {/if}
+    </div>
+    <div class="pv-bar">
+      <span class="pv-name" title={previewFile.name}>{previewFile.name}</span>
+      <span class="pv-meta muted">{humanSize(previewFile.size)}</span>
+      <a class="icon-btn" href={rawUrl(previewFile.id, true, previewFile.public)} title="Download">⬇</a>
+      <button class="icon-btn" type="button" {...closeAttrs(PREVIEW_DIALOG)} title="Close">✕</button>
+    </div>
+  {/if}
+</dialog>
+
 <Modal
   id={DELETE_DIALOG}
   title="Delete file"
@@ -467,6 +520,86 @@
     font-weight: 600;
     font-size: 13.5px;
     margin-right: 6px;
+  }
+
+  dialog.preview {
+    border: none;
+    background: transparent;
+    max-width: 100vw;
+    max-height: 100dvh;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  dialog.preview::backdrop {
+    background: rgba(4, 6, 10, 0.88);
+  }
+
+  .pv-media {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: calc(100dvh - 56px);
+    padding: 12px;
+  }
+
+  .pv-media img,
+  .pv-media video {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 6px;
+  }
+
+  .pv-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 44px;
+    padding: 0 16px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+  }
+
+  .pv-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13.5px;
+  }
+
+  .pv-meta {
+    font-size: 12.5px;
+    flex-shrink: 0;
+  }
+
+  .name-btn {
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    text-align: left;
+    cursor: default;
+  }
+
+  .name-btn.previewable {
+    cursor: pointer;
+  }
+
+  .name-btn.previewable:hover {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .g-thumb.previewable {
+    cursor: zoom-in;
   }
 
   .view-toggle {

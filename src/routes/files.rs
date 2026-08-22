@@ -773,7 +773,28 @@ pub async fn raw_file(
         }
     }
 
-    let stream = crate::stream::parts_stream(state.tg.clone(), row.parts.clone())
+    // Single-range HTTP Range support — video seeking needs it. The offset
+    // work happens on Telegram's side (skip_chunks) plus a small discard.
+    let total = row.size as u64;
+    let range = req
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_range);
+    let (start, len, partial) = match range {
+        Some((s, e)) => {
+            let Some((s, e)) = (s < total).then_some((s, e.min(total - 1))) else {
+                return Err(ApiError(
+                    axum::http::StatusCode::RANGE_NOT_SATISFIABLE,
+                    format!("range outside file (0-{})", total.saturating_sub(1)),
+                ));
+            };
+            (s, e - s + 1, true)
+        }
+        None => (0, total, false),
+    };
+
+    let stream = crate::stream::parts_stream_from(state.tg.clone(), row.parts.clone(), start)
         .await
         .map_err(ApiError::unavailable)?;
     let body = Body::from_stream(stream);
@@ -784,9 +805,17 @@ pub async fn raw_file(
     };
     let encoded = percent_encode(&row.name);
 
-    Response::builder()
+    let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, &row.mime)
-        .header(header::CONTENT_LENGTH, row.size)
+        .header(header::CONTENT_LENGTH, len);
+    if partial {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{}/{}", start + len - 1, total),
+        );
+        builder = builder.status(axum::http::StatusCode::PARTIAL_CONTENT);
+    }
+    builder
         .header(
             header::CONTENT_DISPOSITION,
             format!("{disposition}; filename*=UTF-8''{encoded}"),
@@ -813,6 +842,22 @@ fn percent_encode(name: &str) -> String {
         }
     }
     out
+}
+
+/// Parses `bytes=<start>-<end>` / `bytes=<start>-`; None otherwise.
+fn parse_range(v: &str) -> Option<(u64, u64)> {
+    let spec = v.strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None; // multi-range unsupported
+    }
+    let (s, e) = spec.split_once('-')?;
+    let start: u64 = s.parse().ok()?;
+    let end: u64 = if e.is_empty() {
+        u64::MAX
+    } else {
+        e.parse().ok()?
+    };
+    (start <= end).then_some((start, end))
 }
 
 /// GET /api/files/{id}/thumb — tiny cached JPEG; same auth rules as raw.

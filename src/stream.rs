@@ -16,6 +16,18 @@ pub async fn file_stream(
     message_id: i32,
     chat: &str,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
+    file_stream_from(tg, message_id, chat, 0).await
+}
+
+/// Same as `file_stream`, but serving from byte `start` (HTTP Range
+/// support): whole chunks are skipped server-side on Telegram, the
+/// sub-chunk remainder is discarded on the wire.
+pub async fn file_stream_from(
+    tg: &crate::tg::TgManager,
+    message_id: i32,
+    chat: &str,
+    start: u64,
+) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
     let (client, peer) = tg.download_target(chat).await?;
 
     let st = StreamState {
@@ -23,7 +35,8 @@ pub async fn file_stream(
         peer,
         msg_id: message_id,
         iter: None,
-        pos: 0i64,
+        pos: start as i64,
+        discard: start % CHUNK as u64,
     };
 
     Ok(unfold(st, |mut st| async move {
@@ -64,8 +77,17 @@ pub async fn file_stream(
             let iter = st.iter.as_mut().expect("iter just set");
             match iter.next().await {
                 Ok(Some(chunk)) => {
+                    let mut chunk = Bytes::from(chunk);
+                    if st.discard > 0 && !chunk.is_empty() {
+                        let d = (st.discard as usize).min(chunk.len());
+                        chunk = chunk.slice(d..);
+                        st.discard -= d as u64;
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                    }
                     st.pos += chunk.len() as i64;
-                    return Some((Ok(Bytes::from(chunk)), st));
+                    return Some((Ok(chunk), st));
                 }
                 Ok(None) => return None,
                 Err(e) if is_file_reference_error(&e) => {
@@ -90,6 +112,8 @@ struct StreamState {
     msg_id: i32,
     iter: Option<grammers_client::client::DownloadIter>,
     pos: i64,
+    /// Bytes still to drop from the first served chunk (start % CHUNK).
+    discard: u64,
 }
 
 type BoxedPart = std::pin::Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>;
@@ -97,13 +121,29 @@ type BoxedPart = std::pin::Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + S
 /// Serves a multi-part file as one contiguous byte stream: parts are fetched
 /// in order, each through `file_stream` (which itself resumes on expired
 /// file references), so the client sees a seamless download.
-pub async fn parts_stream(
+/// Serves a multi-part file as one contiguous byte stream, optionally from
+/// byte `start` across part boundaries (HTTP Range support). Parts are
+/// fetched in order, each through `file_stream` (which itself resumes on
+/// expired file references), so the client sees a seamless download.
+pub async fn parts_stream_from(
     tg: std::sync::Arc<crate::tg::TgManager>,
     parts: Vec<crate::db::FilePart>,
+    start: u64,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
-    let first = parts.first().ok_or("file has no parts")?;
-    let cur: BoxedPart = Box::pin(file_stream(&tg, first.message_id, &first.chat).await?);
-    let st = PartsState { tg, parts, idx: 0, cur: Some(cur) };
+    // Find the part holding `start` and the offset within it.
+    let mut skip = start;
+    let mut idx = 0usize;
+    while idx < parts.len() && skip >= parts[idx].size as u64 {
+        skip -= parts[idx].size as u64;
+        idx += 1;
+    }
+    if idx >= parts.len() {
+        return Err("range start is beyond the file".into());
+    }
+    let first = &parts[idx];
+    let cur: BoxedPart =
+        Box::pin(file_stream_from(&tg, first.message_id, &first.chat, skip).await?);
+    let st = PartsState { tg, parts, idx, cur: Some(cur) };
     Ok(unfold(st, |mut st| async move {
         loop {
             let item = match st.cur.as_mut()?.next().await {
@@ -114,7 +154,7 @@ pub async fn parts_stream(
                         return None;
                     }
                     let p = &st.parts[st.idx];
-                    match file_stream(&st.tg, p.message_id, &p.chat).await {
+                    match file_stream_from(&st.tg, p.message_id, &p.chat, 0).await {
                         Ok(s) => st.cur = Some(Box::pin(s)),
                         Err(e) => return Some((Err(std::io::Error::other(e)), st)),
                     }
