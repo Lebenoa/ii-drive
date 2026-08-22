@@ -314,6 +314,24 @@ pub async fn delete_folder(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u
     Ok(deleted.len() as u64)
 }
 
+/// (files, folders) row counts for the startup log.
+pub async fn counts(db: &surrealdb::Surreal<Conn>) -> Result<(u64, u64), DbError> {
+    let mut res = db
+        .query(
+            "SELECT count() AS n FROM file GROUP ALL;              SELECT count() AS n FROM folder GROUP ALL",
+        )
+        .await?;
+    let files: Vec<serde_json::Value> = res.take(0)?;
+    let folders: Vec<serde_json::Value> = res.take(1)?;
+    let n = |rows: &[serde_json::Value]| {
+        rows.first()
+            .and_then(|r| r.get("n"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    };
+    Ok((n(&files), n(&folders)))
+}
+
 /// Upload-split threshold in bytes (0 = never split); global setting.
 pub async fn get_split(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
     let mut res = db.query("SELECT split_bytes FROM setting:upload").await?;
@@ -399,7 +417,7 @@ mod tests {
         (db, dir)
     }
 
-    fn row(uid: &str, name: &str, created_at: i64) -> FileRow {
+    pub(super) fn row(uid: &str, name: &str, created_at: i64) -> FileRow {
         FileRow {
             uid: uid.to_string(),
             name: name.to_string(),
@@ -548,5 +566,30 @@ mod tests {
             .map(|f| f.name)
             .collect();
         assert_eq!(names, vec!["Docs"]);
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+    use crate::db::tests::row;
+
+    #[tokio::test]
+    async fn rows_survive_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("p.surrealkv");
+        let path_str = path.to_str().expect("utf8").to_string();
+
+        {
+            let db = open(&path_str).await.expect("open");
+            insert(&db, &row("01P", "persist.bin", 5)).await.expect("insert");
+        }
+        // Dropping Surreal closes the store asynchronously; give the
+        // background tasks time to release the file lock.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // SurrealDB flushes on drop/close; simulate a server restart.
+        let db = open(&path_str).await.expect("reopen");
+        let got = get(&db, "01P").await.expect("get");
+        assert!(got.is_some(), "row must survive reopen");
     }
 }
