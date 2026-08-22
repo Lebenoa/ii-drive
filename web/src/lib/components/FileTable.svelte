@@ -14,6 +14,64 @@
   let brokenThumbs = $state<Set<string>>(new Set());
   let brokenFull = $state<Set<string>>(new Set());
 
+  let selected = $state<Set<string>>(new Set());
+  let bulkBusy = $state(false);
+  let bulkError = $state('');
+
+  function toggleSelect(id: string): void {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selected = next;
+  }
+
+  function selectAll(): void {
+    selected = new Set(files.every((f) => selected.has(f.id)) ? [] : files.map((f) => f.id));
+  }
+
+  let allSelected = $derived(files.length > 0 && files.every((f) => selected.has(f.id)));
+
+  async function bulkDelete(): Promise<void> {
+    if (bulkBusy) return;
+    bulkBusy = true;
+    bulkError = '';
+    const ids = [...selected];
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await deleteFile(id);
+      } catch {
+        failed++;
+      }
+    }
+    bulkBusy = false;
+    selected = new Set();
+    onDeleted();
+    if (failed > 0) bulkError = `${failed} file(s) failed to delete`;
+  }
+
+  async function bulkVisibility(isPublic: boolean): Promise<void> {
+    if (bulkBusy) return;
+    bulkBusy = true;
+    bulkError = '';
+    const ids = [...selected];
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await setFileVisibility(id, isPublic);
+        const f = files.find((x) => x.id === id);
+        if (f) f.public = isPublic;
+      } catch {
+        failed++;
+      }
+    }
+    bulkBusy = false;
+    if (failed === 0) selected = new Set();
+    else bulkError = `${failed} file(s) failed to update`;
+  }
+
+  const BULK_DIALOG = 'dlg-bulk-delete';
+
   const VIEW_KEY = 'ii_view';
   let view = $state<'list' | 'grid'>(localStorage.getItem(VIEW_KEY) === 'grid' ? 'grid' : 'list');
 
@@ -64,6 +122,45 @@
   }
 </script>
 
+{#if selected.size > 0}
+  <div class="bulk-bar" role="toolbar" aria-label="Selection actions">
+    <span class="bulk-count">{selected.size} selected</span>
+    <button class="btn ghost" type="button" onclick={selectAll}>
+      {allSelected ? 'Clear all' : 'Select all'}
+    </button>
+    <button
+      class="btn ghost"
+      type="button"
+      disabled={bulkBusy}
+      onclick={() => void bulkVisibility(true)}
+    >
+      Make public
+    </button>
+    <button
+      class="btn ghost"
+      type="button"
+      disabled={bulkBusy}
+      onclick={() => void bulkVisibility(false)}
+    >
+      Make private
+    </button>
+    <button
+      class="btn btn-danger"
+      type="button"
+      disabled={bulkBusy}
+      {...openAttrs(BULK_DIALOG)}
+      onclick={() => {
+        if (!('commandFor' in HTMLButtonElement.prototype)) openDialog(BULK_DIALOG);
+      }}
+    >
+      Delete
+    </button>
+    <button class="btn ghost" type="button" onclick={() => (selected = new Set())}>
+      ✕
+    </button>
+    {#if bulkError}<span class="error-text">{bulkError}</span>{/if}
+  </div>
+{:else}
 <div class="view-toggle" role="group" aria-label="Display mode">
   <button
     class="icon-btn"
@@ -86,11 +183,20 @@
     ▦
   </button>
 </div>
+{/if}
 
 {#if view === 'grid'}
   <div class="grid">
     {#each files as file (file.id)}
-      <div class="card-f">
+      <div class="card-f" class:selected={selected.has(file.id)}>
+        <label class="g-check">
+          <input
+            type="checkbox"
+            aria-label="Select {file.name}"
+            checked={selected.has(file.id)}
+            onchange={() => toggleSelect(file.id)}
+          />
+        </label>
         <div class="g-thumb">
           {#if file.has_thumb && !brokenThumbs.has(file.id)}
             <img
@@ -158,6 +264,14 @@
   <table class="tbl">
     <thead>
       <tr>
+        <th class="c-sel">
+          <input
+            type="checkbox"
+            aria-label="Select all"
+            checked={allSelected}
+            onchange={selectAll}
+          />
+        </th>
         <th class="c-icon"></th>
         <th>Name</th>
         <th class="c-size">Size</th>
@@ -167,7 +281,15 @@
     </thead>
     <tbody>
       {#each files as file (file.id)}
-        <tr>
+        <tr class:selected={selected.has(file.id)}>
+          <td class="c-sel">
+            <input
+              type="checkbox"
+              aria-label="Select {file.name}"
+              checked={selected.has(file.id)}
+              onchange={() => toggleSelect(file.id)}
+            />
+          </td>
           <td class="c-icon">
             {#if file.has_thumb && !brokenThumbs.has(file.id)}
               <img
@@ -269,6 +391,24 @@
 </Modal>
 
 <style>
+  .bulk-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: rgba(91, 157, 255, 0.08);
+  }
+
+  .bulk-count {
+    font-weight: 600;
+    font-size: 13.5px;
+    margin-right: 6px;
+  }
+
   .view-toggle {
     display: flex;
     gap: 4px;
@@ -298,6 +438,32 @@
 
   .card-f:hover {
     border-color: var(--accent);
+  }
+
+  .card-f {
+    position: relative;
+  }
+
+  .card-f.selected {
+    border-color: var(--accent);
+    background: rgba(91, 157, 255, 0.08);
+  }
+
+  .g-check {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    z-index: 2;
+    background: var(--panel);
+    border-radius: 4px;
+    padding: 2px;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+
+  .card-f:hover .g-check,
+  .card-f.selected .g-check {
+    opacity: 1;
   }
 
   .g-thumb {
@@ -348,6 +514,15 @@
 
   .g-actions a {
     text-decoration: none;
+  }
+
+  .c-sel {
+    width: 30px;
+    text-align: center;
+  }
+
+  .tbl tr.selected td {
+    background: rgba(91, 157, 255, 0.1);
   }
 
   .tbl {
@@ -443,3 +618,20 @@
     grid-column: 1 / -1;
   }
 </style>
+
+<Modal
+  id={BULK_DIALOG}
+  title="Delete files"
+  onclose={(rv) => {
+    if (rv === 'delete') void bulkDelete();
+  }}
+>
+  <p>Delete <strong>{selected.size}</strong> file(s)? This removes them from Telegram storage as
+    well — there is no undo.</p>
+  {#snippet actions()}
+    <button class="btn" type="submit" {...closeAttrs(BULK_DIALOG)}>Cancel</button>
+    <button class="btn btn-danger" type="submit" value="delete" disabled={bulkBusy}>
+      {bulkBusy ? 'Deleting…' : 'Delete'}
+    </button>
+  {/snippet}
+</Modal>
