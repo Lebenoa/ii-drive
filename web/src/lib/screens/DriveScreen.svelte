@@ -500,18 +500,20 @@
     .layout {
         display: flex;
         gap: 20px;
-        align-items: flex-start;
+        align-items: stretch;
+        flex: 1;
+        min-height: 0;
     }
 
     .sidebar {
         width: 230px;
         flex-shrink: 0;
-        position: sticky;
-        top: 76px;
         border: 1px solid var(--border);
         border-radius: var(--radius);
         background: var(--panel);
         padding: 10px 8px;
+        overflow-y: auto;
+        min-height: 0;
     }
 
     .side-head {
@@ -591,12 +593,16 @@
     .file-area {
         flex: 1;
         min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
         border: 2px dashed transparent;
         border-radius: var(--radius);
         padding: 4px;
         transition:
             border-color 0.15s ease,
             background 0.15s ease;
+        overflow-y: auto;
     }
 
     .file-area.dragging {
@@ -709,6 +715,7 @@
     }
 
     .drop-hint {
+        margin-top: auto;
         text-align: center;
         font-size: 12px;
         padding: 10px 0 2px;
