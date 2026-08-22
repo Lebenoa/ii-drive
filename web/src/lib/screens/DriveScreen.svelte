@@ -646,11 +646,13 @@
 
     .queue {
         list-style: none;
-        margin: 0 0 14px;
-        padding: 0;
+        margin: 0;
+        padding: 10px 12px;
         display: flex;
         flex-direction: column;
         gap: 8px;
+        max-height: 260px;
+        overflow-y: auto;
     }
 
     .q-item {
@@ -729,6 +731,48 @@
 
     .upload-fab {
         display: none;
+    }
+
+    .uploads-panel {
+        position: fixed;
+        right: 20px;
+        bottom: 20px;
+        width: min(340px, calc(100vw - 40px));
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--panel);
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+        z-index: 30;
+        overflow: hidden;
+    }
+
+    .up-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        width: 100%;
+        border: none;
+        background: var(--panel-2);
+        color: var(--text);
+        font: inherit;
+        font-size: 13.5px;
+        text-align: left;
+        padding: 10px 12px;
+        cursor: pointer;
+    }
+
+    .up-title {
+        font-weight: 600;
+    }
+
+    .up-clear,
+    .up-chevron {
+        color: var(--muted);
+    }
+
+    .up-clear:hover {
+        color: var(--danger);
     }
 
     @media (max-width: 720px) {
