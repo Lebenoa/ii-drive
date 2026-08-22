@@ -302,6 +302,22 @@ pub async fn list(
     rows.into_iter().map(to_row).collect()
 }
 
+/// Moves a file to another folder ("" = root); false when the uid does
+/// not exist.
+pub async fn set_folder(
+    db: &surrealdb::Surreal<Conn>,
+    uid: &str,
+    folder: &str,
+) -> Result<bool, DbError> {
+    let mut res = db
+        .query("UPDATE file SET folder = $f WHERE uid = $uid RETURN AFTER")
+        .bind(("uid", uid.to_string()))
+        .bind(("f", folder.to_string()))
+        .await?;
+    let updated: Vec<serde_json::Value> = res.take(0)?;
+    Ok(!updated.is_empty())
+}
+
 /// Stores a thumbnail after the fact (video first-frame extraction runs
 /// in the background). false when the uid does not exist.
 pub async fn set_thumb(

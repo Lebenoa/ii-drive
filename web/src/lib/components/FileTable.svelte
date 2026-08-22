@@ -4,7 +4,13 @@
   import Modal from './Modal.svelte';
   import { closeAttrs, openAttrs, openDialog } from '$lib/invoker';
 
-  let { files, onDeleted }: { files: DriveFile[]; onDeleted: () => void } = $props();
+  let {
+    files,
+    onDeleted,
+    cutIds,
+    onCut,
+  }: { files: DriveFile[]; onDeleted: () => void; cutIds: Set<string>; onCut: (ids: string[]) => void } =
+    $props();
 
   let copiedId = $state('');
   let deletingId = $state('');
@@ -145,6 +151,17 @@
       Make private
     </button>
     <button
+      class="btn ghost"
+      type="button"
+      disabled={bulkBusy}
+      onclick={() => {
+        onCut([...selected]);
+        selected = new Set();
+      }}
+    >
+      ✂ Cut
+    </button>
+    <button
       class="btn btn-danger"
       type="button"
       disabled={bulkBusy}
@@ -188,7 +205,7 @@
 {#if view === 'grid'}
   <div class="grid">
     {#each files as file (file.id)}
-      <div class="card-f" class:selected={selected.has(file.id)}>
+      <div class="card-f" class:selected={selected.has(file.id)} class:cut={cutIds.has(file.id)}>
         <label class="g-check">
           <input
             type="checkbox"
@@ -281,7 +298,7 @@
     </thead>
     <tbody>
       {#each files as file (file.id)}
-        <tr class:selected={selected.has(file.id)}>
+        <tr class:selected={selected.has(file.id)} class:cut={cutIds.has(file.id)}>
           <td class="c-sel">
             <input
               type="checkbox"
@@ -519,6 +536,15 @@
   .c-sel {
     width: 30px;
     text-align: center;
+  }
+
+  .tbl tr.cut td {
+    opacity: 0.45;
+  }
+
+  .card-f.cut {
+    opacity: 0.45;
+    border-style: dashed;
   }
 
   .tbl tr.selected td {

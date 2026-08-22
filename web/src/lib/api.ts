@@ -278,6 +278,14 @@ export async function deleteFile(id: string): Promise<void> {
   await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/** PATCH /api/files/{id}/move — cut/paste target (folder '' = root) */
+export async function moveFile(id: string, folder: string): Promise<void> {
+  await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}/move`, {
+    method: 'PATCH',
+    body: { folder },
+  });
+}
+
 /** PATCH /api/files/{id}/visibility — private by default, public opt-in */
 export async function setFileVisibility(id: string, isPublic: boolean): Promise<void> {
   await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}/visibility`, {

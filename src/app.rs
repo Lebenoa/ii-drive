@@ -51,6 +51,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/files/{id}/visibility",
             axum::routing::patch(crate::routes::set_visibility),
         )
+        .route(
+            "/api/files/{id}/move",
+            axum::routing::patch(crate::routes::move_file),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::guard,

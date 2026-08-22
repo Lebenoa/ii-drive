@@ -48,6 +48,37 @@
     };
     let queue = $state<QueueItem[]>([]);
   let panelCollapsed = $state(false);
+
+  // Cut/paste: ids staged for a move into whichever folder gets the paste.
+  let cutIds = $state<Set<string>>(new Set());
+  let pasting = $state(false);
+  let pasteError = $state('');
+
+  function cutFiles(ids: string[]): void {
+    cutIds = new Set(ids);
+    pasteError = '';
+  }
+
+  async function pasteHere(): Promise<void> {
+    if (pasting || cutIds.size === 0) return;
+    pasting = true;
+    pasteError = '';
+    let failed = 0;
+    for (const id of cutIds) {
+      try {
+        await moveFile(id, current);
+      } catch {
+        failed++;
+      }
+    }
+    pasting = false;
+    if (failed === 0) {
+      cutIds = new Set();
+      reloadTick++;
+    } else {
+      pasteError = `${failed} file(s) failed to move`;
+    }
+  }
     let dragging = $state(false);
     let input = $state<HTMLInputElement | null>(null);
     const filesByKey = new Map<number, File>();
@@ -331,6 +362,23 @@
                     >
                 </div>
             </div>
+            {#if cutIds.size > 0}
+                <div class="paste-bar" role="toolbar" aria-label="Paste">
+                    <span class="bulk-count">{cutIds.size} cut</span>
+                    <button
+                        class="btn btn-primary"
+                        type="button"
+                        disabled={pasting}
+                        onclick={() => void pasteHere()}
+                    >
+                        {pasting ? 'Moving…' : `Paste into "${folderName(current)}"`}
+                    </button>
+                    <button class="btn ghost" type="button" onclick={() => (cutIds = new Set())}>
+                        Cancel
+                    </button>
+                    {#if pasteError}<span class="error-text">{pasteError}</span>{/if}
+                </div>
+            {/if}
             <input
                 bind:this={input}
                 class="hidden-input"
@@ -343,7 +391,12 @@
             {#if errorMsg}
                 <p class="error-text">{errorMsg}</p>
             {:else}
-                <FileTable {files} onDeleted={() => reloadTick++} />
+                <FileTable
+                {files}
+                onDeleted={() => reloadTick++}
+                {cutIds}
+                onCut={cutFiles}
+            />
             {/if}
 
             <div class="drop-hint muted" aria-hidden="true">
@@ -621,6 +674,24 @@
     .area-title {
         margin: 0;
         font-size: 17px;
+    }
+
+    .paste-bar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0 0 12px;
+        padding: 8px 10px;
+        border: 1px dashed var(--accent);
+        border-radius: var(--radius);
+        background: rgba(91, 157, 255, 0.08);
+    }
+
+    .paste-bar .bulk-count {
+        font-weight: 600;
+        font-size: 13.5px;
+        margin-right: 6px;
     }
 
     .search-row {

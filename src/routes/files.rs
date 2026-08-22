@@ -59,6 +59,31 @@ pub struct VisibilityBody {
     pub public: bool,
 }
 
+#[derive(serde::Deserialize)]
+pub struct MoveBody {
+    /// Target folder id, "" = root.
+    pub folder: String,
+}
+
+/// PATCH /api/files/{id}/move — cut/paste target.
+pub async fn move_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<MoveBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !body.folder.is_empty()
+        && crate::db::get_folder(&state.db, &body.folder)
+            .await?
+            .is_none()
+    {
+        return Err(ApiError::bad_request("target folder not found"));
+    }
+    if !crate::db::set_folder(&state.db, &id, &body.folder).await? {
+        return Err(ApiError::not_found("file not found"));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// PATCH /api/files/{id}/visibility — flip private/public.
 pub async fn set_visibility(
     State(state): State<AppState>,
