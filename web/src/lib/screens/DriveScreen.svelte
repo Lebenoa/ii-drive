@@ -615,6 +615,18 @@
 </div>
 
 <style>
+    /* Replaces the shell the old TopBar provided: full remaining viewport
+       column (navbar is 53px) and the old content wrapper's width/padding. */
+    .shell-body {
+        height: calc(100dvh - 53px);
+        display: flex;
+        flex-direction: column;
+        width: min(1200px, 100%);
+        margin: 0 auto;
+        padding: 20px 20px 24px;
+        box-sizing: border-box;
+    }
+
     .layout {
         display: flex;
         gap: 20px;
