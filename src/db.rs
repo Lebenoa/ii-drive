@@ -167,12 +167,15 @@ pub struct FileRow {
     /// (header or ?token=) unless the user marks the file public.
     #[serde(default)]
     pub public: bool,
+    /// Telegram stripped thumbnail, base64 JPEG; None for non-images.
+    #[serde(default)]
+    pub thumb: Option<String>,
 }
 
 const TABLE: &str = "file";
 
 const ROW_COLS: &str =
-    "uid, name, mime, size, message_id, chat, created_at, parts_json, folder, public";
+    "uid, name, mime, size, message_id, chat, created_at, parts_json, folder, public, thumb";
 
 /// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
 /// unset fields as null) into "" instead of failing.
@@ -211,6 +214,8 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         folder: String,
         #[serde(default, deserialize_with = "null_as_false")]
         public: bool,
+        #[serde(default)]
+        thumb: Option<String>,
     }
     let raw: Raw = serde_json::from_value(v)
         .map_err(|e| DbError::Shape(format!("file row shape mismatch: {e}")))?;
@@ -235,6 +240,7 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         folder: raw.folder,
         parts,
         public: raw.public,
+        thumb: raw.thumb,
     })
 }
 
@@ -254,6 +260,7 @@ pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), 
             "parts_json": parts_json,
             "folder": row.folder,
             "public": row.public,
+            "thumb": row.thumb,
         }))
         .await?;
     Ok(())
@@ -572,6 +579,7 @@ mod tests {
                 size: 42,
             }],
             public: false,
+            thumb: None,
         }
     }
 

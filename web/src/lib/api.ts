@@ -61,6 +61,8 @@ export interface DriveFile {
   created_at: number;
   /** false = raw link needs a session token */
   public: boolean;
+  /** true when a tiny server-side thumbnail exists */
+  has_thumb: boolean;
 }
 
 interface ErrBody {
@@ -289,11 +291,24 @@ export async function setFileVisibility(id: string, isPublic: boolean): Promise<
  * need the session token appended (?token=) — used for logged-in downloads.
  */
 export function rawUrl(id: string, download = false, isPublic = true): string {
-  const params = new URLSearchParams();
-  if (download) params.set('dl', '1');
+  return fileUrl(id, 'raw', download ? { dl: '1' } : {}, isPublic);
+}
+
+/** GET /api/files/{id}/thumb — tiny cached JPEG, same auth rules as raw */
+export function thumbUrl(id: string, isPublic = true): string {
+  return fileUrl(id, 'thumb', {}, isPublic);
+}
+
+function fileUrl(
+  id: string,
+  kind: 'raw' | 'thumb',
+  extra: Record<string, string>,
+  isPublic: boolean,
+): string {
+  const params = new URLSearchParams(extra);
   if (!isPublic && getToken()) params.set('token', getToken() as string);
   const qs = params.toString();
-  return `${location.origin}/api/files/${encodeURIComponent(id)}/raw${qs ? `?${qs}` : ''}`;
+  return `${location.origin}/api/files/${encodeURIComponent(id)}/${kind}${qs ? `?${qs}` : ''}`;
 }
 
 let cachedMax: number | null = null;

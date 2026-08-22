@@ -33,6 +33,8 @@ pub struct FileDto {
     pub size: i64,
     pub created_at: i64,
     pub public: bool,
+    /// true when a Telegram thumbnail exists for this file.
+    pub has_thumb: bool,
 }
 
 impl From<FileRow> for FileDto {
@@ -44,6 +46,7 @@ impl From<FileRow> for FileDto {
             size: r.size,
             created_at: r.created_at,
             public: r.public,
+            has_thumb: r.thumb.is_some(),
         }
     }
 }
@@ -356,6 +359,7 @@ pub async fn upload_file(
     // Collect one message id per part; on any failure, roll back the parts
     // that did land so no orphan stays behind.
     let mut parts: Vec<crate::db::FilePart> = Vec::with_capacity(nparts);
+    let mut thumb_b64: Option<String> = None;
     let mut first_err: Option<String> = None;
     for (i, u) in uploaders.into_iter().enumerate() {
         let res = u
@@ -363,15 +367,21 @@ pub async fn upload_file(
             .map_err(|e| format!("upload task failed: {e}"))
             .and_then(|r| r);
         match res {
-            Ok((message_id, _, _)) => parts.push(crate::db::FilePart {
-                message_id,
-                chat: chat_for(i),
-                size: if i + 1 == nparts {
-                    declared - part_size * (nparts as u64 - 1)
-                } else {
-                    part_size
-                } as i64,
-            }),
+            Ok((message_id, _, _, thumb)) => {
+                if thumb_b64.is_none() && let Some(jpeg) = thumb {
+                    use base64::Engine as _;
+                    thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(jpeg));
+                }
+                parts.push(crate::db::FilePart {
+                    message_id,
+                    chat: chat_for(i),
+                    size: if i + 1 == nparts {
+                        declared - part_size * (nparts as u64 - 1)
+                    } else {
+                        part_size
+                    } as i64,
+                })
+            }
             Err(e) => {
                 first_err = Some(e);
                 break;
@@ -404,6 +414,7 @@ pub async fn upload_file(
         folder,
         parts,
         public: false,
+        thumb: thumb_b64,
     };
     if let Err(e) = crate::db::insert(&state.db, &row).await {
         // No metadata row means the file is unmanageable; drop the messages
@@ -528,4 +539,47 @@ fn percent_encode(name: &str) -> String {
         }
     }
     out
+}
+
+/// GET /api/files/{id}/thumb — tiny cached JPEG; same auth rules as raw.
+pub async fn file_thumb(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
+) -> ApiResult<Response> {
+    let row = crate::db::get(&state.db, &id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("file not found"))?;
+
+    if !row.public {
+        let ok = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|t| state.tokens.verify(t))
+            || q.get("token").is_some_and(|t| state.tokens.verify(t));
+        if !ok {
+            return Err(ApiError(
+                axum::http::StatusCode::FORBIDDEN,
+                "file is private".into(),
+            ));
+        }
+    }
+
+    let b64 = row
+        .thumb
+        .ok_or_else(|| ApiError::not_found("no thumbnail"))?;
+    use base64::Engine as _;
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| ApiError::internal(format!("thumb decode: {e}")))?;
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CACHE_CONTROL, "private, max-age=86400, immutable")
+        .header(header::CONTENT_LENGTH, jpeg.len())
+        .body(Body::from(jpeg))
+        .map_err(|e| ApiError::internal(format!("response build: {e}")))
 }

@@ -3,7 +3,7 @@ mod session;
 
 pub use files::{
     create_folder, delete_file, delete_folder, health, list_files, list_folders, limits,
-    raw_file, set_visibility, upload_file,
+    file_thumb, raw_file, set_visibility, upload_file,
 };
 pub use session::{
     add_bot, auth_code, auth_password, auth_phone, create_channel, get_settings, list_bots,

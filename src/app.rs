@@ -16,7 +16,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/auth/phone", post(crate::routes::auth_phone))
         .route("/api/auth/code", post(crate::routes::auth_code))
         .route("/api/auth/password", post(crate::routes::auth_password))
-        .route("/api/files/{id}/raw", get(crate::routes::raw_file));
+        .route("/api/files/{id}/raw", get(crate::routes::raw_file))
+        .route("/api/files/{id}/thumb", get(crate::routes::file_thumb));
 
     let protected = Router::new()
         .route("/api/me", get(crate::routes::me))

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { deleteFile, rawUrl, setFileVisibility, type DriveFile } from '$lib/api';
+  import { deleteFile, rawUrl, setFileVisibility, thumbUrl, type DriveFile } from '$lib/api';
   import { humanSize, mimeIcon, relTime } from '../format';
   import Modal from './Modal.svelte';
   import { closeAttrs, openAttrs, openDialog } from '$lib/invoker';
@@ -12,6 +12,7 @@
 
   let togglingId = $state('');
   let brokenThumbs = $state<Set<string>>(new Set());
+  let brokenFull = $state<Set<string>>(new Set());
 
   async function toggleVisibility(file: DriveFile): Promise<void> {
     if (togglingId) return;
@@ -69,14 +70,24 @@
     {#each files as file (file.id)}
       <tr>
         <td class="c-icon">
-          {#if file.mime.startsWith('image/') && !brokenThumbs.has(file.id)}
+          {#if file.mime.startsWith('image/') && file.has_thumb && !brokenThumbs.has(file.id)}
+            <img
+              class="thumb"
+              src={thumbUrl(file.id, file.public)}
+              alt=""
+              loading="lazy"
+              title={file.mime}
+              onerror={() => (brokenThumbs = new Set([...brokenThumbs, file.id]))}
+            />
+          {:else if file.mime.startsWith('image/') && !brokenFull.has(file.id)}
+            <!-- svelte-ignore a11y_use_click_handler -->
             <img
               class="thumb"
               src={rawUrl(file.id, false, file.public)}
               alt=""
               loading="lazy"
               title={file.mime}
-              onerror={() => (brokenThumbs = new Set([...brokenThumbs, file.id]))}
+              onerror={() => (brokenFull = new Set([...brokenFull, file.id]))}
             />
           {:else}
             <span title={file.mime}>{mimeIcon(file.mime, file.name)}</span>
