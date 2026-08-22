@@ -468,17 +468,42 @@ pub async fn upload_file(
 /// MP4s with the index at the end (no faststart) simply fail past this.
 const VIDEO_PEEK_CAP: u64 = 128 * 1024 * 1024;
 
-/// Whether an `ffmpeg` binary is reachable; probed once.
-fn ffmpeg_available() -> bool {
+/// Which thumbnail encoder this ffmpeg build supports; probed once at
+/// first use. AVIF (libaom) when present — smallest — else WebP.
+#[derive(Clone, Copy, PartialEq)]
+enum ThumbEncoder {
+    None,
+    Webp,
+    Avif,
+}
+
+fn ffmpeg_encoder() -> ThumbEncoder {
     use std::sync::OnceLock;
-    static OK: OnceLock<bool> = OnceLock::new();
-    *OK.get_or_init(|| {
-        std::process::Command::new("ffmpeg")
+    static ENC: OnceLock<ThumbEncoder> = OnceLock::new();
+    *ENC.get_or_init(|| {
+        let runs = std::process::Command::new("ffmpeg")
             .arg("-version")
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+            .output()
+            .is_ok_and(|o| !o.stdout.is_empty());
+        if !runs {
+            return ThumbEncoder::None;
+        }
+        // -encoders lists on stderr; look for the AV1 still-image encoder.
+        let has_aom = std::process::Command::new("ffmpeg")
+            .arg("-encoders")
+            .output()
+            .is_ok_and(|o| {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let err = String::from_utf8_lossy(&o.stderr);
+                text.contains("libaom-av1") || err.contains("libaom-av1")
+            });
+        if has_aom {
+            ThumbEncoder::Avif
+        } else {
+            ThumbEncoder::Webp
+        }
     })
 }
 
@@ -487,8 +512,9 @@ fn ffmpeg_available() -> bool {
 /// downscale for images), and stores it on the row. Runs in the background;
 /// failures are logged and simply leave no thumb.
 pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
-    if !ffmpeg_available() {
-        tracing::info!("ffmpeg not found — skipping video thumbnail for {uid}");
+    let encoder = ffmpeg_encoder();
+    if encoder == ThumbEncoder::None {
+        tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
         return;
     }
     if part0.size as u64 > VIDEO_PEEK_CAP {
@@ -535,48 +561,86 @@ pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::
         }
     }
 
-    let jpeg = tokio::process::Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(&path)
-        // WebP: smallest dependable encoder across ffmpeg builds (AVIF
-        // needs libaom, often absent). 320px at q78 lands ~5-15 KB.
-        .args([
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=320:-2",
-            "-f",
-            "webp",
-            "-lossless",
-            "0",
-            "-compression_level",
-            "6",
-            "-quality",
-            "78",
-            "pipe:1",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await;
-    let _ = tokio::fs::remove_file(&path).await;
+    // 320px, one frame. AVIF first when the build has libaom (smallest);
+    // WebP is the everywhere-fallback. On AVIF failure retry once as WebP
+    // in case the encoder exists but the muxer does not.
+    let common = ["-v", "error", "-i"];
+    let tail_webp = [
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=320:-2",
+        "-f",
+        "webp",
+        "-lossless",
+        "0",
+        "-compression_level",
+        "6",
+        "-quality",
+        "78",
+        "pipe:1",
+    ];
+    let tail_avif = [
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=320:-2",
+        "-c:v",
+        "libaom-av1",
+        "-crf",
+        "42",
+        "-cpu-used",
+        "8",
+        "-still-picture",
+        "1",
+        "-f",
+        "avif",
+        "pipe:1",
+    ];
+    let attempt = |tail: &[&str]| {
+        tokio::process::Command::new("ffmpeg")
+            .args(common)
+            .arg(&path)
+            .args(tail)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+    };
 
-    let jpeg = match jpeg {
-        Ok(out) if out.status.success() && !out.stdout.is_empty() => out.stdout,
-        Ok(out) => {
+    let out = match if encoder == ThumbEncoder::Avif {
+        attempt(&tail_avif).await
+    } else {
+        attempt(&tail_webp).await
+    } {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => o.stdout,
+        Ok(_) if encoder == ThumbEncoder::Avif => {
+            tracing::info!("avif encode failed for {uid}; falling back to webp");
+            match attempt(&tail_webp).await {
+                Ok(o) if o.status.success() && !o.stdout.is_empty() => o.stdout,
+                _ => {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    tracing::info!("no thumbnail produced for {uid}");
+                    return;
+                }
+            }
+        }
+        Ok(o) => {
+            let _ = tokio::fs::remove_file(&path).await;
             tracing::info!(
                 "ffmpeg produced no thumbnail for {uid} (status {:?})",
-                out.status.code()
+                o.status.code()
             );
             return;
         }
         Err(e) => {
+            let _ = tokio::fs::remove_file(&path).await;
             tracing::warn!("ffmpeg failed for {uid}: {e}");
             return;
         }
     };
+    let _ = tokio::fs::remove_file(&path).await;
     use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(out);
     match crate::db::set_thumb(&state.db, uid, &b64).await {
         Ok(true) => tracing::info!("thumbnail stored for {uid}"),
         Ok(false) => tracing::warn!("row {uid} vanished before thumb stored"),
@@ -738,6 +802,8 @@ pub async fn file_thumb(
         "image/png"
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         "image/webp"
+    } else if bytes.get(4..8) == Some(b"ftyp") && bytes.get(8..12).is_some_and(|b| b.starts_with(b"avi")) {
+        "image/avif"
     } else {
         "image/jpeg"
     };
