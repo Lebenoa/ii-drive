@@ -59,6 +59,8 @@ export interface DriveFile {
   size: number;
   /** unix seconds */
   created_at: number;
+  /** false = raw link needs a session token */
+  public: boolean;
 }
 
 interface ErrBody {
@@ -274,9 +276,24 @@ export async function deleteFile(id: string): Promise<void> {
   await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-/** raw public URL for a file (no auth); download=true forces attachment disposition */
-export function rawUrl(id: string, download = false): string {
-  return `${location.origin}/api/files/${encodeURIComponent(id)}/raw${download ? '?dl=1' : ''}`;
+/** PATCH /api/files/{id}/visibility — private by default, public opt-in */
+export async function setFileVisibility(id: string, isPublic: boolean): Promise<void> {
+  await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}/visibility`, {
+    method: 'PATCH',
+    body: { public: isPublic },
+  });
+}
+
+/**
+ * URL for a file's raw stream. Public files work for anyone; private ones
+ * need the session token appended (?token=) — used for logged-in downloads.
+ */
+export function rawUrl(id: string, download = false, isPublic = true): string {
+  const params = new URLSearchParams();
+  if (download) params.set('dl', '1');
+  if (!isPublic && getToken()) params.set('token', getToken() as string);
+  const qs = params.toString();
+  return `${location.origin}/api/files/${encodeURIComponent(id)}/raw${qs ? `?${qs}` : ''}`;
 }
 
 let cachedMax: number | null = null;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { deleteFile, rawUrl, type DriveFile } from '$lib/api';
+  import { deleteFile, rawUrl, setFileVisibility, type DriveFile } from '$lib/api';
   import { humanSize, mimeIcon, relTime } from '../format';
   import Modal from './Modal.svelte';
   import { closeAttrs, openAttrs, openDialog } from '$lib/invoker';
@@ -10,18 +10,31 @@
   let deletingId = $state('');
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
+  let togglingId = $state('');
+
+  async function toggleVisibility(file: DriveFile): Promise<void> {
+    if (togglingId) return;
+    togglingId = file.id;
+    try {
+      await setFileVisibility(file.id, !file.public);
+      file.public = !file.public;
+    } finally {
+      togglingId = '';
+    }
+  }
+
   const DELETE_DIALOG = 'dlg-delete-file';
   let pendingFile = $state<DriveFile | null>(null);
 
-  async function copyLink(id: string): Promise<void> {
+  async function copyLink(file: DriveFile): Promise<void> {
     try {
-      await navigator.clipboard.writeText(rawUrl(id));
+      await navigator.clipboard.writeText(rawUrl(file.id));
       copiedId = id;
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => (copiedId = ''), 1400);
     } catch {
       // clipboard unavailable (insecure context) — open the link instead so the user can copy manually
-      window.open(rawUrl(id), '_blank');
+      window.open(rawUrl(file.id), '_blank');
     }
   }
 
@@ -64,12 +77,22 @@
           <button
             class="icon-btn act-copy"
             type="button"
-            title="Copy public link"
-            onclick={() => void copyLink(file.id)}
+            title={file.public ? 'Copy public link' : 'Private — make public to share'}
+            disabled={!file.public}
+            onclick={() => void copyLink(file)}
           >
             {copiedId === file.id ? '✓' : '🔗'}<span class="act-lbl">{copiedId === file.id ? 'copied' : ''}</span>
           </button>
-          <a class="icon-btn" href={rawUrl(file.id, true)} title="Download">⬇</a>
+          <a class="icon-btn" href={rawUrl(file.id, true, file.public)} title="Download">⬇</a>
+          <button
+            class="icon-btn"
+            type="button"
+            title={file.public ? 'Public — anyone with the link can download' : 'Private — only you can download'}
+            disabled={togglingId === file.id}
+            onclick={() => void toggleVisibility(file)}
+          >
+            {file.public ? '🌐' : '🔒'}
+          </button>
           <button
             class="icon-btn danger"
             type="button"
@@ -169,7 +192,7 @@
   }
 
   .c-actions {
-    width: 130px;
+    width: 165px;
     white-space: nowrap;
     text-align: right;
   }

@@ -32,6 +32,7 @@ pub struct FileDto {
     pub mime: String,
     pub size: i64,
     pub created_at: i64,
+    pub public: bool,
 }
 
 impl From<FileRow> for FileDto {
@@ -42,8 +43,26 @@ impl From<FileRow> for FileDto {
             mime: r.mime,
             size: r.size,
             created_at: r.created_at,
+            public: r.public,
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct VisibilityBody {
+    pub public: bool,
+}
+
+/// PATCH /api/files/{id}/visibility — flip private/public.
+pub async fn set_visibility(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<VisibilityBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !crate::db::set_public(&state.db, &id, body.public).await? {
+        return Err(ApiError::not_found("file not found"));
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "public": body.public })))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -384,6 +403,7 @@ pub async fn upload_file(
         created_at: now_unix(),
         folder,
         parts,
+        public: false,
     };
     if let Err(e) = crate::db::insert(&state.db, &row).await {
         // No metadata row means the file is unmanageable; drop the messages
@@ -442,10 +462,31 @@ pub async fn raw_file(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
+    req: axum::extract::Request,
 ) -> ApiResult<Response> {
     let row = crate::db::get(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
+
+    // Private files need a valid session token: either the usual
+    // Authorization header or ?token= for plain browser links/downloads.
+    if !row.public {
+        let ok = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|t| state.tokens.verify(t))
+            || q
+                .get("token")
+                .is_some_and(|t| state.tokens.verify(t));
+        if !ok {
+            return Err(ApiError(
+                axum::http::StatusCode::FORBIDDEN,
+                "file is private".into(),
+            ));
+        }
+    }
 
     let stream = crate::stream::parts_stream(state.tg.clone(), row.parts.clone())
         .await

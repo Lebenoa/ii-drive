@@ -31,7 +31,7 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
 }
 
 /// Latest schema version; a database without a recorded version is v1.
-const SCHEMA_LATEST: u64 = 2;
+const SCHEMA_LATEST: u64 = 3;
 
 async fn schema_version(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
     let mut res = db.query("SELECT version FROM setting:schema").await?;
@@ -68,6 +68,20 @@ pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
                     tracing::warn!(
                         "migration v2: dropped {dropped} pre-folder file rows \
                          (messages stay in Telegram)"
+                    );
+                }
+            }
+            3 => {
+                // files become private by default: every row without an
+                // explicit visibility is locked down.
+                let mut res = db
+                    .query("UPDATE file SET public = false WHERE public IS NONE RETURN AFTER")
+                    .await?;
+                let updated: Vec<serde_json::Value> = res.take(0)?;
+                if !updated.is_empty() {
+                    tracing::warn!(
+                        "migration v3: {} files defaulted to private",
+                        updated.len()
                     );
                 }
             }
@@ -117,11 +131,16 @@ pub struct FileRow {
     /// Legacy rows without `parts_json` synthesize one part from the columns.
     #[serde(default)]
     pub parts: Vec<FilePart>,
+    /// Private by default: the raw endpoint requires a session token
+    /// (header or ?token=) unless the user marks the file public.
+    #[serde(default)]
+    pub public: bool,
 }
 
 const TABLE: &str = "file";
 
-const ROW_COLS: &str = "uid, name, mime, size, message_id, chat, created_at, parts_json, folder";
+const ROW_COLS: &str =
+    "uid, name, mime, size, message_id, chat, created_at, parts_json, folder, public";
 
 /// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
 /// unset fields as null) into "" instead of failing.
@@ -130,6 +149,14 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+/// Deserializes a `bool` that may arrive as JSON null into false.
+fn null_as_false<'de, D>(d: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
 }
 
 /// Query results are taken as raw `serde_json::Value` (which implements
@@ -150,6 +177,8 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         // unset field as null, so map both to "" (root).
         #[serde(default, deserialize_with = "null_as_empty")]
         folder: String,
+        #[serde(default, deserialize_with = "null_as_false")]
+        public: bool,
     }
     let raw: Raw = serde_json::from_value(v)
         .map_err(|e| DbError::Shape(format!("file row shape mismatch: {e}")))?;
@@ -173,6 +202,7 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         created_at: raw.created_at,
         folder: raw.folder,
         parts,
+        public: raw.public,
     })
 }
 
@@ -191,6 +221,7 @@ pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), 
             "created_at": row.created_at,
             "parts_json": parts_json,
             "folder": row.folder,
+            "public": row.public,
         }))
         .await?;
     Ok(())
@@ -230,6 +261,21 @@ pub async fn list(
         .await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
     rows.into_iter().map(to_row).collect()
+}
+
+/// Flips a file's visibility; false when the uid does not exist.
+pub async fn set_public(
+    db: &surrealdb::Surreal<Conn>,
+    uid: &str,
+    public: bool,
+) -> Result<bool, DbError> {
+    let mut res = db
+        .query("UPDATE file SET public = $p WHERE uid = $uid RETURN AFTER")
+        .bind(("uid", uid.to_string()))
+        .bind(("p", public))
+        .await?;
+    let updated: Vec<serde_json::Value> = res.take(0)?;
+    Ok(!updated.is_empty())
 }
 
 pub async fn delete(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u64, DbError> {
@@ -493,6 +539,7 @@ mod tests {
                 chat: "me".to_string(),
                 size: 42,
             }],
+            public: false,
         }
     }
 
@@ -648,6 +695,23 @@ mod tests {
         assert_eq!(root.len(), 1);
         assert_eq!(root[0].uid, "01N");
         assert!(get(&db, "leg").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn visibility_roundtrip() {
+        let (db, _dir) = temp_db().await;
+        insert(&db, &row("01V", "secret.bin", 1)).await.unwrap();
+
+        // New uploads are private by default.
+        assert!(!get(&db, "01V").await.unwrap().unwrap().public);
+
+        assert!(set_public(&db, "01V", true).await.unwrap());
+        assert!(get(&db, "01V").await.unwrap().unwrap().public);
+
+        assert!(set_public(&db, "01V", false).await.unwrap());
+        assert!(!get(&db, "01V").await.unwrap().unwrap().public);
+
+        assert!(!set_public(&db, "missing", true).await.unwrap());
     }
 
     #[tokio::test]

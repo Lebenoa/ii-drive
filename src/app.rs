@@ -46,6 +46,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/folders/{id}", delete(crate::routes::delete_folder))
         .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
         .route("/api/files/{id}", delete(crate::routes::delete_file))
+        .route(
+            "/api/files/{id}/visibility",
+            axum::routing::patch(crate::routes::set_visibility),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::guard,
