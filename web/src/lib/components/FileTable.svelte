@@ -11,6 +11,7 @@
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
   let togglingId = $state('');
+  let brokenThumbs = $state<Set<string>>(new Set());
 
   async function toggleVisibility(file: DriveFile): Promise<void> {
     if (togglingId) return;
@@ -67,7 +68,20 @@
   <tbody>
     {#each files as file (file.id)}
       <tr>
-        <td class="c-icon"><span title={file.mime}>{mimeIcon(file.mime, file.name)}</span></td>
+        <td class="c-icon">
+          {#if file.mime.startsWith('image/') && !brokenThumbs.has(file.id)}
+            <img
+              class="thumb"
+              src={rawUrl(file.id, false, file.public)}
+              alt=""
+              loading="lazy"
+              title={file.mime}
+              onerror={() => (brokenThumbs = new Set([...brokenThumbs, file.id]))}
+            />
+          {:else}
+            <span title={file.mime}>{mimeIcon(file.mime, file.name)}</span>
+          {/if}
+        </td>
         <td class="c-name" title={file.name}>{file.name}</td>
         <td class="c-size">{humanSize(file.size)}</td>
         <td class="c-date muted" title={new Date(file.created_at * 1000).toLocaleString()}>
@@ -199,6 +213,16 @@
 
   .c-actions a {
     text-decoration: none;
+  }
+
+  .thumb {
+    width: 30px;
+    height: 30px;
+    object-fit: cover;
+    border-radius: 5px;
+    display: block;
+    margin: 0 auto;
+    background: var(--panel-2);
   }
 
   .act-copy {
