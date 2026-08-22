@@ -1,12 +1,19 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import { clearToken, getMe, getToken, type TgUser } from '$lib/api';
 
   // The navbar is owned by the layout, so it fetches its own user info.
   let user = $state<TgUser | null>(null);
 
+  // Depends on the route: logging in does not remount the layout, so the
+  // token check must re-run on navigation for the avatar to appear.
   $effect(() => {
-    if (!getToken()) return;
+    void page.url.pathname;
+    if (!getToken()) {
+      user = null;
+      return;
+    }
     void getMe()
       .then((m) => {
         if (m.authorized) user = m.user;
@@ -16,6 +23,14 @@
       });
   });
 
+  // Popover API fallback: without it the unknown `popover` attribute is
+  // ignored and the menu would render permanently visible, so display is
+  // controlled here in CSS and toggled by class instead.
+  const popoverSupported =
+    typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype;
+  let menuOpen = $state(false);
+  let menuEl = $state<HTMLElement | null>(null);
+
   function logout(): void {
     clearToken();
     goto('/login');
@@ -23,10 +38,26 @@
 
   const ACCOUNT_POPOVER = 'account-menu';
 
+  function toggleMenu(): void {
+    if (popoverSupported) return; // popovertarget handles it
+    menuOpen = !menuOpen;
+  }
+
   function closeMenu(): void {
-    document.getElementById(ACCOUNT_POPOVER)?.hidePopover();
+    if (popoverSupported) {
+      document.getElementById(ACCOUNT_POPOVER)?.hidePopover();
+    } else {
+      menuOpen = false;
+    }
   }
 </script>
+
+<!-- Fallback-only light dismiss: native popovers dismiss themselves. -->
+<svelte:window
+  onclick={(e) => {
+    if (menuOpen && !e.composedPath().includes(menuEl as EventTarget)) menuOpen = false;
+  }}
+/>
 
 <header class="topbar">
   <a class="brand" href="/">ii-drive</a>
@@ -43,16 +74,24 @@
     <button
       class="account-btn"
       type="button"
-      popovertarget={ACCOUNT_POPOVER}
+      popovertarget={popoverSupported ? ACCOUNT_POPOVER : undefined}
       popovertargetaction="toggle"
+      aria-expanded={popoverSupported ? undefined : menuOpen}
       aria-label="Account menu"
+      onclick={toggleMenu}
       title={user.name}
     >
       {user.name.slice(0, 1).toUpperCase()}
     </button>
 
     <!-- Popover API: light-dismiss, top layer, Esc — all native. -->
-    <div id={ACCOUNT_POPOVER} popover="auto" class="account-menu">
+    <div
+      id={ACCOUNT_POPOVER}
+      popover={popoverSupported ? 'auto' : undefined}
+      class="account-menu"
+      class:open={menuOpen}
+      bind:this={menuEl}
+    >
       <p class="who" title={user.name}>{user.name}</p>
       <a class="menu-item" href="/settings" onclick={closeMenu}>⚙ Settings</a>
       <button class="menu-item danger" type="button" onclick={logout}>⎋ Log out</button>
@@ -120,6 +159,8 @@
     border-color: var(--accent);
   }
 
+  /* Hidden by default: the UA popover rule only exists where the API
+     does, and the .open class covers the fallback path. */
   .account-menu {
     position: fixed;
     /* Anchored to the navbar's fixed height rather than the button:
@@ -134,9 +175,14 @@
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
     padding: 6px;
     min-width: 180px;
-    display: flex;
+    display: none;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .account-menu:popover-open,
+  .account-menu.open {
+    display: flex;
   }
 
   .who {

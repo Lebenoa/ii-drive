@@ -452,7 +452,10 @@ pub async fn upload_file(
     if folder.is_empty()
         && !mime.is_empty()
         && let Some(uid) = state.tg.current_user_id().await
-            && let Ok(rules) = crate::db::get_rules(&state.db, &uid.to_string()).await
+            // Fail open to the root on a rules error, but never silently.
+            && let Ok(rules) = crate::db::get_rules(&state.db, &uid.to_string())
+                .await
+                .inspect_err(|e| tracing::warn!("routing rules unavailable, file stays in root: {e}"))
             && let Some(rule) = rules
                 .iter()
                 .find(|r| mime.starts_with(r.mime.trim()))
