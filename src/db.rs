@@ -154,11 +154,19 @@ pub async fn list(
     limit: u64,
     offset: u64,
 ) -> Result<Vec<FileRow>, DbError> {
+    // Rows written before the folder feature have no `folder` field, and
+    // SurrealQL `folder = ""` does not match a missing field — treat those
+    // as root so legacy files stay visible.
+    let folder_clause = if folder.is_empty() {
+        "(folder = $folder OR folder IS NONE)"
+    } else {
+        "folder = $folder"
+    };
     let mut res = db
         .query(format!(
             // CONTAINS "" is true for every name, so one query serves both cases.
             "SELECT {ROW_COLS} FROM file \
-             WHERE string::lowercase(name) CONTAINS $q AND folder = $folder \
+             WHERE string::lowercase(name) CONTAINS $q AND {folder_clause} \
              ORDER BY created_at DESC \
              LIMIT $limit START $offset"
         ))
@@ -566,6 +574,27 @@ mod tests {
             .map(|f| f.name)
             .collect();
         assert_eq!(names, vec!["Docs"]);
+    }
+
+    #[tokio::test]
+    async fn legacy_rows_without_folder_list_in_root() {
+        let (db, _dir) = temp_db().await;
+
+        // A row written before the folder feature existed: no folder field.
+        db.query(
+            "CREATE file SET uid = 'leg', name = 'legacy.bin', mime = 'm', size = 9,              message_id = 3, chat = 'me', created_at = 1",
+        )
+        .await
+        .unwrap();
+
+        let root = list(&db, "", "", 100, 0).await.unwrap();
+        assert_eq!(root.len(), 1, "missing folder field means root");
+        assert_eq!(root[0].uid, "leg");
+
+        // A named folder must not pick up legacy rows.
+        create_folder(&db, "F9", "Sub", "").await.unwrap();
+        let sub = list(&db, "", "F9", 100, 0).await.unwrap();
+        assert!(sub.is_empty());
     }
 }
 
