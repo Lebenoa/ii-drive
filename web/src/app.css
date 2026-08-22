@@ -104,6 +104,15 @@ a {
   filter: brightness(1.08);
 }
 
+.btn.ghost {
+  background: none;
+  border-color: var(--border);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
 .icon-btn {
   background: none;
   border: none;

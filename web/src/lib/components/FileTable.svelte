@@ -201,6 +201,10 @@
     text-decoration: none;
   }
 
+  .act-copy {
+    white-space: nowrap;
+  }
+
   .icon-btn.danger:hover:not(:disabled) {
     color: var(--danger);
   }

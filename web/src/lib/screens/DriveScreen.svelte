@@ -249,7 +249,7 @@
             </div>
             <nav class="folder-list">
                 <button
-                    class="folder-item root"
+                    class="folder-item"
                     class:active={current === ""}
                     type="button"
                     onclick={() => (current = "")}
@@ -262,8 +262,7 @@
                     <button
                         class="folder-item"
                         class:active={current === node.uid}
-                        class:disabled-current={deletingFolder === node.uid}
-                        style={`padding-left:${12 + depth * 16}px`}
+                                        style={`padding-left:${12 + depth * 16}px`}
                         type="button"
                         onclick={() => (current = node.uid)}
                     >
@@ -353,7 +352,7 @@
         </section>
 
         {#if queue.length > 0}
-            <div class="uploads-panel" class:collapsed={panelCollapsed}>
+            <div class="uploads-panel">
                 <button
                     class="up-head"
                     type="button"
@@ -711,10 +710,6 @@
         background: var(--danger);
     }
 
-    .clear-btn {
-        font-size: 13px;
-        padding: 5px 12px;
-    }
 
     .drop-hint {
         margin-top: auto;

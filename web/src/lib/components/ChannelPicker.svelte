@@ -127,7 +127,7 @@
       {#if saved && !redirectOnSave}<p class="muted saved-note">Saved.</p>{/if}
 
       <button
-        class="btn btn-primary submit"
+        class="btn btn-primary"
         type="button"
         disabled={saving || selectedChats.length === 0}
         onclick={save}

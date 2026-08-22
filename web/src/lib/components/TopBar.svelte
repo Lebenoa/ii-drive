@@ -76,10 +76,6 @@
     color: inherit;
   }
 
-  .btn.ghost {
-    padding: 6px 12px;
-    font-size: 13px;
-  }
 
   .content {
     width: min(1200px, 100%);
