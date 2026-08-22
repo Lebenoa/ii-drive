@@ -55,6 +55,7 @@
   let pasteError = $state('');
 
   let dropTarget = $state('');
+  let sidebarOpen = $state(false);
   let dropping = $state(false);
 
   async function dropOnFolder(e: DragEvent, folder: string): Promise<void> {
@@ -295,7 +296,14 @@
 
 <Drive {user} {onLogout}>
     <div class="layout">
-        <aside class="sidebar">
+        {#if sidebarOpen}
+            <div
+                class="sidebar-backdrop"
+                aria-hidden="true"
+                onclick={() => (sidebarOpen = false)}
+            ></div>
+        {/if}
+        <aside class="sidebar" class:open={sidebarOpen}>
             <div class="side-head">
                 <span class="side-title">Folders</span>
                 <button
@@ -319,7 +327,10 @@
                     class:active={current === ""}
                     class:drop={dropTarget === ""}
                     type="button"
-                    onclick={() => (current = "")}
+                    onclick={() => {
+                            current = "";
+                            sidebarOpen = false;
+                        }}
                     ondragover={(e) => folderDragOver(e, "")}
                     ondragleave={() => (dropTarget = "")}
                     ondrop={(e) => void dropOnFolder(e, "")}
@@ -335,7 +346,10 @@
                         class:drop={dropTarget === node.uid}
                         style={`padding-left:${12 + depth * 16}px`}
                         type="button"
-                        onclick={() => (current = node.uid)}
+                        onclick={() => {
+                            current = node.uid;
+                            sidebarOpen = false;
+                        }}
                         ondragover={(e) => folderDragOver(e, node.uid)}
                         ondragleave={() => (dropTarget = "")}
                         ondrop={(e) => void dropOnFolder(e, node.uid)}
@@ -385,6 +399,15 @@
             ondrop={onDrop}
         >
             <div class="area-head">
+                <button
+                    class="icon-btn sidebar-toggle"
+                    type="button"
+                    aria-label="Folders"
+                    aria-expanded={sidebarOpen}
+                    onclick={() => (sidebarOpen = !sidebarOpen)}
+                >
+                    ☰
+                </button>
                 <h2 class="area-title">{folderName(current)}</h2>
                 <div class="search-row">
                     <input
@@ -889,14 +912,47 @@
         color: var(--danger);
     }
 
+    .sidebar-toggle {
+        display: none;
+        font-size: 18px;
+    }
+
+    .sidebar-backdrop {
+        display: none;
+    }
+
     @media (max-width: 720px) {
         .layout {
             flex-direction: column;
         }
 
+        .sidebar-toggle {
+            display: inline-block;
+        }
+
         .sidebar {
-            width: 100%;
-            position: static;
+            position: fixed;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: min(280px, 82vw);
+            z-index: 40;
+            border-radius: 0 var(--radius) var(--radius) 0;
+            transform: translateX(-100%);
+            transition: transform 0.2s ease;
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+        }
+
+        .sidebar.open {
+            transform: none;
+        }
+
+        .sidebar-backdrop {
+            display: block;
+            position: fixed;
+            inset: 0;
+            background: rgba(6, 9, 15, 0.55);
+            z-index: 39;
         }
 
         .uploads-panel {
