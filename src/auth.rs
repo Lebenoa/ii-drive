@@ -61,6 +61,34 @@ impl Tokens {
         }
         expected.as_bytes().ct_eq(sig.as_bytes()).into()
     }
+
+    /// Signs a share link for one file: `<expiry>.<hex sig over "f/{uid}/{exp}">`.
+    /// Unlike session tokens, this grants access to a single file only.
+    pub fn sign_file(&self, uid: &str, ttl_secs: u64) -> String {
+        let exp = now_unix() + ttl_secs;
+        let payload = format!("f/{uid}/{exp}");
+        format!("{exp}.{}", self.sign(&payload))
+    }
+
+    /// Verifies a `sign_file` signature for `uid`.
+    pub fn verify_file(&self, uid: &str, sig: &str) -> bool {
+        let mut parts = sig.split('.');
+        let (Some(exp_str), Some(mac), None) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let Ok(exp) = exp_str.parse::<u64>() else {
+            return false;
+        };
+        if exp < now_unix() {
+            return false;
+        }
+        let expected = self.sign(&format!("f/{uid}/{exp_str}"));
+        expected.len() == mac.len()
+            && !mac.is_empty()
+            && expected.as_bytes().ct_eq(mac.as_bytes()).into()
+    }
 }
 
 fn now_unix() -> u64 {
@@ -113,6 +141,25 @@ mod tests {
         let tok = t.issue(); // exp = now + 0 => already expired on verify
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(!t.verify(&tok));
+    }
+
+    #[test]
+    fn file_link_roundtrip() {
+        let t = Tokens::new("k", 3600);
+        let sig = t.sign_file("01ABC", 60);
+        assert!(t.verify_file("01ABC", &sig));
+        // Wrong uid, garbage, and cross-use as a session token all fail.
+        assert!(!t.verify_file("01XYZ", &sig));
+        assert!(!t.verify_file("01ABC", "garbage"));
+        assert!(!t.verify(&sig));
+    }
+
+    #[test]
+    fn expired_file_link_rejected() {
+        let t = Tokens::new("k", 0);
+        let sig = t.sign_file("01ABC", 0);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(!t.verify_file("01ABC", &sig));
     }
 
     #[test]

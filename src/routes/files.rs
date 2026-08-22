@@ -226,7 +226,15 @@ pub async fn upload_file(
     } else {
         declared.max(1)
     };
-    let nparts = (declared.div_ceil(part_size).max(1) as usize).min(64);
+    // More than 64 parts means the split threshold is far below the file
+    // limit; refuse rather than silently merging the tail into one huge
+    // last part.
+    let nparts = declared.div_ceil(part_size).max(1) as usize;
+    if nparts > 64 {
+        return Err(ApiError::bad_request(format!(
+            "file would split into {nparts} parts (max 64); raise the split threshold in settings"
+        )));
+    }
 
     // Storage target per part: round-robin across the user's selected
     // channels, or the configured fallback.
@@ -390,10 +398,6 @@ pub async fn upload_file(
         return Err(err);
     }
     drop(txs);
-    let mime_is_audio = meta_rx
-        .borrow()
-        .as_ref()
-        .is_some_and(|(_, m)| m.starts_with("audio/"));
 
     // Collect one message id per part; on any failure, roll back the parts
     // that did land so no orphan stays behind.
@@ -432,16 +436,6 @@ pub async fn upload_file(
         return Err(ApiError::bad_request(e));
     }
 
-    // Telegram makes no stripped thumbnail for audio; pull embedded cover
-    // art (ID3 APIC / FLAC PICTURE) from the buffered stream head instead.
-    if thumb_b64.is_none()
-        && mime_is_audio
-        && let Some(img) = crate::art::extract(&head)
-    {
-        use base64::Engine as _;
-        thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(img));
-    }
-
     if fed != declared {
         // The messages may already be live in Telegram (a client that lied
         // low in X-File-Size); remove them so storage matches the error.
@@ -451,6 +445,15 @@ pub async fn upload_file(
         )));
     }
     let (name, mime) = meta_rx.borrow().clone().unwrap_or_default();
+    // Telegram makes no stripped thumbnail for audio; pull embedded cover
+    // art (ID3 APIC / FLAC PICTURE) from the buffered stream head instead.
+    if thumb_b64.is_none()
+        && mime.starts_with("audio/")
+        && let Some(img) = crate::art::extract(&head)
+    {
+        use base64::Engine as _;
+        thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(img));
+    }
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     let row = FileRow {
         uid: ulid::Ulid::new().to_string(),
@@ -475,7 +478,8 @@ pub async fn upload_file(
     // Videos get a first-frame thumbnail and non-JPEG images a converted
     // one in the background (ffmpeg); JPEGs usually arrive with a stripped
     // Telegram thumb already stored above.
-    if row.thumb.is_none()
+    if state.config.media_thumbs
+        && row.thumb.is_none()
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {
         let st = state.clone();
@@ -537,7 +541,7 @@ fn ffmpeg_encoder() -> ThumbEncoder {
 /// downscale for images), and stores it on the row. Runs in the background;
 /// failures are logged and simply leave no thumb.
 pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
-    let encoder = ffmpeg_encoder();
+    let encoder = tokio::task::block_in_place(ffmpeg_encoder);
     if encoder == ThumbEncoder::None {
         tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
         return;
@@ -737,7 +741,8 @@ pub async fn raw_file(
             .is_some_and(|t| state.tokens.verify(t))
             || q
                 .get("token")
-                .is_some_and(|t| state.tokens.verify(t));
+                .is_some_and(|t| state.tokens.verify(t))
+            || q.get("sig").is_some_and(|s| state.tokens.verify_file(&row.uid, s));
         if !ok {
             return Err(ApiError(
                 axum::http::StatusCode::FORBIDDEN,
@@ -750,7 +755,7 @@ pub async fn raw_file(
         .await
         .map_err(ApiError::unavailable)?;
     let body = Body::from_stream(stream);
-    let disposition = if q.contains_key("dl") || q.get("dl").is_some_and(|v| v == "1") {
+    let disposition = if q.get("dl").is_some_and(|v| v == "1") {
         "attachment"
     } else {
         "inline"
@@ -806,7 +811,8 @@ pub async fn file_thumb(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .is_some_and(|t| state.tokens.verify(t))
-            || q.get("token").is_some_and(|t| state.tokens.verify(t));
+            || q.get("token").is_some_and(|t| state.tokens.verify(t))
+            || q.get("sig").is_some_and(|s| state.tokens.verify_file(&row.uid, s));
         if !ok {
             return Err(ApiError(
                 axum::http::StatusCode::FORBIDDEN,
@@ -838,4 +844,33 @@ pub async fn file_thumb(
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("response build: {e}")))
+}
+
+/// TTL of share links minted for private files.
+const FILE_LINK_TTL_SECS: u64 = 7 * 24 * 3600;
+
+/// GET /api/files/{id}/link — minted share URL for a private file
+/// (single-file scope, unlike the session token).
+pub async fn file_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req_headers: axum::http::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = crate::db::get(&state.db, &id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("file not found"))?;
+    // Only the owner may mint links.
+    let authed = req_headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| state.tokens.verify(t));
+    if !authed {
+        return Err(ApiError::unauthorized("unauthorized"));
+    }
+    let sig = state.tokens.sign_file(&row.uid, FILE_LINK_TTL_SECS);
+    Ok(Json(serde_json::json!({
+        "url": format!("/api/files/{}/raw?sig={sig}", row.uid),
+        "expires_in": FILE_LINK_TTL_SECS,
+    })))
 }

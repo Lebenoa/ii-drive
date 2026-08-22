@@ -45,6 +45,7 @@
         progress: number;
         state: "pending" | "uploading" | "done" | "error";
         error: string;
+        target: string;
     };
     let queue = $state<QueueItem[]>([]);
   let panelCollapsed = $state(false);
@@ -64,13 +65,13 @@
     dropTarget = '';
     const raw = e.dataTransfer?.getData('application/x-ii-files');
     if (!raw) return; // external file drop — handled by the file-area zone
-    let ids: string[];
+    let ids: unknown;
     try {
       ids = JSON.parse(raw);
     } catch {
       return;
     }
-    if (ids.includes('') || !Array.isArray(ids)) return;
+    if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string' && id !== '')) return;
     let failed = 0;
     for (const id of ids) {
       try {
@@ -217,6 +218,9 @@
     }
 
     function enqueue(list: FileList | File[]): void {
+        // Uploads target the folder open at drop time — navigating mid-queue
+        // must not redirect the rest.
+        const target = current;
         for (const file of Array.from(list)) {
             const key = nextKey++;
             filesByKey.set(key, file);
@@ -226,6 +230,7 @@
                 progress: 0,
                 state: "pending",
                 error: "",
+                target,
             });
         }
         void pump();
@@ -251,7 +256,7 @@
                         (pct) => {
                             item.progress = pct;
                         },
-                        current,
+                        item.target,
                     );
                     item.state = "done";
                     item.progress = 100;

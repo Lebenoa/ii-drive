@@ -278,6 +278,15 @@ export async function deleteFile(id: string): Promise<void> {
   await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+/**
+ * GET /api/files/{id}/link — time-limited single-file share URL for a
+ * private file (does NOT carry the session token).
+ */
+export async function fileShareLink(id: string): Promise<string> {
+  const res = await request<{ url: string }>(`/api/files/${encodeURIComponent(id)}/link`);
+  return `${location.origin}${res.url}`;
+}
+
 /** PATCH /api/files/{id}/move — cut/paste target (folder '' = root) */
 export async function moveFile(id: string, folder: string): Promise<void> {
   await request<{ ok: true }>(`/api/files/${encodeURIComponent(id)}/move`, {

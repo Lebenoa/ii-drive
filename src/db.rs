@@ -816,6 +816,24 @@ mod tests {
 
         // A second run is a no-op.
         assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
+
+    #[tokio::test]
+    async fn public_backfill_v3() {
+        let (db, _dir) = temp_db().await;
+        // Pre-v3 row: no public field at all.
+        set_schema_version(&db, 2).await.unwrap();
+        db.query(
+            "CREATE file SET uid = 'v3', name = 'x', mime = 'm', size = 1,              message_id = 1, chat = 'me', created_at = 1, folder = ''",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(migrate(&db).await.unwrap(), 3);
+        let row = get(&db, "v3").await.unwrap().unwrap();
+        assert!(!row.public, "backfilled rows must be private");
+        // Idempotent second run.
+        assert_eq!(migrate(&db).await.unwrap(), 3);
+    }
     }
 }
 

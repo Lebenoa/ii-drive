@@ -14,6 +14,8 @@ pub struct Config {
     pub max_file_size: u64,
     pub web_dist: String,
     pub allowed_phones: Vec<String>,
+    /// Generate thumbnails for videos/images with ffmpeg when available.
+    pub media_thumbs: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +32,7 @@ struct RawConfig {
     max_file_size: Option<SizeRepr>,
     web_dist: Option<String>,
     allowed_phones: Option<Vec<String>>,
+    media_thumbs: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +88,7 @@ impl Config {
                 .map(|p| normalize_phone(p))
                 .filter(|p| !p.is_empty())
                 .collect(),
+            media_thumbs: raw.media_thumbs.unwrap_or(true),
         })
     }
 

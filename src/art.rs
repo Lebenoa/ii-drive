@@ -1,5 +1,6 @@
-//! Embedded cover-art extraction for audio containers: ID3v2 `APIC`
-//! frames (mp3 and friends) and FLAC `PICTURE` metadata blocks. Pure
+//! Embedded cover-art extraction for audio containers: ID3v2.3/2.4 `APIC`
+//! frames (mp3 and friends; 2.2's 3-byte `PIC` frames are not handled —
+//! too rare to matter) and FLAC `PICTURE` metadata blocks. Pure
 //! byte parsing, no decode — the payload is already a jpeg/png.
 
 fn be32(b: &[u8]) -> usize {

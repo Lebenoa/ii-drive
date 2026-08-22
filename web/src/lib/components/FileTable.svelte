@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { deleteFile, rawUrl, setFileVisibility, thumbUrl, type DriveFile } from '$lib/api';
+  import {
+  deleteFile,
+  fileShareLink,
+  rawUrl,
+  setFileVisibility,
+  thumbUrl,
+  type DriveFile,
+} from '$lib/api';
   import { humanSize, mimeIcon, relTime } from '../format';
   import Modal from './Modal.svelte';
   import { closeAttrs, openAttrs, openDialog } from '$lib/invoker';
@@ -46,6 +53,15 @@
   }
 
   let allSelected = $derived(files.length > 0 && files.every((f) => selected.has(f.id)));
+
+  // Prune selection when the list refilters or reloads — bulk actions must
+  // never touch rows that are no longer visible.
+  $effect(() => {
+    const visible = new Set(files.map((f) => f.id));
+    if ([...selected].some((id) => !visible.has(id))) {
+      selected = new Set([...selected].filter((id) => visible.has(id)));
+    }
+  });
 
   async function bulkDelete(): Promise<void> {
     if (bulkBusy) return;
@@ -111,14 +127,20 @@
   let pendingFile = $state<DriveFile | null>(null);
 
   async function copyLink(file: DriveFile): Promise<void> {
+    // Private files get a time-limited single-file link, never the session
+    // token that ?token= would leak.
+    const url = file.public
+      ? rawUrl(file.id)
+      : await fileShareLink(file.id).catch(() => null);
+    if (url === null) return;
     try {
-      await navigator.clipboard.writeText(rawUrl(file.id));
+      await navigator.clipboard.writeText(url);
       copiedId = file.id;
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => (copiedId = ''), 1400);
     } catch {
       // clipboard unavailable (insecure context) — open the link instead so the user can copy manually
-      window.open(rawUrl(file.id), '_blank');
+      window.open(url, '_blank');
     }
   }
 
@@ -260,7 +282,6 @@
             class="icon-btn act-copy"
             type="button"
             title={file.public ? 'Copy public link' : 'Private — make public to share'}
-            disabled={!file.public}
             onclick={() => void copyLink(file)}
           >
             {copiedId === file.id ? '✓' : '🔗'}
@@ -302,6 +323,7 @@
             type="checkbox"
             aria-label="Select all"
             checked={allSelected}
+            indeterminate={!allSelected && selected.size > 0}
             onchange={selectAll}
           />
         </th>
