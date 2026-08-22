@@ -447,7 +447,117 @@ pub async fn upload_file(
         return Err(e.into());
     }
 
+    // Videos get a first-frame thumbnail in the background (ffmpeg).
+    if row.thumb.is_none() && row.mime.starts_with("video/") {
+        let st = state.clone();
+        let uid = row.uid.clone();
+        let part0 = row.parts[0].clone();
+        tokio::spawn(async move {
+            extract_video_thumb(&st, &uid, part0).await;
+        });
+    }
+
     Ok(Json(serde_json::json!({ "file": FileDto::from(row) })))
+}
+
+/// Cap on how much of a video we download for first-frame extraction.
+/// MP4s with the index at the end (no faststart) simply fail past this.
+const VIDEO_PEEK_CAP: u64 = 128 * 1024 * 1024;
+
+/// Whether an `ffmpeg` binary is reachable; probed once.
+fn ffmpeg_available() -> bool {
+    use std::sync::OnceLock;
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// Downloads the first part of a freshly uploaded video (bounded), decodes
+/// its first frame with ffmpeg, and stores the JPEG as the row thumbnail.
+/// Runs in the background; failures are logged and simply leave no thumb.
+pub async fn extract_video_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
+    if !ffmpeg_available() {
+        tracing::info!("ffmpeg not found — skipping video thumbnail for {uid}");
+        return;
+    }
+    if part0.size as u64 > VIDEO_PEEK_CAP {
+        tracing::info!("video {uid} too large for thumbnail extraction, skipping");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join("ii-task-thumbs");
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        tracing::warn!("thumb temp dir: {e}");
+        return;
+    }
+    let path = dir.join(uid);
+    {
+        use futures::StreamExt;
+        let mut stream = match crate::stream::file_stream(&state.tg, part0.message_id, &part0.chat)
+            .await
+        {
+            Ok(s) => Box::pin(s),
+            Err(e) => {
+                tracing::warn!("thumb download start failed for {uid}: {e}");
+                return;
+            }
+        };
+        let mut out = match tokio::fs::File::create(&path).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("thumb temp file failed for {uid}: {e}");
+                return;
+            }
+        };
+        let mut written: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await {
+                tracing::warn!("thumb write failed for {uid}: {e}");
+                let _ = tokio::fs::remove_file(&path).await;
+                return;
+            }
+            written += chunk.len() as u64;
+            if written > VIDEO_PEEK_CAP {
+                break; // enough — or the index is at the end; ffmpeg will tell
+            }
+        }
+    }
+
+    let jpeg = tokio::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&path)
+        .args(["-frames:v", "1", "-vf", "scale=320:-2", "-f", "mjpeg", "pipe:1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await;
+    let _ = tokio::fs::remove_file(&path).await;
+
+    let jpeg = match jpeg {
+        Ok(out) if out.status.success() && !out.stdout.is_empty() => out.stdout,
+        Ok(out) => {
+            tracing::info!("ffmpeg produced no frame for {uid} (status {:?})", out.status.code());
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("ffmpeg failed for {uid}: {e}");
+            return;
+        }
+    };
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg);
+    match crate::db::set_thumb(&state.db, uid, &b64).await {
+        Ok(true) => tracing::info!("video thumbnail stored for {uid}"),
+        Ok(false) => tracing::warn!("row {uid} vanished before thumb stored"),
+        Err(e) => tracing::warn!("thumb store failed for {uid}: {e}"),
+    }
 }
 
 /// Best-effort removal of already-posted part messages after a failure.

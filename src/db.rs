@@ -302,6 +302,22 @@ pub async fn list(
     rows.into_iter().map(to_row).collect()
 }
 
+/// Stores a thumbnail after the fact (video first-frame extraction runs
+/// in the background). false when the uid does not exist.
+pub async fn set_thumb(
+    db: &surrealdb::Surreal<Conn>,
+    uid: &str,
+    thumb_b64: &str,
+) -> Result<bool, DbError> {
+    let mut res = db
+        .query("UPDATE file SET thumb = $t WHERE uid = $uid RETURN AFTER")
+        .bind(("uid", uid.to_string()))
+        .bind(("t", thumb_b64.to_string()))
+        .await?;
+    let updated: Vec<serde_json::Value> = res.take(0)?;
+    Ok(!updated.is_empty())
+}
+
 /// Flips a file's visibility; false when the uid does not exist.
 pub async fn set_public(
     db: &surrealdb::Surreal<Conn>,
