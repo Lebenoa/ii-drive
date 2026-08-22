@@ -28,9 +28,10 @@
 
 <style>
   .shell {
-    min-height: 100vh;
+    height: 100vh;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   .topbar {
@@ -83,6 +84,10 @@
   .content {
     width: min(1200px, 100%);
     margin: 0 auto;
-    padding: 24px 20px 60px;
+    padding: 20px 20px 24px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 </style>
