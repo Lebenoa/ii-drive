@@ -399,6 +399,17 @@
                 Drop files to upload here
             </div>
         </section>
+
+        <!-- Phones have no drag &amp; drop: dedicated upload button. -->
+        <button
+            class="upload-fab"
+            type="button"
+            aria-label="Upload files"
+            title="Upload to {folderName(current)}"
+            onclick={() => input?.click()}
+        >
+            +
+        </button>
     </div>
 
     <Modal
@@ -685,6 +696,10 @@
         color: var(--accent);
     }
 
+    .upload-fab {
+        display: none;
+    }
+
     @media (max-width: 720px) {
         .layout {
             flex-direction: column;
@@ -693,6 +708,30 @@
         .sidebar {
             width: 100%;
             position: static;
+        }
+
+        .upload-fab {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: none;
+            background: var(--accent-strong);
+            color: #fff;
+            font-size: 30px;
+            line-height: 1;
+            cursor: pointer;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            z-index: 20;
+        }
+
+        .upload-fab:active {
+            background: var(--accent);
         }
     }
 
