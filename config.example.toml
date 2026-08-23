@@ -1,5 +1,9 @@
 # ii-drive — Telegram Drive configuration
 # Copy this file to config.toml and fill in your values.
+#
+# Every key below is optional — the server starts with these defaults if
+# config.toml is missing or a key is omitted. Only api_id/api_hash and a
+# real `secret` are needed before the drive is usable and secure.
 
 # HTTP server bind address
 host = "127.0.0.1"
@@ -41,3 +45,8 @@ max_file_size = "2GiB"
 
 # Folder containing the built web UI (svelte app). Served at "/".
 web_dist = "web/dist"
+
+# Generate thumbnails for images and videos. Uses ffmpeg for videos when it
+# is on PATH; without it, video thumbs fall back to whatever Telegram
+# returns and non-video previews still work. Default: true.
+media_thumbs = true

@@ -15,7 +15,8 @@ interface.
 ## Requirements
 
 - Rust 1.85+ (2021 edition works; built with 1.98)
-- [nub](https://crates.io/crates/nub) (all-in-one Node.js toolkit) for the web UI
+- Node.js 18+ for the web UI — any package manager/runner works
+  (npm, pnpm, bun, yarn, nub, …); examples below use `nub`
 - A Telegram **api_id / api_hash** from <https://my.telegram.org/apps>
 - A Telegram account (user account, not a bot) for uploads
 
@@ -47,7 +48,7 @@ interface.
 2. **Build the web UI:**
 
    ```sh
-   cd web && nub install && nub run build && cd ..
+   cd web && nub install && nub run build && cd ..   # or: npm/pnpm/bun install && npm/pnpm/bun run build
    ```
 
 3. **Build and run the server:**
@@ -118,7 +119,7 @@ just log in again through the web UI.
 ```sh
 cargo test            # offline unit tests (auth, config, db roundtrip)
 cargo clippy
-cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080)
+cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `npm run dev` etc. work the same
 ```
 
 The database is embedded — no external SurrealDB server. Both `data/` files
