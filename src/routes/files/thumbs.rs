@@ -217,11 +217,10 @@ pub async fn file_thumb(
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
 
+    // Indistinguishable from a missing row, as in `raw_file`: the status code
+    // must not reveal that another account owns this id.
     if !super::may_read(&state.tokens, &row, req.headers(), &q) {
-        return Err(ApiError(
-            axum::http::StatusCode::FORBIDDEN,
-            "file is private".into(),
-        ));
+        return Err(ApiError::not_found("file not found"));
     }
 
     let b64 = row
