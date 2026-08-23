@@ -59,7 +59,8 @@
     error = '';
     try {
       const res = await sendLoginPassword(tgPassword);
-      finish(res.token);
+      if (res.status === 'ok') finish(res.token);
+      else error = res.hint ?? 'Password required.';
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {

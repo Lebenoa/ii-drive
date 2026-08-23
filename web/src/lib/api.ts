@@ -450,8 +450,9 @@ export async function uploadFile(
       reject(apiErr);
       return;
     }
+    const ok = body !== null && typeof body === 'object' && 'file' in body;
     resolve(
-      body !== null && typeof body === 'object' && 'file' in body
+      ok
         ? // Backend contract: {file: DriveFile}; no client-side validator worth its cost here.
           (body.file as DriveFile)
         : {
@@ -460,6 +461,8 @@ export async function uploadFile(
             mime: file.type || 'application/octet-stream',
             size: file.size,
             created_at: Math.floor(Date.now() / 1000),
+            public: false,
+            has_thumb: false,
           },
     );
   };

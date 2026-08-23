@@ -528,7 +528,8 @@
   class="preview"
   onclose={() => (previewFile = null)}
   onclick={(e: MouseEvent) => {
-    if (e.target === e.currentTarget) e.currentTarget.close();
+    const dlg = e.currentTarget as HTMLDialogElement | null;
+    if (dlg && e.target === dlg) dlg.close();
   }}
 >
   {#if previewFile}

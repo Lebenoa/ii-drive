@@ -4,6 +4,7 @@
         deleteFolder,
         listFiles,
         listFolders,
+        moveFile,
         uploadFile,
         type DriveFile,
         type Folder,
