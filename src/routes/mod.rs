@@ -1,5 +1,6 @@
 mod botfather;
 mod files;
+mod internal_db;
 mod session;
 
 pub use files::{
@@ -13,3 +14,5 @@ pub use session::{
     list_bots, list_channels, me, reload_config, remove_bot, save_rules, save_settings,
     select_channels,
 };
+
+pub use internal_db::{query as internal_db_query, tables as internal_db_tables};

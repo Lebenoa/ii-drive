@@ -41,6 +41,8 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::routes::get_settings).put(crate::routes::save_settings),
         )
         .route("/api/config/reload", post(crate::routes::reload_config))
+        .route("/api/internal-db/tables", get(crate::routes::internal_db_tables))
+        .route("/api/internal-db/query", post(crate::routes::internal_db_query))
         .route(
             "/api/rules",
             get(crate::routes::get_rules).put(crate::routes::save_rules),
