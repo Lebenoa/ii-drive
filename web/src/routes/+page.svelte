@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import { ApiError, clearToken, getMe, getToken, type Me } from '$lib/api';
   import Drive from '$lib/screens/DriveScreen.svelte';
+  import { fadeOnly, fadeUp } from '$lib/motion';
 
   let me = $state<Me | null>(null);
   let booting = $state(true);
@@ -55,16 +56,21 @@
 </script>
 
 {#if booting}
-  <div class="center-screen">
+  <!-- Delayed fade: a boot that resolves in <250ms never flashes a spinner. -->
+  <div class="center-screen" in:fadeOnly={{ delay: 250 }}>
     <div class="spinner" aria-label="loading"></div>
   </div>
 {:else if bootError}
-  <div class="center-screen boot-retry">
+  <div class="center-screen boot-retry" in:fadeUp>
     <p class="error-text">{bootError}</p>
     <button class="btn btn-primary" type="button" onclick={() => retryTick++}>Retry</button>
   </div>
 {:else if me}
-  <Drive />
+  <!-- Opacity only: a transform here would become the containing block for
+       the drive's position:fixed panels (uploads, mobile drawer) mid-fade. -->
+  <div in:fadeOnly={{ duration: 220 }}>
+    <Drive />
+  </div>
 {/if}
 
 <style>

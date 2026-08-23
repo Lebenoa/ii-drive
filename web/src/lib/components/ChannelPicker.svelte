@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { flip } from 'svelte/animate';
   import { createChannel, fetchChannels, saveChannels, type ChannelInfo } from '$lib/api';
+  import { fadeUp, flipDur, pop, stagger } from '$lib/motion';
 
   let {
     onDone = null,
@@ -87,27 +89,35 @@
     {/if}
 
     {#if loading}
-      <p class="muted">Loading your chats…</p>
+      <p class="muted loading-row">
+        <span class="spinner btn-spin"></span>
+        Loading your chats…
+      </p>
     {:else}
       <div class="list" role="listbox" aria-label="Storage channels">
-        {#each available as c (c.chat)}
+        {#each available as c, i (c.chat)}
           <button
             type="button"
             class="item"
             class:picked={selectedChats.includes(c.chat)}
             onclick={() => toggle(c.chat)}
+            in:fadeUp={{ delay: stagger(i) }}
+            animate:flip={{ duration: flipDur() }}
           >
-            <span class="check">{selectedChats.includes(c.chat) ? '✓' : ''}</span>
+            <span class="check">
+              {#if selectedChats.includes(c.chat)}<span in:pop>✓</span>{/if}
+            </span>
             {c.title}
             <span class="muted key">{c.chat}</span>
           </button>
         {:else}
-          <p class="muted">No channels found — add this account to a channel first.</p>
+          <p class="muted" in:fadeUp>No channels found — add this account to a channel first.</p>
         {/each}
       </div>
 
       <form
         class="create-row"
+        in:fadeUp={{ delay: stagger(available.length) }}
         onsubmit={(e) => {
           e.preventDefault();
           void create();
@@ -121,20 +131,26 @@
           maxlength={128}
           disabled={creating}
         />
-        <button class="btn" type="submit" disabled={creating || newTitle.trim().length === 0}>
+        <button
+          class="btn busy-btn"
+          type="submit"
+          disabled={creating || newTitle.trim().length === 0}
+        >
+          {#if creating}<span class="spinner btn-spin"></span>{/if}
           {creating ? 'Creating…' : 'Create'}
         </button>
       </form>
 
       {#if error}<p class="error-text">{error}</p>{/if}
-      {#if saved && !redirectOnSave}<p class="muted saved-note">Saved.</p>{/if}
+      {#if saved && !redirectOnSave}<p class="muted saved-note" transition:fadeUp>Saved.</p>{/if}
 
       <button
-        class="btn btn-primary"
+        class="btn btn-primary busy-btn"
         type="button"
         disabled={saving || selectedChats.length === 0}
         onclick={save}
       >
+        {#if saving}<span class="spinner btn-spin"></span>{/if}
         {saving ? 'Saving…' : `Use ${selectedChats.length || ''} selected`}
       </button>
     {/if}
@@ -211,6 +227,18 @@
     text-align: left;
     cursor: pointer;
     font-size: 14px;
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      background var(--dur) var(--ease),
+      transform var(--dur-fast) var(--ease);
+  }
+
+  .item:hover {
+    border-color: #39435c;
+  }
+
+  .item:active {
+    transform: scale(0.99);
   }
 
   .item.picked {
@@ -223,6 +251,12 @@
     flex-shrink: 0;
   }
 
+  /* The tick pops in on select; inline boxes ignore transform, so it
+     needs its own block. */
+  .check span {
+    display: inline-block;
+  }
+
   .key {
     margin-left: auto;
     font-size: 11.5px;
@@ -231,5 +265,29 @@
   .saved-note {
     text-align: center;
     margin: 0;
+  }
+
+  .loading-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+
+  /* Reuses the global .spinner animation; only the scale changes so it
+     sits inside a control instead of holding a whole screen. */
+  .btn-spin {
+    width: 13px;
+    height: 13px;
+    border-width: 2px;
+    border-color: color-mix(in srgb, currentColor 28%, transparent);
+    border-top-color: currentColor;
+    flex-shrink: 0;
+  }
+
+  .busy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
   }
 </style>

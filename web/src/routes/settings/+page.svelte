@@ -16,6 +16,7 @@
     type RouteRule,
   } from '$lib/api';
   import Channels from '$lib/components/ChannelPicker.svelte';
+  import { collapse, fadeUp, stagger } from '$lib/motion';
 
   let checking = $state(true);
   let bots = $state<BotEntry[]>([]);
@@ -31,8 +32,12 @@
   let splitMsg = $state('');
   let splitError = $state('');
 
-  // Auto-upload routing rules (mime prefix -> folder), ordered.
-  let rules = $state<RouteRule[]>([]);
+  // Auto-upload routing rules (mime prefix -> folder), ordered. `uid` is
+  // client-only and never sent: keyed rows need an identity that survives
+  // the save round-trip, and index keys would animate the wrong row out.
+  type UiRule = RouteRule & { uid: number };
+  let ruleSeq = 0;
+  let rules = $state<UiRule[]>([]);
   let folders = $state<Folder[]>([]);
   let rulesLoaded = $state(false);
   let rulesSaving = $state(false);
@@ -42,7 +47,7 @@
   const MIME_PRESETS = ['image/', 'video/', 'audio/', 'application/pdf', 'text/'];
 
   function addRule(): void {
-    rules = [...rules, { mime: 'image/', folder: folders[0]?.uid ?? '' }];
+    rules = [...rules, { uid: ruleSeq++, mime: 'image/', folder: folders[0]?.uid ?? '' }];
     rulesMsg = '';
     rulesError = '';
   }
@@ -61,11 +66,11 @@
     rulesMsg = '';
     rulesError = '';
     try {
-      const cleaned = rules
-        .map((r) => ({ mime: r.mime.trim(), folder: r.folder }))
+      const kept = rules
+        .map((r) => ({ ...r, mime: r.mime.trim() }))
         .filter((r) => r.mime !== '' && r.folder !== '');
-      await saveRules(cleaned);
-      rules = cleaned;
+      await saveRules(kept.map(({ mime, folder }) => ({ mime, folder })));
+      rules = kept;
       rulesMsg = 'Saved.';
     } catch (err) {
       rulesError = err instanceof Error ? err.message : String(err);
@@ -91,7 +96,9 @@
         const s = await getSettings();
         splitMb = s.split_mb;
         splitLoaded = true;
-        [rules, folders] = await Promise.all([getRules(), listFolders()]);
+        const [loadedRules, loadedFolders] = await Promise.all([getRules(), listFolders()]);
+        rules = loadedRules.map((r) => ({ ...r, uid: ruleSeq++ }));
+        folders = loadedFolders;
         rulesLoaded = true;
       } catch (err) {
         goto('/login');
@@ -161,12 +168,14 @@
   </header>
 
   {#if checking}
+    <!-- No exit on the spinner: it fills the viewport, so fading it out
+         while the sections mount below would double the page height. -->
     <div class="center-screen">
       <div class="spinner" aria-label="loading"></div>
     </div>
   {:else}
     <main class="content">
-      <section class="card section">
+      <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
         <h2>Storage channels</h2>
         <p class="muted hint">
           Uploads are spread across the selected channels. You can also create a
@@ -175,7 +184,7 @@
         <Channels onDone={null} redirectOnSave={false} embedded />
       </section>
 
-      <section class="card section">
+      <section class="card section" in:fadeUp={{ delay: stagger(1) }}>
         <h2>Split uploads</h2>
         <p class="muted hint">
           Files larger than this threshold are split into parts that upload
@@ -210,11 +219,12 @@
               </button>
             {/each}
             <button
-              class="btn btn-primary"
+              class="btn btn-primary busy-btn"
               type="button"
               disabled={splitSaving}
               onclick={() => void saveSplit()}
             >
+              {#if splitSaving}<span class="spinner btn-spin"></span>{/if}
               {splitSaving ? 'Saving…' : 'Save'}
             </button>
           </div>
@@ -223,14 +233,14 @@
             files keep their current layout; the threshold only affects new
             uploads.
           </p>
-          {#if splitMsg}<p class="ok-text">{splitMsg}</p>{/if}
+          {#if splitMsg}<p class="ok-text" transition:fadeUp>{splitMsg}</p>{/if}
           {#if splitError}<p class="error-text">{splitError}</p>{/if}
         {:else}
           <p class="muted">Loading…</p>
         {/if}
       </section>
 
-      <section class="card section">
+      <section class="card section" in:fadeUp={{ delay: stagger(2) }}>
         <h2>Auto-upload routing</h2>
         <p class="muted hint">
           Files uploaded to the root folder are sorted automatically: the
@@ -240,8 +250,8 @@
         {#if rulesLoaded}
           {#if rules.length > 0}
             <ul class="rule-list">
-              {#each rules as rule, i (i)}
-                <li class="rule-row">
+              {#each rules as rule, i (rule.uid)}
+                <li class="rule-row" in:fadeUp={{ delay: stagger(i) }} out:collapse>
                   <input
                     class="field rule-mime"
                     list="mime-presets"
@@ -273,25 +283,26 @@
               + Add rule
             </button>
             <button
-              class="btn btn-primary"
+              class="btn btn-primary busy-btn"
               type="button"
               disabled={rulesSaving || folders.length === 0}
               onclick={() => void saveRouting()}
             >
+              {#if rulesSaving}<span class="spinner btn-spin"></span>{/if}
               {rulesSaving ? 'Saving…' : 'Save'}
             </button>
           </div>
           {#if folders.length === 0}
             <p class="muted hint">Create a folder in the drive first.</p>
           {/if}
-          {#if rulesMsg}<p class="ok-text">{rulesMsg}</p>{/if}
+          {#if rulesMsg}<p class="ok-text" transition:fadeUp>{rulesMsg}</p>{/if}
           {#if rulesError}<p class="error-text">{rulesError}</p>{/if}
         {:else}
           <p class="muted">Loading…</p>
         {/if}
       </section>
 
-      <section class="card section">
+      <section class="card section" in:fadeUp={{ delay: stagger(3) }}>
         <h2>Download bots</h2>
         <p class="muted hint">
           Bots download files through their own rate limits, so several bots
@@ -315,7 +326,12 @@
             bind:value={token}
             disabled={adding}
           />
-          <button class="btn btn-primary" type="submit" disabled={adding || token.trim().length === 0}>
+          <button
+            class="btn btn-primary busy-btn"
+            type="submit"
+            disabled={adding || token.trim().length === 0}
+          >
+            {#if adding}<span class="spinner btn-spin"></span>{/if}
             {adding ? 'Adding…' : 'Add bot'}
           </button>
         </form>
@@ -324,15 +340,16 @@
 
         {#if bots.length > 0}
           <ul class="bot-list">
-            {#each bots as b (b.id)}
-              <li class="bot-item">
+            {#each bots as b, i (b.id)}
+              <li class="bot-item" in:fadeUp={{ delay: stagger(i) }} out:collapse>
                 <span>@{b.username}</span>
                 <button
-                  class="btn ghost"
+                  class="btn ghost busy-btn"
                   type="button"
                   disabled={removingId === b.id}
                   onclick={() => drop(b)}
                 >
+                  {#if removingId === b.id}<span class="spinner btn-spin"></span>{/if}
                   {removingId === b.id ? 'Removing…' : 'Remove'}
                 </button>
               </li>
@@ -347,7 +364,7 @@
             <p class="muted">Channel access:</p>
             <ul>
               {#each results as r, i (i)}
-                <li>
+                <li in:fadeUp={{ delay: stagger(i) }}>
                   <span>{r.ok ? '✓' : '✗'} @{r.bot} in {r.title}</span>
                   {#if !r.ok}<span class="error-text">{r.error}</span>{/if}
                 </li>
@@ -381,6 +398,7 @@
     color: var(--muted);
     text-decoration: none;
     font-size: 13.5px;
+    transition: color var(--dur-fast) var(--ease);
   }
 
   .back:hover {
@@ -514,5 +532,22 @@
     color: var(--ok, #2e9e5b);
     font-size: 12.5px;
     margin: 4px 0 0;
+  }
+
+  .busy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+  }
+
+  /* Reuses the global .spinner animation at control scale. */
+  .btn-spin {
+    width: 13px;
+    height: 13px;
+    border-width: 2px;
+    border-color: color-mix(in srgb, currentColor 30%, transparent);
+    border-top-color: currentColor;
+    flex-shrink: 0;
   }
 </style>

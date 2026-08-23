@@ -10,7 +10,16 @@
     } from "$lib/api";
     import FileTable from "../components/FileTable.svelte";
     import Modal from "../components/Modal.svelte";
-    import { closeAttrs, openAttrs, openDialog } from "$lib/invoker";
+    import { closeAttrs, openDialog } from "$lib/invoker";
+    import {
+        collapse,
+        fadeOnly,
+        fadeUp,
+        pop,
+        stagger,
+        flipDur,
+    } from "$lib/motion";
+    import { flip } from "svelte/animate";
 
     let folders = $state<Folder[]>([]);
     let current = $state(""); // folder uid, '' = root
@@ -50,14 +59,16 @@
   let pasting = $state(false);
   let pasteError = $state('');
 
-  let dropTarget = $state('');
+  // null, not '': '' is the root folder's own uid, so an empty-string rest
+  // value made the "All files" row read as a permanent drop target.
+  let dropTarget = $state<string | null>(null);
   let sidebarOpen = $state(false);
   let dropping = $state(false);
 
   async function dropOnFolder(e: DragEvent, folder: string): Promise<void> {
     e.preventDefault();
     dropping = false;
-    dropTarget = '';
+    dropTarget = null;
     const raw = e.dataTransfer?.getData('application/x-ii-files');
     if (!raw) return; // external file drop — handled by the file-area zone
     let ids: unknown;
@@ -301,6 +312,7 @@
                 class="sidebar-backdrop"
                 aria-hidden="true"
                 onclick={() => (sidebarOpen = false)}
+                transition:fadeOnly
             ></div>
         {/if}
         <aside class="sidebar" class:open={sidebarOpen}>
@@ -311,11 +323,9 @@
                     type="button"
                     title="New folder in current location"
                     disabled={creating}
-                    {...openAttrs(NEW_FOLDER_DIALOG)}
                     onclick={() => {
                         newName = "";
-                        if (!("commandFor" in HTMLButtonElement.prototype))
-                            openDialog(NEW_FOLDER_DIALOG);
+                        openDialog(NEW_FOLDER_DIALOG);
                     }}
                 >
                     +
@@ -332,14 +342,14 @@
                             sidebarOpen = false;
                         }}
                     ondragover={(e) => folderDragOver(e, "")}
-                    ondragleave={() => (dropTarget = "")}
+                    ondragleave={() => (dropTarget = null)}
                     ondrop={(e) => void dropOnFolder(e, "")}
                 >
                     <span class="f-ico">📁</span><span class="f-name"
                         >All files</span
                     >
                 </button>
-                {#each tree as { node, depth } (node.uid)}
+                {#each tree as { node, depth }, i (node.uid)}
                     <button
                         class="folder-item"
                         class:active={current === node.uid}
@@ -351,8 +361,10 @@
                             sidebarOpen = false;
                         }}
                         ondragover={(e) => folderDragOver(e, node.uid)}
-                        ondragleave={() => (dropTarget = "")}
+                        ondragleave={() => (dropTarget = null)}
                         ondrop={(e) => void dropOnFolder(e, node.uid)}
+                        animate:flip={{ duration: flipDur() }}
+                        transition:fadeUp={{ delay: stagger(i) }}
                     >
                         <span class="f-ico">📁</span><span
                             class="f-name"
@@ -360,6 +372,7 @@
                         >
                         <span
                             class="f-del"
+                            class:busy={deletingFolder === node.uid}
                             role="button"
                             tabindex="-1"
                             title={deletingFolder === node.uid
@@ -368,14 +381,7 @@
                             onclick={(e) => {
                                 e.stopPropagation();
                                 pendingFolder = node;
-                                if (
-                                    !(
-                                        "commandFor" in
-                                        HTMLButtonElement.prototype
-                                    )
-                                ) {
-                                    openDialog(DEL_FOLDER_DIALOG);
-                                }
+                                openDialog(DEL_FOLDER_DIALOG);
                             }}
                             onkeydown={(e) => e.stopPropagation()}
                         >
@@ -408,7 +414,11 @@
                 >
                     ☰
                 </button>
-                <h2 class="area-title">{folderName(current)}</h2>
+                {#key current}
+                    <h2 class="area-title" in:fadeUp={{ y: 4 }}>
+                        {folderName(current)}
+                    </h2>
+                {/key}
                 <div class="search-row">
                     <input
                         class="field search"
@@ -420,6 +430,7 @@
                     {#if loading}<div
                             class="spinner small"
                             aria-hidden="true"
+                            transition:fadeOnly
                         ></div>{/if}
                     <button
                         class="btn"
@@ -429,7 +440,12 @@
                 </div>
             </div>
             {#if cutIds.size > 0}
-                <div class="paste-bar" role="toolbar" aria-label="Paste">
+                <div
+                    class="paste-bar"
+                    role="toolbar"
+                    aria-label="Paste"
+                    transition:collapse
+                >
                     <span class="bulk-count">{cutIds.size} cut</span>
                     <button
                         class="btn btn-primary"
@@ -471,7 +487,7 @@
         </section>
 
         {#if queue.length > 0}
-            <div class="uploads-panel">
+            <div class="uploads-panel" transition:fadeUp={{ y: 10 }}>
                 <button
                     class="up-head"
                     type="button"
@@ -504,9 +520,14 @@
                     {/if}
                 </button>
                 {#if !panelCollapsed}
-                    <ul class="queue">
-                        {#each queue as item (item.key)}
-                            <li class="q-item" class:error={item.state === "error"}>
+                    <ul class="queue" transition:collapse>
+                        {#each queue as item, i (item.key)}
+                            <li
+                                class="q-item"
+                                class:error={item.state === "error"}
+                                animate:flip={{ duration: flipDur() }}
+                                transition:fadeUp={{ delay: stagger(i, 12, 120) }}
+                            >
                                 <div class="q-top">
                                     <span class="q-name" title={item.name}>{item.name}</span>
                                     <span
@@ -518,7 +539,7 @@
                                         {:else if item.state === "uploading"}
                                             {item.progress}%
                                         {:else if item.state === "done"}
-                                            ✓
+                                            <span class="q-tick" in:pop>✓</span>
                                         {:else}
                                             ✗
                                         {/if}
@@ -681,6 +702,22 @@
         padding: 6px 8px;
         border-radius: 6px;
         cursor: pointer;
+        /* Outline never participates in layout, so the drag affordance can
+           appear without nudging the row the way a border would. */
+        outline: 1px dashed transparent;
+        outline-offset: -1px;
+        transition:
+            background var(--dur-fast) var(--ease),
+            color var(--dur-fast) var(--ease),
+            box-shadow var(--dur-fast) var(--ease),
+            outline-color var(--dur-fast) var(--ease);
+    }
+
+    /* The transparent outline above would otherwise swallow the UA focus
+       ring, so borrow the app-wide ring instead. */
+    .folder-item:focus-visible {
+        outline-color: transparent;
+        box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.35);
     }
 
     .folder-item:hover {
@@ -688,7 +725,7 @@
     }
 
     .folder-item.drop {
-        border: 1px dashed var(--accent);
+        outline-color: var(--accent);
         background: rgba(91, 157, 255, 0.12);
     }
 
@@ -713,11 +750,21 @@
         padding: 0 4px;
         border-radius: 4px;
         flex-shrink: 0;
+        transition:
+            color var(--dur-fast) var(--ease),
+            background var(--dur-fast) var(--ease);
     }
 
     .f-del:hover {
         color: var(--danger);
         background: rgba(255, 255, 255, 0.06);
+    }
+
+    /* Mid-delete the glyph swaps to "…" — accent it and pop once so the
+       change registers, rather than looping a second spinner. */
+    .f-del.busy {
+        color: var(--accent);
+        animation: pop var(--dur-fast) var(--ease-spring);
     }
 
     .side-error {
@@ -735,14 +782,16 @@
         border-radius: var(--radius);
         padding: 4px;
         transition:
-            border-color 0.15s ease,
-            background 0.15s ease;
+            border-color var(--dur) var(--ease),
+            background var(--dur) var(--ease),
+            box-shadow var(--dur) var(--ease);
         overflow-y: auto;
     }
 
     .file-area.dragging {
         border-color: var(--accent);
         background: rgba(91, 157, 255, 0.06);
+        box-shadow: inset 0 0 0 1px rgba(91, 157, 255, 0.22);
     }
 
     .area-head {
@@ -836,10 +885,16 @@
     .q-state {
         color: var(--muted);
         flex-shrink: 0;
+        transition: color var(--dur) var(--ease);
     }
 
     .q-state.ok {
         color: var(--ok);
+    }
+
+    /* `pop` scales, which a bare inline box would ignore. */
+    .q-tick {
+        display: inline-block;
     }
 
     .bar {
@@ -853,7 +908,9 @@
         height: 100%;
         background: var(--accent);
         border-radius: 2px;
-        transition: width 0.15s ease;
+        transition:
+            width var(--dur) var(--ease-out),
+            background var(--dur) var(--ease);
     }
 
     .fill.done {
@@ -871,6 +928,9 @@
         font-size: 12px;
         padding: 10px 0 2px;
         opacity: 0.7;
+        transition:
+            opacity var(--dur) var(--ease),
+            color var(--dur) var(--ease);
     }
 
     .file-area.dragging .drop-hint {
@@ -918,6 +978,7 @@
     .up-clear,
     .up-chevron {
         color: var(--muted);
+        transition: color var(--dur-fast) var(--ease);
     }
 
     .up-clear:hover {
@@ -951,7 +1012,7 @@
             z-index: 40;
             border-radius: 0 var(--radius) var(--radius) 0;
             transform: translateX(-100%);
-            transition: transform 0.2s ease;
+            transition: transform var(--dur) var(--ease-out);
             box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
         }
 
@@ -989,10 +1050,14 @@
             cursor: pointer;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
             z-index: 20;
+            transition:
+                transform var(--dur-fast) var(--ease),
+                background var(--dur-fast) var(--ease);
         }
 
         .upload-fab:active {
             background: var(--accent);
+            transform: scale(0.92);
         }
     }
 

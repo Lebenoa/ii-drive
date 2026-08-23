@@ -10,6 +10,18 @@
   --danger: #f87171;
   --ok: #4ade80;
   --radius: 10px;
+
+  /* ---- motion scale ----
+     Every transition/animation in the app pulls duration + easing from
+     here so timings stay coherent. `--ease` is the default (fast out,
+     slow in); `--ease-spring` overshoots slightly and is for elements
+     that pop into existence, never for exits. */
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 280ms;
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 * {
@@ -68,9 +80,11 @@ a {
   font-family: inherit;
   cursor: pointer;
   transition:
-    background 0.12s ease,
-    border-color 0.12s ease,
-    opacity 0.12s ease;
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
 .btn:hover:not(:disabled) {
@@ -81,6 +95,18 @@ a {
 .btn:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+/* Press feedback: the scale is small enough to read as tactile, not bouncy. */
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn:focus-visible,
+.icon-btn:focus-visible,
+.field:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.35);
 }
 
 .btn-primary {
@@ -123,13 +149,19 @@ a {
   line-height: 1;
   color: var(--muted);
   transition:
-    background 0.12s ease,
-    color 0.12s ease;
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
 .icon-btn:hover:not(:disabled) {
   background: var(--panel-2);
   color: var(--text);
+}
+
+.icon-btn:active:not(:disabled) {
+  transform: scale(0.9);
 }
 
 .field {
@@ -142,11 +174,14 @@ a {
   font-size: 14px;
   font-family: inherit;
   outline: none;
-  transition: border-color 0.12s ease;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .field:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.18);
 }
 
 .field::placeholder {
@@ -177,6 +212,12 @@ a {
   word-break: break-word;
 }
 
+/* Errors appear in response to an action, so they slide in rather than
+   blink into place — the movement is what draws the eye. */
+.error-text {
+  animation: rise var(--dur) var(--ease-out) both;
+}
+
 .muted {
   color: var(--muted);
 }
@@ -193,5 +234,73 @@ a {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ---- shared keyframes ----
+   Components reference these instead of redefining their own. */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---- cross-document/route motion ----
+   Driven by onNavigate() in +layout.svelte; browsers without the View
+   Transition API simply navigate instantly. */
+
+::view-transition-old(root) {
+  animation: fade var(--dur) var(--ease) reverse;
+}
+
+::view-transition-new(root) {
+  animation:
+    fade var(--dur-slow) var(--ease-out),
+    rise var(--dur-slow) var(--ease-out);
+}
+
+/* The shared top bar opts out of the root crossfade by naming itself, but
+   that name must be unique per document — so it lives in TopBar.svelte's
+   scoped CSS, not in a global class rule any page could collide with. */
+
+/* ---- reduced motion ----
+   Kill decorative movement, keep the spinner (it signals liveness) and
+   keep durations non-zero so transitionend/animationend still fire. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .spinner {
+    animation-duration: 0.8s !important;
+    animation-iteration-count: infinite !important;
+  }
+
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
   }
 }

@@ -1,15 +1,10 @@
 <script lang="ts">
-  import {
-  deleteFile,
-  fileShareLink,
-  rawUrl,
-  setFileVisibility,
-  thumbUrl,
-  type DriveFile,
-} from '$lib/api';
+  import { deleteFile, rawUrl, setFileVisibility, thumbUrl, type DriveFile } from '$lib/api';
   import { humanSize, mimeIcon, relTime } from '../format';
   import Modal from './Modal.svelte';
-  import { closeAttrs, openAttrs, openDialog } from '$lib/invoker';
+  import { closeAttrs, closeDialog, openDialog } from '$lib/invoker';
+  import { collapse, fadeOnly, fadeUp, flipDur, pop, stagger } from '$lib/motion';
+  import { flip } from 'svelte/animate';
 
   let {
     files,
@@ -26,6 +21,14 @@
   let togglingId = $state('');
   let brokenThumbs = $state<Set<string>>(new Set());
   let brokenFull = $state<Set<string>>(new Set());
+  /** Thumbnails fade in once they decode, so a late image cannot pop into
+   *  the middle of an already laid-out row. Keyed by id, so re-filtering
+   *  does not re-fade an image the browser already holds. */
+  let loadedThumbs = $state<Set<string>>(new Set());
+
+  function markLoaded(id: string): void {
+    if (!loadedThumbs.has(id)) loadedThumbs = new Set([...loadedThumbs, id]);
+  }
 
   let selected = $state<Set<string>>(new Set());
   let bulkBusy = $state(false);
@@ -140,16 +143,12 @@
   function openPreview(file: DriveFile): void {
     if (!previewable(file)) return;
     previewFile = file;
-    if (!('showModal' in HTMLDialogElement.prototype)) openDialog(PREVIEW_DIALOG);
+    openDialog(PREVIEW_DIALOG);
   }
 
+  /** Only reachable for public files — the button is not rendered otherwise. */
   async function copyLink(file: DriveFile): Promise<void> {
-    // Private files get a time-limited single-file link, never the session
-    // token that ?token= would leak.
-    const url = file.public
-      ? rawUrl(file.id)
-      : await fileShareLink(file.id).catch(() => null);
-    if (url === null) return;
+    const url = rawUrl(file.id);
     try {
       await navigator.clipboard.writeText(url);
       copiedId = file.id;
@@ -163,7 +162,7 @@
 
   function askRemove(file: DriveFile): void {
     pendingFile = file;
-    if (!('commandFor' in HTMLButtonElement.prototype)) openDialog(DELETE_DIALOG);
+    openDialog(DELETE_DIALOG);
   }
 
   async function remove(file: DriveFile): Promise<void> {
@@ -178,7 +177,7 @@
 </script>
 
 {#if selected.size > 0}
-  <div class="bulk-bar" role="toolbar" aria-label="Selection actions">
+  <div class="bulk-bar" role="toolbar" aria-label="Selection actions" transition:collapse>
     <span class="bulk-count">{selected.size} selected</span>
     <button class="btn ghost" type="button" onclick={selectAll}>
       {allSelected ? 'Clear all' : 'Select all'}
@@ -214,10 +213,7 @@
       class="btn btn-danger"
       type="button"
       disabled={bulkBusy}
-      {...openAttrs(BULK_DIALOG)}
-      onclick={() => {
-        if (!('commandFor' in HTMLButtonElement.prototype)) openDialog(BULK_DIALOG);
-      }}
+      onclick={() => openDialog(BULK_DIALOG)}
     >
       Delete
     </button>
@@ -227,7 +223,9 @@
     {#if bulkError}<span class="error-text">{bulkError}</span>{/if}
   </div>
 {:else}
-<div class="view-toggle" role="group" aria-label="Display mode">
+<!-- Both bars share one slot, so both collapse: otherwise whichever leaves
+     drops its height instantly and the table jumps up under the cursor. -->
+<div class="view-toggle" role="group" aria-label="Display mode" transition:collapse>
   <button
     class="icon-btn"
     class:active={view === 'list'}
@@ -253,13 +251,17 @@
 
 {#if view === 'grid'}
   <div class="grid">
-    {#each files as file (file.id)}
+    {#each files as file, i (file.id)}
       <div
           class="card-f"
           class:selected={selected.has(file.id)}
           class:cut={cutIds.has(file.id)}
+          class:busy={deletingId === file.id || togglingId === file.id}
           draggable="true"
           ondragstart={(e) => onDragStart(e, file)}
+          in:fadeUp={{ delay: stagger(i) }}
+          out:pop
+          animate:flip={{ duration: flipDur() }}
         >
         <label class="g-check">
           <input
@@ -274,26 +276,33 @@
           class:previewable={previewable(file)}
           role="button"
           tabindex="0"
-          {...openAttrs(PREVIEW_DIALOG)}
           onclick={() => openPreview(file)}
           onkeydown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') openPreview(file);
+            // Space would scroll the page under the modal without this.
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              openPreview(file);
+            }
           }}
         >
           {#if file.has_thumb && !brokenThumbs.has(file.id)}
             <img
               class="g-img"
+              class:is-loaded={loadedThumbs.has(file.id)}
               src={thumbUrl(file.id, file.public)}
               alt=""
               loading="lazy"
+              onload={() => markLoaded(file.id)}
               onerror={() => (brokenThumbs = new Set([...brokenThumbs, file.id]))}
             />
           {:else if file.mime.startsWith('image/') && !brokenFull.has(file.id)}
             <img
               class="g-img"
+              class:is-loaded={loadedThumbs.has(file.id)}
               src={rawUrl(file.id, false, file.public)}
               alt=""
               loading="lazy"
+              onload={() => markLoaded(file.id)}
               onerror={() => (brokenFull = new Set([...brokenFull, file.id]))}
             />
           {:else}
@@ -305,14 +314,22 @@
           <span class="g-sub muted">{humanSize(file.size)} · {relTime(file.created_at)}</span>
         </div>
         <div class="g-actions">
-          <button
-            class="icon-btn act-copy"
-            type="button"
-            title={file.public ? 'Copy public link' : 'Private — make public to share'}
-            onclick={() => void copyLink(file)}
-          >
-            {copiedId === file.id ? '✓' : '🔗'}
-          </button>
+          {#if file.public}
+            <button
+              class="icon-btn act-copy"
+              type="button"
+              title="Copy public link"
+              onclick={() => void copyLink(file)}
+            >
+              <span class="act-ico">
+                {#if copiedId === file.id}
+                  <span class="act-chk" in:pop>✓</span>
+                {:else}
+                  🔗
+                {/if}
+              </span>
+            </button>
+          {/if}
           <a class="icon-btn" href={rawUrl(file.id, true, file.public)} title="Download">⬇</a>
           <button
             class="icon-btn"
@@ -330,7 +347,6 @@
             type="button"
             title="Delete"
             disabled={deletingId === file.id}
-            {...openAttrs(DELETE_DIALOG)}
             onclick={() => askRemove(file)}
           >
             🗑
@@ -362,12 +378,16 @@
       </tr>
     </thead>
     <tbody>
-      {#each files as file (file.id)}
+      {#each files as file, i (file.id)}
         <tr
           class:selected={selected.has(file.id)}
           class:cut={cutIds.has(file.id)}
+          class:busy={deletingId === file.id || togglingId === file.id}
           draggable="true"
           ondragstart={(e) => onDragStart(e, file)}
+          in:fadeUp={{ delay: stagger(i) }}
+          out:fadeOnly
+          animate:flip={{ duration: flipDur() }}
         >
           <td class="c-sel">
             <input
@@ -381,19 +401,23 @@
             {#if file.has_thumb && !brokenThumbs.has(file.id)}
               <img
                 class="thumb"
+                class:is-loaded={loadedThumbs.has(file.id)}
                 src={thumbUrl(file.id, file.public)}
                 alt=""
                 loading="lazy"
                 title={file.mime}
+                onload={() => markLoaded(file.id)}
                 onerror={() => (brokenThumbs = new Set([...brokenThumbs, file.id]))}
               />
             {:else if file.mime.startsWith('image/') && !brokenFull.has(file.id)}
               <img
                 class="thumb"
+                class:is-loaded={loadedThumbs.has(file.id)}
                 src={rawUrl(file.id, false, file.public)}
                 alt=""
                 loading="lazy"
                 title={file.mime}
+                onload={() => markLoaded(file.id)}
                 onerror={() => (brokenFull = new Set([...brokenFull, file.id]))}
               />
             {:else}
@@ -405,7 +429,6 @@
                 class="name-btn"
                 class:previewable={previewable(file)}
                 type="button"
-                {...openAttrs(PREVIEW_DIALOG)}
                 onclick={() => openPreview(file)}
               >
                 {file.name}
@@ -416,17 +439,22 @@
             {relTime(file.created_at)}
           </td>
           <td class="c-actions">
-            <button
-              class="icon-btn act-copy"
-              type="button"
-              title={file.public ? 'Copy public link' : 'Private — make public to share'}
-              disabled={!file.public}
-              onclick={() => void copyLink(file)}
-            >
-              {copiedId === file.id ? '✓' : '🔗'}<span class="act-lbl"
-                >{copiedId === file.id ? 'copied' : ''}</span
+            {#if file.public}
+              <button
+                class="icon-btn act-copy"
+                type="button"
+                title="Copy public link"
+                onclick={() => void copyLink(file)}
               >
-            </button>
+                <span class="act-ico">
+                  {#if copiedId === file.id}
+                    <span class="act-chk" in:pop>✓</span>
+                  {:else}
+                    🔗
+                  {/if}
+                </span><span class="act-lbl">{copiedId === file.id ? 'copied' : ''}</span>
+              </button>
+            {/if}
             <a class="icon-btn" href={rawUrl(file.id, true, file.public)} title="Download">⬇</a>
             <button
               class="icon-btn"
@@ -444,7 +472,6 @@
               type="button"
               title="Delete"
               disabled={deletingId === file.id}
-              {...openAttrs(DELETE_DIALOG)}
               onclick={() => askRemove(file)}
             >
               🗑
@@ -460,9 +487,12 @@
   </table>
 {/if}
 
+<!-- previewFile is cleared on close so the media element unmounts: a
+     <video>/<audio> left mounted in a closed dialog keeps playing audio. -->
 <dialog
   id={PREVIEW_DIALOG}
   class="preview"
+  onclose={() => (previewFile = null)}
   onclick={(e: MouseEvent) => {
     if (e.target === e.currentTarget) e.currentTarget.close();
   }}
@@ -487,7 +517,14 @@
       <span class="pv-name" title={previewFile.name}>{previewFile.name}</span>
       <span class="pv-meta muted">{humanSize(previewFile.size)}</span>
       <a class="icon-btn" href={rawUrl(previewFile.id, true, previewFile.public)} title="Download">⬇</a>
-      <button class="icon-btn" type="button" {...closeAttrs(PREVIEW_DIALOG)} title="Close">✕</button>
+      <button
+        class="icon-btn"
+        type="button"
+        title="Close"
+        onclick={() => closeDialog(PREVIEW_DIALOG)}
+      >
+        ✕
+      </button>
     </div>
   {/if}
 </dialog>
@@ -538,6 +575,12 @@
     margin-right: 6px;
   }
 
+  /* The dialog fades itself rather than delaying close(): `allow-discrete`
+     keeps display/overlay alive for the exit, so Escape, a backdrop click
+     and ✕ all still close on the tick they fire. The closed state is
+     pointer-transparent, so a preview on its way out can never swallow a
+     click, and the exit is deliberately shorter than the entry because
+     `onclose` unmounts the media immediately. */
   dialog.preview {
     border: none;
     background: transparent;
@@ -548,10 +591,51 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+    transition:
+      opacity var(--dur-fast) var(--ease),
+      overlay var(--dur-fast) var(--ease) allow-discrete,
+      display var(--dur-fast) var(--ease) allow-discrete;
+  }
+
+  dialog.preview[open] {
+    opacity: 1;
+    pointer-events: auto;
+    transition-duration: var(--dur);
+    transition-timing-function: var(--ease-out);
+
+    @starting-style {
+      opacity: 0;
+    }
   }
 
   dialog.preview::backdrop {
     background: rgba(4, 6, 10, 0.88);
+    opacity: 0;
+    transition:
+      opacity var(--dur-fast) var(--ease),
+      overlay var(--dur-fast) var(--ease) allow-discrete,
+      display var(--dur-fast) var(--ease) allow-discrete;
+  }
+
+  dialog.preview[open]::backdrop {
+    opacity: 1;
+    transition-duration: var(--dur);
+
+    @starting-style {
+      opacity: 0;
+    }
+  }
+
+  /* Contents mount with previewFile, i.e. on the tick the dialog opens, so
+     a plain entrance animation is enough — no transition to coordinate. */
+  dialog.preview[open] .pv-media {
+    animation: pop var(--dur-slow) var(--ease-out) both;
+  }
+
+  dialog.preview[open] .pv-bar {
+    animation: rise var(--dur) var(--ease-out) both;
   }
 
   .pv-media {
@@ -672,14 +756,25 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    position: relative;
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      box-shadow var(--dur-fast) var(--ease),
+      opacity var(--dur) var(--ease),
+      transform var(--dur-fast) var(--ease-out);
   }
 
+  /* Hover lifts the card a hair; the press cancels the lift so clicking
+     reads as pushing it back down instead of stacking two effects. */
   .card-f:hover {
     border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
   }
 
-  .card-f {
-    position: relative;
+  .card-f:active {
+    transform: none;
+    box-shadow: none;
   }
 
   .card-f.selected {
@@ -696,7 +791,7 @@
     border-radius: 4px;
     padding: 2px;
     opacity: 0;
-    transition: opacity 0.12s ease;
+    transition: opacity var(--dur-fast) var(--ease);
   }
 
   .card-f:hover .g-check,
@@ -712,11 +807,21 @@
     background: var(--panel);
   }
 
+  /* Thumbnails start transparent and fade in on load, so an image that
+     decodes late does not flash into a row that has already settled. The
+     fallback glyph is not animated: it renders on every search keystroke. */
   .g-img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
+    opacity: 0;
+    transition: opacity var(--dur) var(--ease-out);
+  }
+
+  .g-img.is-loaded,
+  .thumb.is-loaded {
+    opacity: 1;
   }
 
   .g-ico {
@@ -768,6 +873,14 @@
     border-style: dashed;
   }
 
+  /* A row mid-delete or mid-visibility-flip dims instead of just freezing.
+     Declared after .cut so a cut row that is also busy reads as busy. */
+  .card-f.busy,
+  .tbl tr.busy td {
+    opacity: 0.5;
+    cursor: progress;
+  }
+
   .tbl tr.selected td {
     background: rgba(91, 157, 255, 0.1);
   }
@@ -793,6 +906,13 @@
     padding: 9px 10px;
     border-bottom: 1px solid #202634;
     vertical-align: middle;
+    transition:
+      opacity var(--dur) var(--ease),
+      background-color var(--dur-fast) var(--ease);
+  }
+
+  tbody tr {
+    transition: background-color var(--dur-fast) var(--ease);
   }
 
   tbody tr:hover {
@@ -840,6 +960,8 @@
     display: block;
     margin: 0 auto;
     background: var(--panel-2);
+    opacity: 0;
+    transition: opacity var(--dur) var(--ease-out);
   }
 
   .act-copy {
@@ -850,7 +972,23 @@
     color: var(--danger);
   }
 
+  /* Both the glyph slot and the label reserve their space unconditionally,
+     so the 🔗 → ✓ swap pops in place instead of reflowing the row. */
+  .act-ico {
+    display: inline-block;
+    width: 1.3em;
+    text-align: center;
+  }
+
+  .act-chk {
+    display: inline-block;
+    color: var(--ok);
+  }
+
   .act-lbl {
+    display: inline-block;
+    width: 44px;
+    text-align: left;
     font-size: 11.5px;
     color: var(--ok);
     margin-left: 3px;

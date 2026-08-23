@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { clearToken, getMe, getToken, type TgUser } from '$lib/api';
+  import { clearToken, fetchAvatar, getMe, getToken, type TgUser } from '$lib/api';
 
   // The navbar is owned by the layout, so it fetches its own user info.
   let user = $state<TgUser | null>(null);
@@ -12,16 +12,33 @@
     void page.url.pathname;
     if (!getToken()) {
       user = null;
+      if (avatarUrl) URL.revokeObjectURL(avatarUrl);
+      avatarUrl = null;
+      avatarLoaded = false;
       return;
     }
     void getMe()
       .then((m) => {
-        if (m.authorized) user = m.user;
+        if (m.authorized) {
+          user = m.user;
+          void fetchAvatar()
+            .then((url) => {
+              if (avatarUrl) URL.revokeObjectURL(avatarUrl);
+              avatarUrl = url;
+              avatarLoaded = false;
+            })
+            .catch(() => {});
+        }
       })
-      .catch(() => {
-        // Boot pages handle auth errors themselves; the navbar stays quiet.
-      });
   });
+
+  // Profile photo for the account button; null = keep the initial-letter
+  // fallback (no photo on the account, or the fetch failed).
+  let avatarUrl = $state<string | null>(null);
+  let avatarLoaded = $state(false);
+
+  	// Navigation is brand + account menu only: Files is the root, Channels is
+	// reached via the boot redirect, Settings lives in the account menu.
 
   // Popover API fallback: without it the unknown `popover` attribute is
   // ignored and the menu would render permanently visible, so display is
@@ -62,12 +79,6 @@
 <header class="topbar">
   <a class="brand" href="/">ii-drive</a>
 
-  <nav class="nav-links" aria-label="Main">
-    <a href="/" class="nav-link">Files</a>
-    <a href="/channels" class="nav-link">Channels</a>
-    <a href="/settings" class="nav-link">Settings</a>
-  </nav>
-
   <span class="spacer"></span>
 
   {#if user}
@@ -81,13 +92,28 @@
       onclick={toggleMenu}
       title={user.name}
     >
-      {user.name.slice(0, 1).toUpperCase()}
+      {#if avatarUrl}
+        <img
+          class="avatar-img"
+          class:is-loaded={avatarLoaded}
+          src={avatarUrl}
+          alt=""
+          onload={() => (avatarLoaded = true)}
+          onerror={() => {
+            URL.revokeObjectURL(avatarUrl!);
+            avatarUrl = null;
+          }}
+        />
+      {:else}
+        {user.name.slice(0, 1).toUpperCase()}
+      {/if}
     </button>
 
     <!-- Popover API: light-dismiss, top layer, Esc — all native. -->
     <div
       id={ACCOUNT_POPOVER}
       popover={popoverSupported ? 'auto' : undefined}
+      class:native={popoverSupported}
       class="account-menu"
       class:open={menuOpen}
       bind:this={menuEl}
@@ -110,6 +136,10 @@
     position: sticky;
     top: 0;
     z-index: 5;
+    /* This bar is shared across routes, so it stays put while the body
+       crossfades. The name must be unique per document — keeping it in
+       TopBar's scoped CSS pins it to this header and nothing else. */
+    view-transition-name: topbar;
   }
 
   .brand {
@@ -118,24 +148,6 @@
     letter-spacing: 0.4px;
     color: var(--text);
     text-decoration: none;
-  }
-
-  .nav-links {
-    display: flex;
-    gap: 4px;
-  }
-
-  .nav-link {
-    font-size: 13.5px;
-    color: var(--muted);
-    text-decoration: none;
-    padding: 5px 10px;
-    border-radius: 6px;
-  }
-
-  .nav-link:hover {
-    color: var(--text);
-    background: rgba(255, 255, 255, 0.05);
   }
 
   .spacer {
@@ -151,20 +163,50 @@
     color: var(--text);
     font-size: 14px;
     font-weight: 600;
+    /* The popover anchors to this element; unsupported browsers ignore it. */
+    anchor-name: --account-btn;
     cursor: pointer;
     padding: 0;
+    transition:
+      border-color var(--dur-fast) var(--ease),
+      background var(--dur-fast) var(--ease),
+      box-shadow var(--dur-fast) var(--ease),
+      transform var(--dur-fast) var(--ease);
+  }
+
+  /* Profile photo fills the round button; fades in once decoded so a
+     half-loaded image never flashes. */
+  .avatar-img {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    object-fit: cover;
+    opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease);
+  }
+
+  .avatar-img.is-loaded {
+    opacity: 1;
   }
 
   .account-btn:hover {
     border-color: var(--accent);
   }
 
+  .account-btn:active {
+    transform: scale(0.92);
+  }
+
+  .account-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(91, 157, 255, 0.35);
+  }
+
   /* Hidden by default: the UA popover rule only exists where the API
      does, and the .open class covers the fallback path. */
   .account-menu {
     position: fixed;
-    /* Anchored to the navbar's fixed height rather than the button:
-       CSS anchor positioning is not portable enough yet. */
+    /* Fallback placement for browsers without anchor positioning. */
     top: 52px;
     right: 14px;
     inset: auto;
@@ -175,14 +217,74 @@
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
     padding: 6px;
     min-width: 180px;
-    display: none;
     flex-direction: column;
     gap: 2px;
+    /* The menu belongs to the avatar it hangs off, so it scales out of it. */
+    transform-origin: top right;
   }
 
-  .account-menu:popover-open,
-  .account-menu.open {
+  /* CSS anchor positioning: the menu hangs off the avatar button instead of
+     a hardcoded navbar offset, so it stays glued to it at any size. */
+  @supports (anchor-name: --a) {
+    .account-menu {
+      position-anchor: --account-btn;
+      top: calc(anchor(bottom) + 6px);
+      right: anchor(right);
+    }
+  }
+
+  /* Native path. Opening/closing stays entirely with popovertarget; this is
+     only paint. `display`/`overlay` need allow-discrete or the close would
+     yank the element out of the top layer before the exit could run. */
+  .account-menu.native {
+    display: none;
+    opacity: 0;
+    transform: scale(0.94) translateY(-4px);
+    transition:
+      opacity var(--dur-fast) var(--ease),
+      transform var(--dur-fast) var(--ease),
+      overlay var(--dur-fast) var(--ease) allow-discrete,
+      display var(--dur-fast) var(--ease) allow-discrete;
+  }
+
+  .account-menu.native:popover-open {
     display: flex;
+    opacity: 1;
+    transform: none;
+    transition:
+      opacity var(--dur) var(--ease-out),
+      transform var(--dur) var(--ease-out),
+      overlay var(--dur) var(--ease-out) allow-discrete,
+      display var(--dur) var(--ease-out) allow-discrete;
+
+    @starting-style {
+      opacity: 0;
+      transform: scale(0.94) translateY(-4px);
+    }
+  }
+
+  /* Fallback path. A browser without the popover API has no
+     @starting-style either, so `visibility` carries the hidden state —
+     it holds `visible` for the whole exit, then flips discretely. */
+  .account-menu:not(.native) {
+    display: flex;
+    visibility: hidden;
+    opacity: 0;
+    transform: scale(0.94) translateY(-4px);
+    transition:
+      opacity var(--dur-fast) var(--ease),
+      transform var(--dur-fast) var(--ease),
+      visibility var(--dur-fast) var(--ease);
+  }
+
+  .account-menu:not(.native).open {
+    visibility: visible;
+    opacity: 1;
+    transform: none;
+    transition:
+      opacity var(--dur) var(--ease-out),
+      transform var(--dur) var(--ease-out),
+      visibility var(--dur) var(--ease-out);
   }
 
   .who {
@@ -211,6 +313,12 @@
     text-decoration: none;
   }
 
+  .menu-item {
+    transition:
+      background var(--dur-fast) var(--ease),
+      color var(--dur-fast) var(--ease);
+  }
+
   .menu-item:hover {
     background: rgba(255, 255, 255, 0.05);
   }
@@ -219,9 +327,4 @@
     color: var(--danger);
   }
 
-  @media (max-width: 560px) {
-    .nav-links {
-      display: none;
-    }
-  }
 </style>

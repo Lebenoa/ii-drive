@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import { getMe, getToken } from '$lib/api';
   import Login from '$lib/components/Login.svelte';
+  import { fadeUp } from '$lib/motion';
 
   let checking = $state(true);
 
@@ -30,9 +31,13 @@
 </script>
 
 {#if checking}
+  <!-- No exit on the spinner: it fills the viewport, so fading it out
+       while the form mounts below would double the page height. -->
   <div class="center-screen">
     <div class="spinner" aria-label="loading"></div>
   </div>
 {:else}
-  <Login onSuccess={onSuccess} />
+  <div in:fadeUp>
+    <Login onSuccess={onSuccess} />
+  </div>
 {/if}

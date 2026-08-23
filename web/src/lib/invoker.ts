@@ -1,18 +1,19 @@
 /**
- * Command Invoker API (button `commandfor`/`command`) helpers.
+ * Dialog open/close helpers.
  *
- * The attributes are always rendered — browsers without support simply
- * ignore them — so the markup stays declarative everywhere. Only the
- * fallback opener below needs a support check.
+ * Opening is done imperatively: every opener in this app also has to set
+ * component state (which file/folder the dialog is about), so JS runs
+ * regardless, and several openers are not `<button>` elements at all
+ * (grid thumbnails, the folder-row delete affordance) where the Command
+ * Invoker API does not apply. One imperative path keeps all of them
+ * working on every browser.
+ *
+ * Closing has two shapes. Cancel buttons inside Modal's
+ * `<form method="dialog">` are `type="submit"`, so `closeAttrs` is pure
+ * enhancement there — they close natively without Invoker support. A close
+ * button that is NOT inside such a form (the preview bar's ✕) would be a
+ * dead control on pre-Invoker browsers, so it calls `closeDialog` instead.
  */
-
-export const invokerSupported: boolean =
-  typeof window !== 'undefined' && 'commandFor' in HTMLButtonElement.prototype;
-
-/** Spread onto a button that should open `id` as a modal, natively. */
-export function openAttrs(id: string): Record<string, string> {
-  return { commandfor: id, command: 'showModal' };
-}
 
 /**
  * Spread onto a Cancel-style button inside the dialog: it should be
@@ -26,7 +27,13 @@ export function closeAttrs(id: string): Record<string, string> {
   return { commandfor: id, command: 'close' };
 }
 
-/** Fallback opener for browsers without the Command Invoker API. */
+/** Show `id` as a modal. Idempotent: showModal() on an open dialog throws. */
 export function openDialog(id: string): void {
-  (document.getElementById(id) as HTMLDialogElement | null)?.showModal();
+  const dlg = document.getElementById(id) as HTMLDialogElement | null;
+  if (dlg !== null && !dlg.open) dlg.showModal();
+}
+
+/** Close `id`. For close buttons outside a `method="dialog"` form. */
+export function closeDialog(id: string): void {
+  (document.getElementById(id) as HTMLDialogElement | null)?.close();
 }
