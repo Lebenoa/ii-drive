@@ -8,10 +8,11 @@
   const DEV_KEY = 'ii_dev_mode';
   let devMode = $state(localStorage.getItem(DEV_KEY) === '1');
 
-  function toggleDev(): void {
-    devMode = !devMode;
+  // bind:checked flips the flag itself; persisting reactively avoids a
+  // second flip in an onchange handler (which made the box appear dead).
+  $effect(() => {
     localStorage.setItem(DEV_KEY, devMode ? '1' : '0');
-  }
+  });
 </script>
 
 <main class="content">
@@ -22,7 +23,7 @@
       database. Only enable this if you know what you are doing.
     </p>
     <label class="switch-row">
-      <input type="checkbox" bind:checked={devMode} onchange={toggleDev} />
+      <input type="checkbox" bind:checked={devMode} />
       <span>{devMode ? 'Enabled' : 'Disabled'}</span>
     </label>
 
