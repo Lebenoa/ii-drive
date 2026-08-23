@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { fadeOnly, fadeUp, stagger } from '$lib/motion';
+  import { fade } from 'svelte/transition';
   import { getToken, reloadConfig } from '$lib/api';
   import './settings.css';
 
@@ -76,7 +77,7 @@
     >
       {#if reloading}<span class="spinner btn-spin"></span>{/if}
       {#key reloadLabel}
-        <span in:fadeOnly>{reloadLabel}</span>
+        <span in:fade>{reloadLabel}</span>
       {/key}
     </button>
   </header>
