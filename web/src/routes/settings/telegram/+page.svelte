@@ -5,6 +5,8 @@
 <script lang="ts">
   import {
     addBot,
+    botfatherBots,
+    botfatherToken,
     getBots,
     removeBot,
     type BotAddResult,
@@ -22,6 +24,42 @@
   let botError = $state('');
   let results = $state<BotAddResult[]>([]);
   let removingId = $state<number | null>(null);
+  let owned = $state<string[]>([]);
+  let loadingOwned = $state(false);
+  let ownedError = $state('');
+  let importing = $state('');
+
+  async function loadOwned(): Promise<void> {
+    if (loadingOwned) return;
+    loadingOwned = true;
+    ownedError = '';
+    try {
+      owned = (await botfatherBots()).bots;
+    } catch (err) {
+      ownedError = err instanceof Error ? err.message : String(err);
+    } finally {
+      loadingOwned = false;
+    }
+  }
+
+  /** Fetch the token via BotFather menus, then run the normal add flow. */
+  async function importBot(name: string): Promise<void> {
+    if (importing !== '') return;
+    importing = name;
+    botError = '';
+    results = [];
+    try {
+      const { token: t } = await botfatherToken(name);
+      const res = await addBot(t);
+      bots = await getBots();
+      results = res.results;
+    } catch (err) {
+      botError = err instanceof Error ? err.message : String(err);
+    } finally {
+      importing = '';
+    }
+  }
+
 
   $effect(() => {
     void (async () => {
@@ -93,9 +131,46 @@
     <p class="muted hint">
       No token yet? <button class="linklike" type="button" onclick={() => chat?.openChat()}>
         Create a bot with @BotFather
-      </button> right here.
+      </button> right here — or import an existing one below.
     </p>
     <BotFatherChat bind:this={chat} onCreated={(t) => addFromBotFather(t)} />
+
+    <div class="owned">
+      <div class="owned-head">
+        <strong>Import existing bot</strong>
+        <button
+          class="btn ghost busy-btn"
+          type="button"
+          disabled={loadingOwned}
+          onclick={() => void loadOwned()}
+        >
+          {#if loadingOwned}<span class="spinner btn-spin"></span>{/if}
+          {loadingOwned ? 'Asking @BotFather…' : 'List my bots'}
+        </button>
+      </div>
+      {#if ownedError}<p class="error-text">{ownedError}</p>{/if}
+      {#if owned.length > 0}
+        <ul class="owned-list">
+          {#each owned as name, i (name)}
+            <li in:fadeUp={{ delay: stagger(i) }}>
+              <span>{name}</span>
+              <button
+                class="btn ghost busy-btn"
+                type="button"
+                disabled={importing !== ''}
+                onclick={() => void importBot(name)}
+              >
+                {#if importing === name}<span class="spinner btn-spin"></span>{/if}
+                {importing === name ? 'Importing…' : 'Add'}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {:else if !loadingOwned && !ownedError}
+        <p class="muted hint">No bots listed yet — press "List my bots".</p>
+      {/if}
+    </div>
+
 
     <form
       class="bot-row"
@@ -216,5 +291,36 @@
     display: flex;
     gap: 8px;
     justify-content: space-between;
+  }
+
+  .owned {
+    border-top: 1px solid var(--block-border, var(--border));
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+
+  .owned-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .owned-list {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .owned-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px;
   }
 </style>

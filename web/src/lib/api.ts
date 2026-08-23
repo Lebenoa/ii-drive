@@ -189,6 +189,16 @@ export function botfatherSend(text: string): Promise<{ reply: string }> {
   return request('/api/botfather', { method: 'POST', body: { text } });
 }
 
+/** GET /api/botfather/bots — owned bot names parsed from BotFather's /mybots menu */
+export function botfatherBots(): Promise<{ bots: string[] }> {
+  return request('/api/botfather/bots');
+}
+
+/** POST /api/botfather/token {bot} — walk the menus to fetch one bot's API token */
+export function botfatherToken(bot: string): Promise<{ token: string }> {
+  return request('/api/botfather/token', { method: 'POST', body: { bot } });
+}
+
 /** POST /api/config/reload — re-read config.toml; hot-applies runtime fields. */
 export function reloadConfig(): Promise<{ ok: true }> {
   return request('/api/config/reload', { method: 'POST' });

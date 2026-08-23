@@ -32,3 +32,37 @@ pub async fn send(
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({ "reply": reply })))
 }
+
+#[derive(Deserialize)]
+pub struct BotTokenBody {
+    pub bot: String,
+}
+
+/// GET /api/botfather/bots — ask @BotFather for /mybots and return the
+/// owned-bot names parsed from its inline menu button labels.
+pub async fn bots(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let names = state
+        .tg
+        .botfather_my_bots()
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "bots": names })))
+}
+
+/// POST /api/botfather/token {bot} — walk the BotFather menus to fetch one
+/// owned bot's API token, so it can be imported without copy-paste.
+pub async fn token(
+    State(state): State<AppState>,
+    Json(body): Json<BotTokenBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let bot = body.bot.trim();
+    if bot.is_empty() {
+        return Err(ApiError::bad_request("bot name must not be empty"));
+    }
+    let tok = state
+        .tg
+        .botfather_bot_token(bot)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(json!({ "token": tok })))
+}
