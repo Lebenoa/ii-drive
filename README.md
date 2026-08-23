@@ -35,7 +35,7 @@ the interface.
    | `session_path` | `data/session.db` | MTProto session (grammers SQLite) |
    | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
-   | `media_thumbs` | `true` | Generate image/video thumbnails (ffmpeg on PATH for videos) |
+   | `media_thumbs` | `true` | ffmpeg image/video thumbnails; audio cover art is extracted regardless |
 
 2. **Build the web UI:**
 
@@ -96,6 +96,23 @@ Files above Telegram's per-document cap are always chunked, and keep all
 their parts in one channel. Parts are re-joined transparently when streamed
 or downloaded, and are deleted together with the file. The threshold only
 affects new uploads; existing files keep their layout.
+
+### Thumbnails
+
+Previews come from three places, in this order:
+
+1. **Telegram's own stripped thumbnail**, when it made one for the uploaded
+   document (typical for jpeg and video) — free, stored as-is.
+2. **Embedded cover art** for `audio/*` uploads: ID3v2.3/2.4 `APIC` frames
+   (mp3 and friends) and FLAC `PICTURE` blocks, parsed straight out of the
+   first 512 KiB of the stream. Telegram makes no thumbnail for audio, so
+   this is the only source for music. It is pure byte parsing — no ffmpeg,
+   no extra download — and therefore runs regardless of `media_thumbs`.
+   Art stored beyond that first 512 KiB is not found.
+3. **ffmpeg**, in the background, for videos (first frame) and images that
+   arrived without a usable thumb. This is the only step `media_thumbs`
+   turns off, and the only one needing ffmpeg on `PATH`. AVIF is used when
+   the build has libaom, else WebP.
 
 ### Troubleshooting login
 
