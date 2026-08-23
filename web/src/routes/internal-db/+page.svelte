@@ -58,7 +58,7 @@
   async function openTable(name: string, p = 0): Promise<void> {
     active = name;
     page = p;
-    sql = `SELECT * FROM ${name} LIMIT ${PAGE} OFFSET ${p * PAGE}`;
+    sql = `SELECT * FROM ${name} LIMIT ${PAGE} START ${p * PAGE}`;
     await run(sql);
     // Adopt fetched rows so the grid gets real columns.
     const first = results[0];
