@@ -12,6 +12,7 @@
   } from '$lib/api';
   import { fadeUp, stagger } from '$lib/motion';
 
+  const PAGE = 50;
   let checking = $state(true);
   let tables = $state<string[]>([]);
   let active = $state('');
@@ -20,9 +21,67 @@
   let results = $state<DbQueryResult[]>([]);
   let error = $state('');
 
-  // Row ids arrive as "table:id" strings — perfect for DELETE statements.
+  // Table browsing state — ids arrive as "table:id" strings, which double
+  // as DELETE targets.
+  let page = $state(0);
   let rows = $state<Record<string, unknown>[]>([]);
+  // Union of keys across the loaded rows, `id` pinned first.
+  let columns = $derived.by(() => {
+    const cols: string[] = [];
+    for (const r of rows) {
+      for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
+    }
+    return cols.sort((a, b) => (a === 'id' ? -1 : b === 'id' ? 1 : a.localeCompare(b)));
+  });
 
+  function cell(v: unknown): string {
+    return typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v);
+  }
+
+  async function run(statement: string): Promise<void> {
+    if (running || !statement.trim()) return;
+    running = true;
+    error = '';
+    try {
+      const res = await dbQuery(statement);
+      results = res.results;
+      rows = [];
+      const failed = res.results.find((r) => !r.ok);
+      if (failed) error = failed.error ?? 'query failed';
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    } finally {
+      running = false;
+    }
+  }
+
+  async function openTable(name: string, p = 0): Promise<void> {
+    active = name;
+    page = p;
+    sql = `SELECT * FROM ${name} LIMIT ${PAGE} OFFSET ${p * PAGE}`;
+    await run(sql);
+    // Adopt fetched rows so the grid gets real columns.
+    const first = results[0];
+    if (first?.ok && Array.isArray(first.result)) {
+      rows = first.result as Record<string, unknown>[];
+    }
+  }
+
+  function hasId(res: DbQueryResult | undefined): boolean {
+    const first = res?.result?.[0];
+    return !!first && typeof first === 'object' && 'id' in (first as object);
+  }
+
+  async function deleteRow(id: string): Promise<void> {
+    if (!confirm(`Delete record ${id}?`)) return;
+    await run(`DELETE ${id}`);
+    if (active) await openTable(active, page);
+  }
+
+  const canPrev = $derived(active !== '' && page > 0);
+  const canNext = $derived(active !== '' && rows.length === PAGE);
+
+  // Auth gate + initial table list.
   $effect(() => {
     void (async () => {
       if (!getToken()) {
@@ -37,33 +96,6 @@
       checking = false;
     })();
   });
-
-  async function run(statement: string): Promise<void> {
-    if (running || !statement.trim()) return;
-    running = true;
-    error = '';
-    try {
-      const res = await dbQuery(statement);
-      results = res.results;
-      const failed = res.results.find((r) => !r.ok);
-      if (failed) error = failed.error ?? 'query failed';
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-    } finally {
-      running = false;
-    }
-  }
-
-  async function openTable(name: string): Promise<void> {
-    active = name;
-    await run(`SELECT * FROM ${name} LIMIT 200`);
-  }
-
-  async function deleteRow(id: string): Promise<void> {
-    if (!confirm(`Delete record ${id}?`)) return;
-    await run(`DELETE ${id}`);
-    if (active) await openTable(active);
-  }
 </script>
 
 <div class="db-shell">
@@ -136,17 +168,23 @@
           {#if r.ok}
             <section class="card result">
               <p class="muted res-head">{stmt}</p>
-              {#if Array.isArray(r.result) && r.result.length > 0 && typeof r.result[0] === 'object' && r.result[0] !== null && 'id' in (r.result[0] as object)}
+              {#if hasId(r)}
                 <table class="rows">
                   <thead>
-                    <tr><th>id</th><th>data</th><th></th></tr>
+                    <tr>
+                      {#each columns as c (c)}
+                        <th>{c}</th>
+                      {/each}
+                      <th></th>
+                    </tr>
                   </thead>
                   <tbody>
                     {#each r.result as row, j (j)}
                       {@const rec = row as Record<string, unknown>}
                       <tr in:fadeUp={{ delay: stagger(j) }}>
-                        <td class="mono">{String(rec.id)}</td>
-                        <td class="mono data">{JSON.stringify(rec, null, 1)}</td>
+                        {#each columns as c (c)}
+                          <td class="mono">{cell(rec[c])}</td>
+                        {/each}
                         <td>
                           <button
                             class="icon-btn danger"
@@ -171,6 +209,28 @@
             </section>
           {/if}
         {/each}
+
+        {#if active && (canPrev || canNext)}
+          <div class="pager">
+            <button
+              class="btn ghost"
+              type="button"
+              disabled={!canPrev || running}
+              onclick={() => void openTable(active, page - 1)}
+            >
+              ← Prev
+            </button>
+            <span class="muted">page {page + 1}</span>
+            <button
+              class="btn ghost"
+              type="button"
+              disabled={!canNext || running}
+              onclick={() => void openTable(active, page + 1)}
+            >
+              Next →
+            </button>
+          </div>
+        {/if}
       </main>
     </div>
   {/if}
@@ -279,15 +339,23 @@
     vertical-align: top;
   }
 
-  td.data {
-    white-space: pre-wrap;
-    word-break: break-all;
-    color: var(--muted);
+  td.mono {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   pre.raw {
     margin: 0;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+
+  .pager {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
   }
 </style>

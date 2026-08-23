@@ -11,6 +11,7 @@
   const CATEGORIES = [
     { path: '/settings/telegram', label: 'Telegram' },
     { path: '/settings/upload', label: 'Uploads' },
+    { path: '/settings/other', label: 'Other' },
   ];
 
   let checking = $state(true);
