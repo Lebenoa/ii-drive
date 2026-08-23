@@ -825,8 +825,9 @@ impl TgManager {
         Ok(out)
     }
 
-/// Harvests storage-capable chats (channels, supergroups, groups) from one
-/// dialogs folder via raw `messages.getDialogs`, paginating until exhausted.
+/// Harvests storage-capable chats (broadcast channels and supergroups) from
+/// one dialogs folder via raw `messages.getDialogs`, paginating until
+/// exhausted. Basic groups are skipped: bots cannot be wired into them.
 async fn collect_folder(
     client: &Client,
     folder_id: Option<i32>,
@@ -914,18 +915,6 @@ fn harvest_chats(
                     out.push(ChannelInfo {
                         chat: key,
                         title: ch.title.clone(),
-                    });
-                }
-            }
-            tl::enums::Chat::Chat(g) => {
-                if g.left && !g.creator {
-                    continue;
-                }
-                let key = format!("-{}", g.id);
-                if seen.insert(key.clone()) {
-                    out.push(ChannelInfo {
-                        chat: key,
-                        title: g.title.clone(),
                     });
                 }
             }
