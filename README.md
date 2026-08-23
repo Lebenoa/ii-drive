@@ -12,14 +12,6 @@ the interface.
   `adapter-static` — a pure-SPA build served straight from the Rust binary.
 - **Max file size:** 2 GiB (Telegram bot-free account upload limit).
 
-## Requirements
-
-- Rust 1.85+ (2021 edition works; built with 1.98)
-- Node.js 18+ for the web UI — any package manager/runner works
-  (npm, pnpm, bun, yarn, nub, …); examples below use `nub`
-- A Telegram **api_id / api_hash** from <https://my.telegram.org/apps>
-- A Telegram account (user account, not a bot) for uploads
-
 ## Setup
 
 1. **Configure** — copy the example and edit:
@@ -66,27 +58,44 @@ the interface.
 
 ### Storage channels
 
-After signing in you are asked to pick one or more **storage channels** (any
-channel or group the account can post to, plus Saved Messages). The choice is
-stored in SurrealDB and uploads are spread across the selected channels
+After signing in you are asked to pick one or more **storage channels**. Only
+chats the account can actually wire bots into are offered — ones you created,
+or where you hold admin rights to invite users and promote admins — plus
+Saved Messages; a group you merely joined is not a usable target. The choice
+is stored in SurrealDB and uploads are spread across the selected channels
 round-robin; each file remembers which channel holds it, so downloads and
 deletes keep working even if you change the selection later.
-Settings lives under `/settings` with two categories:
+Settings lives under `/settings` with three categories:
 
 - **Telegram** — pick storage channels, and manage download bots. Bots
   download files through their own rate limits, so several spread the load;
-  adding a bot invites it into every storage channel as an admin. No token
-  yet? A guided **@BotFather** chat in the UI walks you through `/newbot`
-  and offers one-click add of the minted token.
+  adding a bot invites it into every storage channel as an admin. You can
+  **import an existing bot** (its token is fetched from @BotFather for you)
+  or create a new one through a guided **@BotFather** chat that walks
+  `/newbot` and offers one-click add of the minted token. That conversation
+  is saved: close the dialog mid-question and the card offers to resume it
+  rather than leaving @BotFather waiting, and an explicit cancel tells
+  @BotFather to drop it.
 - **Uploads** — split-upload threshold and auto-upload routing rules
-  (mime-prefix → folder), as tabs.
+  (mime-prefix → folder).
+- **Other** — developer mode, which unlocks `/internal-db`: browse the
+  embedded tables and run SurrealQL directly.
 
 ### Split uploads
 
-Files larger than the split threshold upload as parallel parts — one per
-download bot plus your own account — and are re-joined transparently when
-streamed or downloaded; parts are deleted together with the file. The
-threshold only affects new uploads; existing files keep their layout.
+Files larger than the split threshold are cut into parts of that size — at
+most 64 — and uploaded in parallel, round-robin across the selected
+channels. Each part goes out on a **rotating bot session**, so with several
+bots the parts travel over separate MTProto connections instead of
+pipelining through one; your own account is the fallback when no bots are
+configured, when none of them can reach the target, and always for Saved
+Messages. The same pool pays off on the way back: each part message can be
+fetched by a different bot under its own rate limit.
+
+Files above Telegram's per-document cap are always chunked, and keep all
+their parts in one channel. Parts are re-joined transparently when streamed
+or downloaded, and are deleted together with the file. The threshold only
+affects new uploads; existing files keep their layout.
 
 ### Troubleshooting login
 
@@ -113,8 +122,12 @@ just log in again through the web UI.
 | POST | `/api/auth/password` | — | Submit 2FA password; returns token |
 | GET | `/api/me` | token | Connection status + user info |
 | GET/POST | `/api/channels` | token | List candidate dialogs / save storage-channel selection |
+| POST | `/api/channels/create` | token | Create a new broadcast channel and use it as storage |
 | GET/POST/DELETE | `/api/bot`(`/ {id}`) | token | Manage download bots |
-| POST | `/api/botfather` | token | Relay one message to @BotFather; returns its reply |
+| POST | `/api/botfather` | token | Relay one message to @BotFather; returns its reply + saved draft |
+| GET | `/api/botfather/bots` | token | Bots this account owns, parsed from @BotFather's `/mybots` |
+| POST | `/api/botfather/token` | token | Fetch one owned bot's API token via the @BotFather menus |
+| GET/DELETE | `/api/botfather/draft` | token | Resume an unfinished `/newbot` chat / `/cancel` it and forget |
 | GET/PUT | `/api/settings` | token | Upload-split threshold (`split_mb`, 0 = off) |
 | GET/PUT | `/api/rules` | token | Auto-upload routing rules |
 | GET | `/api/files?q&folder&limit&offset` | token | List/search files (folder id, empty = root) |
@@ -126,12 +139,24 @@ just log in again through the web UI.
 | GET/POST | `/api/folders`(`/{id}`) | token | List / create / delete folders |
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
 | POST | `/api/config/reload` | token | Re-read config.toml (runtime fields hot-apply) |
+| GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
+| GET/POST | `/api/internal-db/tables` `/query` | token | Developer mode: list tables / run raw SurrealQL |
 | GET | `/health` | — | Liveness probe |
 
 ## Development
 
+### Requirements
+
+- Rust 1.85+ (the crate is edition 2024; built with 1.98)
+- Node.js 18+ for the web UI — any package manager/runner works
+  (npm, pnpm, bun, yarn, nub, …); examples use `nub`
+- A Telegram **api_id / api_hash** from <https://my.telegram.org/apps>
+- A Telegram account (user account, not a bot) for uploads
+
+### Commands
+
 ```sh
-cargo test            # offline unit tests (auth, config, db roundtrip)
+cargo test            # offline unit tests (auth, config, db, art, stream, routes)
 cargo clippy
 cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `npm run dev` etc. work the same
 ```

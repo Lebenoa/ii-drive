@@ -116,9 +116,10 @@
   <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
     <h2>Split uploads</h2>
     <p class="muted hint">
-      Files larger than this threshold upload as parallel parts — one part
-      per selected bot plus your own account, so big files finish much
-      faster. 0 disables splitting.
+      Files larger than this threshold are cut into parts of that size and
+      uploaded in parallel — each part on a different bot's connection when
+      you have a pool, so big files finish much faster. 0 disables
+      splitting.
     </p>
     {#if splitLoaded}
       <div class="split-row">
