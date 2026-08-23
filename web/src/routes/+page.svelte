@@ -1,3 +1,7 @@
+<svelte:head>
+  <title>ii-drive — Files</title>
+</svelte:head>
+
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { ApiError, clearToken, getMe, getToken, type Me } from '$lib/api';

@@ -1,3 +1,7 @@
+<svelte:head>
+  <title>ii-drive — Sign in</title>
+</svelte:head>
+
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { getMe, getToken } from '$lib/api';
