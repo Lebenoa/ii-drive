@@ -153,7 +153,7 @@
           {#each owned as name, i (name)}
             <li class="row-item" in:fadeUp={{ delay: stagger(i) }}>
               <span class="who">
-                <span class="avatar">{name.slice(0, 1)}</span>
+                <span class="avatar">{name.replace(/^@/, '').slice(0, 1)}</span>
                 <span>{name}</span>
               </span>
               <button
@@ -217,7 +217,7 @@
         {#each bots as b, i (b.id)}
           <li class="row-item" in:fadeUp={{ delay: stagger(i) }} out:collapse>
             <span class="who">
-              <span class="avatar">{b.username.slice(0, 1)}</span>
+              <span class="avatar">{b.username.replace(/^@/, '').slice(0, 1)}</span>
               <span>@{b.username}</span>
             </span>
             <button
