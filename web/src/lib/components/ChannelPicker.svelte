@@ -142,6 +142,7 @@
           disabled={creating}
         />
         <button
+          class="btn ghost busy-btn"
           type="submit"
           disabled={creating || newTitle.trim().length === 0}
         >
