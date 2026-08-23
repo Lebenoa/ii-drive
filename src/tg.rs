@@ -1008,8 +1008,11 @@ fn input_peer_for(raw_id: i64, chats: &[tl::enums::Chat]) -> tl::enums::InputPee
     where
         S: tokio::io::AsyncRead + Unpin,
     {
-        let client = self.ensure().await?;
-        let peer = self.storage_peer(chat).await?;
+        // Upload through a rotating bot session when available: concurrent
+        // part tasks then run on separate MTProto connections (one per
+        // bot), instead of pipelining everything over the user session.
+        // Falls back to the user session when no bot can serve this chat.
+        let (client, peer) = self.download_target(chat).await?;
 
         let uploaded = client
             .upload_stream(reader, size as usize, name.to_string())
