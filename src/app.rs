@@ -22,6 +22,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let protected = Router::new()
         .route("/api/me", get(crate::routes::me))
+        .route("/api/auth/logout", post(crate::routes::auth_logout))
         .route("/api/avatar", get(crate::routes::avatar))
         .route("/api/media-token", get(crate::routes::media_token))
         .route("/api/botfather", post(crate::routes::botfather_send))
@@ -101,25 +102,47 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 pub async fn run(state: AppState) -> std::io::Result<()> {
-    // Restore the download-bot pool before serving.
-    match crate::db::get_bots(&state.db).await {
-        Ok(bots) => {
-            for b in bots {
-                if let Err(e) = state.tg.configure_bot(&b.token).await {
-                    tracing::warn!("bot @{} failed to sign back in: {e}", b.username);
-                }
-            }
+    let mut accounts = Vec::new();
+
+    // A pre-multi-tenant install has one session file and rows with no
+    // owner. Adopting the session tells us who that owner is, so the
+    // existing files, folders and bot pool become theirs instead of
+    // vanishing behind the per-owner filters.
+    if let Some(uid) = state.hub.adopt_legacy().await {
+        match crate::db::adopt_unowned(&state.db, uid).await {
+            Ok(0) => tracing::info!("adopted legacy session for user {uid}"),
+            Ok(n) => tracing::info!("adopted legacy session for user {uid}: claimed {n} rows"),
+            Err(e) => tracing::warn!("could not claim legacy rows for {uid}: {e}"),
         }
-        Err(e) => tracing::warn!("could not load bot settings: {e}"),
+        accounts.push(uid);
     }
 
-    // Connect and populate the cached user info in the background so the
-    // first /api/me does not race the MTProto handshake and report a
-    // spurious "not authorized" (which the web client treats as logout).
-    let warmer = state.tg.clone();
-    tokio::spawn(async move {
-        let _ = warmer.status().await;
-    });
+    // `restore` reports only the accounts it added, skipping one already
+    // adopted above — so append rather than replace, or the adopted account
+    // would come up without its download bots.
+    accounts.extend(state.hub.restore().await);
+    tracing::info!("{} signed-in account(s)", accounts.len());
+    for uid in &accounts {
+        let Some(tg) = state.hub.get(*uid).await else {
+            continue;
+        };
+        match crate::db::get_bots(&state.db, *uid).await {
+            Ok(bots) => {
+                for b in bots {
+                    if let Err(e) = tg.configure_bot(&b.token).await {
+                        tracing::warn!("bot @{} failed to sign back in: {e}", b.username);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("could not load bot settings for {uid}: {e}"),
+        }
+        // Warm the connection so the first /api/me does not race the
+        // MTProto handshake and report a spurious "not authorized" (which
+        // the web client treats as a logout).
+        tokio::spawn(async move {
+            let _ = tg.status().await;
+        });
+    }
 
     let cfg = crate::config::get();
     let addr = format!("{}:{}", cfg.host, cfg.port);
@@ -138,6 +161,6 @@ pub fn shared_state(db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> App
     AppState {
         db: Arc::new(db),
         tokens: Arc::new(crate::auth::Tokens::new(&cfg.secret, cfg.token_ttl_secs)),
-        tg: Arc::new(crate::tg::TgManager::new(cfg)),
+        hub: Arc::new(crate::tg::TgHub::new(cfg)),
     }
 }

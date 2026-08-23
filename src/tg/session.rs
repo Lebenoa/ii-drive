@@ -9,31 +9,39 @@ use tokio::sync::Mutex;
 use crate::config::Config;
 
 use super::{
-    LoginFlow, PeerRef, ROTATION, State, TgManager, TgStatus, friendly, get_me_info, is_auth_error,
+    Conn, PeerRef, ROTATION, State, TgManager, TgStatus, friendly, get_me_info, is_auth_error,
 };
 
 impl TgManager {
-    pub fn new(cfg: Config) -> Self {
+    /// Builds a manager for one account. `session_path` is that account's
+    /// own session file; `user_id` is [`super::UNKNOWN_USER`] while a login
+    /// is still in flight and the account is therefore unknown.
+    pub fn new(cfg: Config, session_path: String, user_id: i64) -> Self {
         TgManager {
             cfg,
+            session_path,
+            user_id,
             st: Mutex::new(State {
-                client: None,
+                conn: None,
                 config_error: None,
-                login: LoginFlow::None,
                 peers: HashMap::new(),
                 me: None,
                 bots: HashMap::new(),
-                failed_logins: 0,
-                blocked_until: None,
             }),
         }
     }
 
+    /// Session file this manager owns. Only the hub needs it, to move or
+    /// delete the file once no connection holds it open.
+    pub(super) fn session_path(&self) -> &str {
+        &self.session_path
+    }
+
     /// Opens a session file and spawns its network runner.
-    pub(super) async fn open_client(&self, session_path: &str) -> Result<Client, String> {
+    pub(super) async fn open_conn(&self, session_path: &str) -> Result<Conn, String> {
         if let Some(parent) = std::path::Path::new(session_path)
             .parent()
-            .filter(|p| !p.is_empty())
+            .filter(|p| !p.as_os_str().is_empty())
         {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -49,21 +57,26 @@ impl TgManager {
             handle,
             mut updates,
         } = SenderPool::new(session, self.cfg.api_id);
-        tokio::spawn(runner.run());
+        let pool = handle.thin.clone();
+        let runner = tokio::spawn(runner.run());
         tokio::spawn(async move {
             while let Some(update) = updates.recv().await {
                 tracing::debug!(?update, "telegram update");
             }
         });
-        Ok(Client::new(handle))
+        Ok(Conn {
+            client: Client::new(handle),
+            pool,
+            runner,
+        })
     }
 
     /// Connects on first use; caches the client forever after a success.
     /// Missing credentials are remembered as a deterministic error.
     pub async fn ensure(&self) -> Result<Client, String> {
         let mut st = self.st.lock().await;
-        if let Some(client) = &st.client {
-            return Ok(client.clone());
+        if let Some(conn) = &st.conn {
+            return Ok(conn.client.clone());
         }
         if !self.cfg.tg_configured() {
             let msg = "Telegram is not configured: set api_id and api_hash in config.toml"
@@ -72,34 +85,30 @@ impl TgManager {
             return Err(msg);
         }
 
-        let path = self.cfg.session_path.clone();
         drop(st);
-        let client = self.open_client(&path).await?;
-        tracing::info!("connected to Telegram");
-        self.st.lock().await.client = Some(client.clone());
+        let conn = self.open_conn(&self.session_path).await?;
+        let client = conn.client.clone();
+        tracing::info!(user_id = self.user_id, "connected to Telegram");
+        self.st.lock().await.conn = Some(conn);
         Ok(client)
     }
 
-    /// Drops the persisted MTProto session and reconnects from scratch.
-    pub(super) async fn reset_session(&self) -> Result<(), String> {
-        let path = self.cfg.session_path.clone();
-        for suffix in ["", "-wal", "-shm"] {
-            let p = format!("{path}{suffix}");
-            match tokio::fs::remove_file(&p).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("cannot reset session file {p}: {e}")),
-            }
+    /// Stops every connection this manager holds and releases its session
+    /// files. Required before the hub may move or delete them: an open
+    /// SQLite file cannot be renamed on Windows.
+    pub(super) async fn close(&self) {
+        let (conn, bots) = {
+            let mut st = self.st.lock().await;
+            st.peers.clear();
+            st.me = None;
+            (st.conn.take(), std::mem::take(&mut st.bots))
+        };
+        for (_, bot) in bots {
+            bot.conn.close().await;
         }
-        let mut st = self.st.lock().await;
-        st.client = None;
-        st.peers.clear();
-        st.me = None;
-        st.failed_logins = 0;
-        st.blocked_until = None;
-        tracing::warn!("stale telegram session discarded, a fresh one will be created");
-        drop(st);
-        self.ensure().await.map(|_| ())
+        if let Some(conn) = conn {
+            conn.close().await;
+        }
     }
 
     /// Status for /api/me. Never fails — reports degradation in the payload.
@@ -171,34 +180,6 @@ impl TgManager {
         }
     }
 
-    pub(super) async fn finish_auth(&self, client: &Client) {
-        let info = get_me_info(client).await;
-        let mut st = self.st.lock().await;
-        st.login = LoginFlow::None;
-        st.me = info;
-        Self::record_login_success(&mut st);
-        tracing::info!("telegram account linked");
-    }
-
-    /// Telegram account id of the signed-in user, when known. After a
-    /// restart the cache is empty, so this connects and fills it rather
-    /// than reporting "nobody" (which made uploads ignore the user's
-    /// channel selection until /api/me happened to run).
-    pub async fn current_user_id(&self) -> Option<i64> {
-        {
-            let st = self.st.lock().await;
-            if let Some(m) = &st.me {
-                return Some(m.id);
-            }
-        }
-        let client = self.ensure().await.ok()?;
-        let mut st = self.st.lock().await;
-        if st.me.is_none() {
-            st.me = get_me_info(&client).await;
-        }
-        st.me.as_ref().map(|m| m.id)
-    }
-
     /// Current profile photo of the signed-in user as image bytes (largest
     /// server-side thumbnail), for the navbar avatar. `None` when the user
     /// has no photo or Telegram is unreachable — callers fall back to the
@@ -227,5 +208,37 @@ impl TgManager {
     pub fn next_rotation(&self) -> usize {
         use std::sync::atomic::Ordering;
         ROTATION.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tg::UNKNOWN_USER;
+
+    /// Closing a manager must release its session file: the hub moves that
+    /// file into place once a login names its account, and an open SQLite
+    /// file cannot be renamed on Windows. No network is involved — the
+    /// runner only connects when a request is made.
+    #[tokio::test]
+    async fn closing_releases_the_session_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("pending-test.db");
+        let cfg = Config {
+            api_id: 1,
+            api_hash: "test".to_string(),
+            ..Config::default()
+        };
+        let manager = TgManager::new(cfg, path.to_string_lossy().into_owned(), UNKNOWN_USER);
+
+        manager.ensure().await.expect("session opens");
+        assert!(path.exists());
+
+        manager.close().await;
+        let moved = dir.path().join("77.db");
+        tokio::fs::rename(&path, &moved)
+            .await
+            .expect("closed session file can be moved");
+        assert!(moved.exists());
     }
 }

@@ -33,6 +33,12 @@ ulid = "3"
 
 [dev-dependencies]
 tempfile = "3"
+# Tests open a store per case. The file-backed engine commits ~1 GiB of
+# arena each time and hands it back only after its background close
+# finishes, so a suite's worth of them exhausts the process. The in-memory
+# engine is the same `local::Db` type with none of that cost; only the
+# persistence test still wants a real file.
+surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-mem"] }
 
 [profile.release]
 strip = true

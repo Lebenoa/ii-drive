@@ -5,14 +5,22 @@ use super::{Conn, DbError};
 /// A user-created directory; `parent` is a folder id, "" = root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderRow {
+    /// Owning Telegram user id; `UNOWNED` for rows written before
+    /// multi-tenancy, until an account adopts them.
+    #[serde(default, deserialize_with = "super::files::null_as_zero")]
+    pub owner: i64,
     pub uid: String,
     pub name: String,
     pub parent: String,
 }
 
-pub async fn list_folders(db: &surrealdb::Surreal<Conn>) -> Result<Vec<FolderRow>, DbError> {
+pub async fn list_folders(
+    db: &surrealdb::Surreal<Conn>,
+    owner: i64,
+) -> Result<Vec<FolderRow>, DbError> {
     let mut res = db
-        .query("SELECT uid, name, parent FROM folder ORDER BY name")
+        .query("SELECT uid, name, parent, owner FROM folder WHERE owner = $owner ORDER BY name")
+        .bind(("owner", owner))
         .await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
     rows.into_iter()
@@ -28,7 +36,7 @@ pub async fn get_folder(
     uid: &str,
 ) -> Result<Option<FolderRow>, DbError> {
     let mut res = db
-        .query("SELECT uid, name, parent FROM folder WHERE uid = $uid LIMIT 1")
+        .query("SELECT uid, name, parent, owner FROM folder WHERE uid = $uid LIMIT 1")
         .bind(("uid", uid.to_string()))
         .await?;
     let mut rows: Vec<serde_json::Value> = res.take(0)?;
@@ -42,6 +50,7 @@ pub async fn get_folder(
 
 pub async fn create_folder(
     db: &surrealdb::Surreal<Conn>,
+    owner: i64,
     uid: &str,
     name: &str,
     parent: &str,
@@ -52,6 +61,7 @@ pub async fn create_folder(
             "uid": uid,
             "name": name,
             "parent": parent,
+            "owner": owner,
         }))
         .await?;
     Ok(())

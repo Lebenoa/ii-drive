@@ -12,6 +12,10 @@ pub struct FilePart {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRow {
+    /// Owning Telegram user id; `UNOWNED` for rows written before
+    /// multi-tenancy, until an account adopts them.
+    #[serde(default)]
+    pub owner: i64,
     pub uid: String,
     pub name: String,
     pub mime: String,
@@ -41,7 +45,7 @@ pub struct FileRow {
 const TABLE: &str = "file";
 
 const ROW_COLS: &str =
-    "uid, name, mime, size, message_id, chat, created_at, parts_json, folder, public, thumb";
+    "uid, name, mime, size, message_id, chat, created_at, parts_json, folder, public, thumb, owner";
 
 /// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
 /// unset fields as null) into "" instead of failing.
@@ -58,6 +62,14 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
+}
+
+/// Deserializes an `i64` that may arrive as JSON null into `UNOWNED`.
+pub(super) fn null_as_zero<'de, D>(d: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<i64>::deserialize(d)?.unwrap_or(super::UNOWNED))
 }
 
 /// Query results are taken as raw `serde_json::Value` (which implements
@@ -82,6 +94,10 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         public: bool,
         #[serde(default)]
         thumb: Option<String>,
+        // Pre-multi-tenant rows carry no owner; they stay unowned until
+        // adopt_unowned() hands them to an account.
+        #[serde(default, deserialize_with = "null_as_zero")]
+        owner: i64,
     }
     let raw: Raw = serde_json::from_value(v)
         .map_err(|e| DbError::Shape(format!("file row shape mismatch: {e}")))?;
@@ -96,6 +112,7 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         }],
     };
     Ok(FileRow {
+        owner: raw.owner,
         uid: raw.uid,
         name: raw.name,
         mime: raw.mime,
@@ -127,6 +144,7 @@ pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), 
             "folder": row.folder,
             "public": row.public,
             "thumb": row.thumb,
+            "owner": row.owner,
         }))
         .await?;
     Ok(())
@@ -146,6 +164,7 @@ pub async fn get(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<Option<File
 
 pub async fn list(
     db: &surrealdb::Surreal<Conn>,
+    owner: i64,
     q: &str,
     folder: &str,
     limit: u64,
@@ -155,10 +174,12 @@ pub async fn list(
         .query(format!(
             // CONTAINS "" is true for every name, so one query serves both cases.
             "SELECT {ROW_COLS} FROM file \
-             WHERE string::lowercase(name) CONTAINS $q AND folder = $folder \
+             WHERE owner = $owner AND string::lowercase(name) CONTAINS $q \
+               AND folder = $folder \
              ORDER BY created_at DESC \
              LIMIT $limit START $offset"
         ))
+        .bind(("owner", owner))
         .bind(("q", q.to_lowercase()))
         .bind(("folder", folder.to_string()))
         .bind(("limit", limit.min(500) as i64))

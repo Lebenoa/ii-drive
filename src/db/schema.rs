@@ -1,7 +1,7 @@
-use super::{Conn, DbError};
+use super::{bots, Conn, DbError, UNOWNED};
 
 /// Latest schema version; a database without a recorded version is v1.
-pub(super) const SCHEMA_LATEST: u64 = 3;
+pub(super) const SCHEMA_LATEST: u64 = 4;
 
 pub(super) async fn schema_version(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
     Ok(schema_version_recorded(db).await?.unwrap_or(1))
@@ -90,6 +90,30 @@ pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
                     );
                 }
             }
+            4 => {
+                // Every row gains an owner. Rows that predate multi-tenancy
+                // are stamped UNOWNED rather than guessed at, so a uniform
+                // `owner = $owner` filter never leaks them and
+                // adopt_unowned() can hand them to the account that owns
+                // the legacy session. The legacy `setting:bots` pool needs
+                // no stamp — it is already addressed by its own id.
+                let mut res = db
+                    .query(
+                        "UPDATE file SET owner = $u WHERE owner IS NONE RETURN AFTER; \
+                         UPDATE folder SET owner = $u WHERE owner IS NONE RETURN AFTER",
+                    )
+                    .bind(("u", UNOWNED))
+                    .await?;
+                let files: Vec<serde_json::Value> = res.take(0)?;
+                let folders: Vec<serde_json::Value> = res.take(1)?;
+                if !files.is_empty() || !folders.is_empty() {
+                    tracing::warn!(
+                        "migration v4: {} files and {} folders await adoption",
+                        files.len(),
+                        folders.len()
+                    );
+                }
+            }
             other => return Err(DbError::Shape(format!("no migration to version {other}"))),
         }
         set_schema_version(db, v).await?;
@@ -107,4 +131,35 @@ pub async fn purge_legacy_rows(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbE
         .await?;
     let deleted: Vec<serde_json::Value> = res.take(0)?;
     Ok(deleted.len() as u64)
+}
+
+/// Hands every unowned `file` and `folder` row, plus the pre-multi-tenant
+/// global bot pool, to `owner`; returns how many rows were claimed.
+///
+/// Startup calls this whenever it adopts the old single-account session, so
+/// it is idempotent: once claimed, nothing is unowned any more and a second
+/// call claims zero. Nothing is ever deleted.
+pub async fn adopt_unowned(db: &surrealdb::Surreal<Conn>, owner: i64) -> Result<u64, DbError> {
+    if owner == UNOWNED {
+        return Err(DbError::Shape(
+            "the unowned sentinel cannot adopt rows".to_string(),
+        ));
+    }
+    let mut res = db
+        .query(
+            "UPDATE file SET owner = $owner \
+               WHERE owner IS NONE OR owner = $unowned RETURN AFTER; \
+             UPDATE folder SET owner = $owner \
+               WHERE owner IS NONE OR owner = $unowned RETURN AFTER",
+        )
+        .bind(("owner", owner))
+        .bind(("unowned", UNOWNED))
+        .await?;
+    let files: Vec<serde_json::Value> = res.take(0)?;
+    let folders: Vec<serde_json::Value> = res.take(1)?;
+    let claimed = (files.len() + folders.len()) as u64 + bots::adopt_legacy_pool(db, owner).await?;
+    if claimed > 0 {
+        tracing::info!(%owner, claimed, "adopted pre-multi-tenant rows");
+    }
+    Ok(claimed)
 }

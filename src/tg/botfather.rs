@@ -6,8 +6,9 @@ use super::{PeerRef, TgManager, bot_token_regex, friendly};
 
 impl TgManager {
     /// Sends `text` to @BotFather and returns its reply text. The
-    /// conversation state lives on BotFather's side, so the wizard on the
-    /// web side only needs this one relay primitive.
+    /// conversation state lives on BotFather's side of this account's chat,
+    /// so every signed-in account can run its own wizard through this one
+    /// relay primitive without any state on our side.
     pub async fn botfather_send(&self, text: &str) -> Result<String, String> {
         let client = self.ensure().await?;
         let peer = self.storage_peer("botfather").await?;

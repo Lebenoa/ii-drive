@@ -17,8 +17,6 @@ pub use serve::*;
 pub use thumbs::*;
 pub use upload::*;
 
-use crate::state::AppState;
-
 /// Upper bound on how much of an aborted upload body we swallow just to
 /// deliver the error response; beyond this the connection is simply closed.
 const DRAIN_CAP: u64 = 32 * 1024 * 1024;
@@ -40,12 +38,43 @@ fn bytes_repr(n: u64) -> String {
 }
 
 /// Best-effort removal of already-posted part messages after a failure.
-async fn cleanup_parts(state: &AppState, parts: &[crate::db::FilePart]) {
+/// Runs on the account that posted them, which is the file's owner.
+async fn cleanup_parts(tg: &crate::tg::TgManager, parts: &[crate::db::FilePart]) {
     for p in parts {
-        if let Err(e) = state.tg.delete_message(p.message_id, &p.chat).await {
+        if let Err(e) = tg.delete_message(p.message_id, &p.chat).await {
             tracing::error!(message_id = p.message_id, "orphaned telegram message: {e}");
         }
     }
+}
+
+/// The `Authorization: Bearer` token a request carries, if any.
+fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+}
+
+/// Whether a read of `row` is allowed on the public raw/thumb endpoints,
+/// which carry no `Caller` because they are reachable without a session.
+///
+/// Every identity-bearing credential must resolve to the row's OWNER, so a
+/// session or media token minted for one account can never open another
+/// account's private file. The share sig is deliberately identity-free: it
+/// is scoped to this single uid, which is the whole point of a share link.
+fn may_read(
+    tokens: &crate::auth::Tokens,
+    row: &crate::db::FileRow,
+    headers: &axum::http::HeaderMap,
+    q: &std::collections::HashMap<String, String>,
+) -> bool {
+    row.public
+        || q.get("sig")
+            .is_some_and(|s| tokens.verify_file(&row.uid, s))
+        || q.get("mt")
+            .is_some_and(|t| tokens.verify_media(t) == Some(row.owner))
+        || bearer(headers).is_some_and(|t| tokens.verify(t) == Some(row.owner))
 }
 
 /// True when a delete failure only means the message was already gone —
@@ -89,4 +118,81 @@ fn parse_range(v: &str) -> Option<(u64, u64)> {
         e.parse().ok()?
     };
     (start <= end).then_some((start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: i64 = 111;
+    const B: i64 = 222;
+
+    fn row(owner: i64, public: bool) -> crate::db::FileRow {
+        crate::db::FileRow {
+            owner,
+            uid: "01FILE".to_string(),
+            name: "x.bin".to_string(),
+            mime: "application/octet-stream".to_string(),
+            size: 1,
+            message_id: 1,
+            chat: "c".to_string(),
+            created_at: 0,
+            folder: String::new(),
+            parts: Vec::new(),
+            public,
+            thumb: None,
+        }
+    }
+
+    fn bearer_headers(token: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().expect("header value"),
+        );
+        h
+    }
+
+    fn query(k: &str, v: &str) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([(k.to_string(), v.to_string())])
+    }
+
+    /// The point of tenant scoping: A's credentials never open B's file.
+    #[test]
+    fn credentials_only_open_their_own_tenant() {
+        let t = crate::auth::Tokens::new("k", 3600);
+        let none = std::collections::HashMap::new();
+        let empty = axum::http::HeaderMap::new();
+
+        let session_a = t.issue(A);
+        assert!(may_read(&t, &row(A, false), &bearer_headers(&session_a), &none));
+        assert!(!may_read(&t, &row(B, false), &bearer_headers(&session_a), &none));
+
+        let media_a = t.sign_media(A, 60);
+        assert!(may_read(&t, &row(A, false), &empty, &query("mt", &media_a)));
+        assert!(!may_read(&t, &row(B, false), &empty, &query("mt", &media_a)));
+    }
+
+    /// A share sig is file-scoped, so it works for any owner — but only for
+    /// the exact uid it was minted for.
+    #[test]
+    fn share_sig_is_file_scoped() {
+        let t = crate::auth::Tokens::new("k", 3600);
+        let empty = axum::http::HeaderMap::new();
+        let sig = t.sign_file("01FILE", 60);
+        assert!(may_read(&t, &row(B, false), &empty, &query("sig", &sig)));
+
+        let other = t.sign_file("01OTHER", 60);
+        assert!(!may_read(&t, &row(B, false), &empty, &query("sig", &other)));
+    }
+
+    /// A public file needs no credential at all.
+    #[test]
+    fn public_files_need_no_credential() {
+        let t = crate::auth::Tokens::new("k", 3600);
+        let empty = axum::http::HeaderMap::new();
+        let none = std::collections::HashMap::new();
+        assert!(may_read(&t, &row(A, true), &empty, &none));
+        assert!(!may_read(&t, &row(A, false), &empty, &none));
+    }
 }

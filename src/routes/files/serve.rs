@@ -2,12 +2,13 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::Response;
-use axum::Json;
+use axum::{Extension, Json};
 
+use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-use super::{parse_range, percent_encode};
+use super::{bearer, may_read, parse_range, percent_encode};
 
 /// Public (shareable) endpoint: streams the stored Telegram document.
 pub async fn raw_file(
@@ -20,24 +21,14 @@ pub async fn raw_file(
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
 
-    // Private files need a valid credential: the usual Authorization header,
-    // a single-file share sig, or the short-lived media token (?mt=) used
-    // by <img>/<video> srcs — never the long-lived session token itself.
-    if !row.public {
-        let ok = req
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|t| state.tokens.verify(t))
-            || q.get("mt").is_some_and(|t| state.tokens.verify_media(t))
-            || q.get("sig").is_some_and(|s| state.tokens.verify_file(&row.uid, s));
-        if !ok {
-            return Err(ApiError(
-                axum::http::StatusCode::FORBIDDEN,
-                "file is private".into(),
-            ));
-        }
+    // Private files need a credential belonging to the owner: the usual
+    // Authorization header, a single-file share sig, or the short-lived media
+    // token (?mt=) used by <img>/<video> srcs.
+    if !may_read(&state.tokens, &row, req.headers(), &q) {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "file is private".into(),
+        ));
     }
 
     // Single-range HTTP Range support — video seeking needs it. The offset
@@ -61,7 +52,11 @@ pub async fn raw_file(
         None => (0, total, false),
     };
 
-    let stream = crate::stream::parts_stream_from(state.tg.clone(), row.parts.clone(), start)
+    // The bytes live in the owner's storage chats, and the reader here may be
+    // anonymous (public file or share link) — so the fetch always runs on the
+    // owner's account, never the caller's.
+    let tg = state.tg(row.owner).await?;
+    let stream = crate::stream::parts_stream_from(tg, row.parts.clone(), start)
         .await
         .map_err(ApiError::unavailable)?;
     // Bound to the declared Content-Length — the underlying Telegram
@@ -106,12 +101,10 @@ pub async fn file_link(
     let row = crate::db::get(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
-    // Only the owner may mint links.
-    let authed = req_headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| state.tokens.verify(t));
+    // Minting a capability is an owner-only act, so this endpoint accepts the
+    // session token alone — and only the owner's. It sits on the public
+    // router (no `Caller`), hence the manual check.
+    let authed = bearer(&req_headers).is_some_and(|t| state.tokens.verify(t) == Some(row.owner));
     if !authed {
         return Err(ApiError::unauthorized("unauthorized"));
     }
@@ -125,23 +118,16 @@ pub async fn file_link(
 /// TTL of the short-lived media-read token handed to the web client.
 const MEDIA_TTL_SECS: u64 = 3600;
 
-/// GET /api/media-token — bearer-authenticated short-lived signed token for
-/// private raw/thumb URLs (`?mt=`), so `<img>`/`<video>` srcs never carry
-/// the long-lived session token (which would leak via logs/history/Referer).
+/// GET /api/media-token — short-lived signed token for the caller's private
+/// raw/thumb URLs (`?mt=`), so `<img>`/`<video>` srcs never carry the
+/// long-lived session token (which would leak via logs/history/Referer).
+/// The token names its account, so it only opens that account's files.
 pub async fn media_token(
     State(state): State<AppState>,
-    req_headers: axum::http::HeaderMap,
+    Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let authed = req_headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| state.tokens.verify(t));
-    if !authed {
-        return Err(ApiError::unauthorized("unauthorized"));
-    }
     Ok(Json(serde_json::json!({
-        "token": state.tokens.sign_media(MEDIA_TTL_SECS),
+        "token": state.tokens.sign_media(uid, MEDIA_TTL_SECS),
         "expires_in": MEDIA_TTL_SECS,
     })))
 }

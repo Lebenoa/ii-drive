@@ -6,6 +6,8 @@
 
   let step: 'phone' | 'code' | 'password' = $state('phone');
   let phone = $state('');
+  /** identifies the in-flight attempt on the server; issued by the phone step */
+  let loginId = $state('');
   let code = $state('');
   let tgPassword = $state('');
   let hint = $state('');
@@ -23,7 +25,7 @@
     busy = true;
     error = '';
     try {
-      await sendLoginPhone(phone.trim());
+      loginId = await sendLoginPhone(phone.trim());
       step = 'code';
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -35,10 +37,18 @@
   async function submitCode(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     if (busy || code.trim().length === 0) return;
+    // No id means the phone step never completed (or the page reloaded mid-flow);
+    // the code can only be checked against the attempt that requested it.
+    if (loginId.length === 0) {
+      code = '';
+      step = 'phone';
+      error = 'That sign-in attempt is no longer valid. Request a new code.';
+      return;
+    }
     busy = true;
     error = '';
     try {
-      const res = await sendLoginCode(code.trim());
+      const res = await sendLoginCode(loginId, code.trim());
       if (res.status === 'password_required') {
         hint = res.hint ?? '';
         step = 'password';
@@ -58,7 +68,7 @@
     busy = true;
     error = '';
     try {
-      const res = await sendLoginPassword(tgPassword);
+      const res = await sendLoginPassword(loginId, tgPassword);
       if (res.status === 'ok') finish(res.token);
       else error = res.hint ?? 'Password required.';
     } catch (err) {

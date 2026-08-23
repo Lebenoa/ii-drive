@@ -4,10 +4,11 @@ use grammers_client::Client;
 use super::{BotHandle, BotSession, PeerAuth, PeerId, PeerRef, TgManager, friendly};
 
 impl TgManager {
+    /// Deterministic per bot and per account: the owning account's session
+    /// file, plus the numeric prefix of the token.
     fn bot_session_path(&self, token: &str) -> String {
-        // Deterministic per bot: numeric prefix of the token.
         let key = token.split(':').next().unwrap_or("bot");
-        let base = self.cfg.session_path.trim_end_matches(".db");
+        let base = self.session_path().trim_end_matches(".db");
         format!("{base}_bot_{key}.db")
     }
 
@@ -20,8 +21,9 @@ impl TgManager {
             );
         }
         let path = self.bot_session_path(token);
-        let client = self.open_client(&path).await?;
-        let user = client
+        let conn = self.open_conn(&path).await?;
+        let user = conn
+            .client
             .bot_sign_in(token, &self.cfg.api_hash)
             .await
             .map_err(|e| friendly(format!("bot sign-in failed: {e}")))?;
@@ -33,21 +35,29 @@ impl TgManager {
             ),
             _ => return Err("bot account unavailable".to_string()),
         };
-        self.st.lock().await.bots.insert(
+        let replaced = self.st.lock().await.bots.insert(
             id,
             BotSession {
-                client,
+                conn,
                 username: username.clone(),
                 id,
                 access_hash,
             },
         );
+        if let Some(previous) = replaced {
+            previous.conn.close().await;
+        }
         tracing::info!(%id, %username, "bot added to download pool");
         Ok((username, id))
     }
 
     pub async fn drop_bot(&self, id: i64) {
-        self.st.lock().await.bots.remove(&id);
+        let dropped = self.st.lock().await.bots.remove(&id);
+        if let Some(bot) = dropped {
+            // Stop its runner too, or the bot's session file stays open for
+            // the rest of the process' life.
+            bot.conn.close().await;
+        }
     }
 
     /// Snapshot of the pool for the settings UI (no tokens).
@@ -77,7 +87,7 @@ impl TgManager {
                         .bots
                         .values()
                         .map(|b| BotHandle {
-                            client: b.client.clone(),
+                            client: b.conn.client.clone(),
                             username: b.username.clone(),
                         })
                         .collect();
@@ -125,7 +135,7 @@ impl TgManager {
             st.bots
                 .values()
                 .map(|b| BotHandle {
-                    client: b.client.clone(),
+                    client: b.conn.client.clone(),
                     username: b.username.clone(),
                 })
                 .collect()
@@ -168,7 +178,7 @@ impl TgManager {
                 )
             })
             .collect();
-        let user_client = st.client.clone();
+        let user_client = st.conn.as_ref().map(|c| c.client.clone());
         drop(st);
 
         let Some(user_client) = user_client else {

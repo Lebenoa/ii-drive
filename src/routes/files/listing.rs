@@ -1,21 +1,39 @@
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 
+use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
 use super::{is_message_gone, FileDto, ListQuery, MoveBody, VisibilityBody};
 
+/// A file the caller owns. Rows belonging to another account answer 404
+/// rather than 403: whether that uid exists is not the caller's business.
+async fn owned(
+    state: &AppState,
+    uid: i64,
+    id: &str,
+) -> ApiResult<crate::db::FileRow> {
+    crate::db::get(&state.db, id)
+        .await?
+        .filter(|row| row.owner == uid)
+        .ok_or_else(|| ApiError::not_found("file not found"))
+}
+
 /// PATCH /api/files/{id}/move — cut/paste target.
 pub async fn move_file(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    owned(&state, uid, &id).await?;
+    // The destination must be the caller's own folder — a foreign folder id
+    // is indistinguishable from a nonexistent one from here.
     if !body.folder.is_empty()
-        && crate::db::get_folder(&state.db, &body.folder)
+        && !crate::db::get_folder(&state.db, &body.folder)
             .await?
-            .is_none()
+            .is_some_and(|f| f.owner == uid)
     {
         return Err(ApiError::bad_request("target folder not found"));
     }
@@ -28,9 +46,11 @@ pub async fn move_file(
 /// PATCH /api/files/{id}/visibility — flip private/public.
 pub async fn set_visibility(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
     Json(body): Json<VisibilityBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    owned(&state, uid, &id).await?;
     if !crate::db::set_public(&state.db, &id, body.public).await? {
         return Err(ApiError::not_found("file not found"));
     }
@@ -39,10 +59,12 @@ pub async fn set_visibility(
 
 pub async fn list_files(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let rows = crate::db::list(
         &state.db,
+        uid,
         q.q.as_deref().unwrap_or(""),
         q.folder.as_deref().unwrap_or(""),
         q.limit.unwrap_or(100).min(500),
@@ -55,11 +77,13 @@ pub async fn list_files(
 
 pub async fn delete_file(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let row = crate::db::get(&state.db, &id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("file not found"))?;
+    let row = owned(&state, uid, &id).await?;
+    // The messages live in the owner's chats, so only the owner's client can
+    // remove them — here that is the caller.
+    let tg = state.tg(uid).await?;
     // Row first, then message: if the process dies in between, the API stays
     // consistent (file gone) and only Telegram holds an orphan. The reverse
     // order would leave a row pointing at a deleted message.
@@ -73,7 +97,7 @@ pub async fn delete_file(
     // instead of failing the whole delete.
     let mut failed: Option<String> = None;
     for p in &row.parts {
-        match state.tg.delete_message(p.message_id, &p.chat).await {
+        match tg.delete_message(p.message_id, &p.chat).await {
             Ok(()) => {}
             Err(e) if is_message_gone(&e) => {
                 tracing::warn!(message_id = p.message_id, "part already deleted: {e}");

@@ -21,6 +21,11 @@ pub use settings::{
 
 type Conn = surrealdb::engine::local::Db;
 
+/// Owner id on rows written before multi-tenancy, and on rows a fresh
+/// account has not claimed yet. Real Telegram user ids are never 0, so no
+/// live account can collide with it.
+pub const UNOWNED: i64 = 0;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error(transparent)]
@@ -35,6 +40,23 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let db = surrealdb::Surreal::new::<surrealdb::engine::local::SurrealKv>(path).await?;
+    bootstrap(&db).await?;
+    Ok(db)
+}
+
+/// Scratch store for tests. Same `local::Db` client as [`open`], so every
+/// query behaves identically, but nothing touches the filesystem and no
+/// arena has to be reclaimed between cases.
+#[cfg(test)]
+pub(crate) async fn open_mem() -> Result<surrealdb::Surreal<Conn>, DbError> {
+    let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(()).await?;
+    bootstrap(&db).await?;
+    Ok(db)
+}
+
+/// Selects the namespace, defines the tables and brings the schema up to
+/// date. Shared so a test store is never a different shape from a real one.
+async fn bootstrap(db: &surrealdb::Surreal<Conn>) -> Result<(), DbError> {
     db.use_ns("drive").await?;
     db.use_db("drive").await?;
     // SELECTs against a not-yet-created table error out; define up front so
@@ -45,19 +67,20 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     let _ = res.take::<surrealdb::types::Value>(1usize)?;
-    migrate(&db).await?;
-    Ok(db)
+    migrate(db).await?;
+    Ok(())
 }
 
-/// Test-only serialization for the embedded store.
+/// Test-only serialization for the *file-backed* store.
 ///
 /// Every `open()` builds a SurrealKv engine that commits roughly a
 /// gigabyte up front and releases it only once its store finishes closing
-/// on background tasks. `cargo test`'s default parallelism happily opens
-/// one per thread, so a dozen live arenas exhaust the machine and the
-/// process dies on a 1 GiB allocation — regardless of `--test-threads`,
-/// because each `#[tokio::test]` drops its own runtime before that close
-/// completes. Holding this lock keeps one engine live at a time.
+/// on background tasks — and the close outlives the test, because each
+/// `#[tokio::test]` drops its runtime first. Arenas therefore accumulate
+/// across a run and the process dies on a 1 GiB allocation at whatever
+/// test happens to be next, at any `--test-threads`. Logic tests avoid the
+/// problem entirely by using [`open_mem`]; the few cases that genuinely
+/// need a file on disk hold this lock so only one arena is ever live.
 #[cfg(test)]
 pub(crate) mod harness {
     use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -82,26 +105,22 @@ pub(crate) mod harness {
 mod tests {
     use super::*;
 
-    /// Keeps one test's scratch directory and its engine slot alive.
-    struct TestEnv {
-        _dir: tempfile::TempDir,
-        _engine: super::harness::EngineGuard,
+    /// Nothing to keep alive for an in-memory store. Kept so tests read
+    /// the same as they did when the store was a temp directory.
+    struct TestEnv;
+
+    /// Scratch store for a single test: real schema, no filesystem, no
+    /// engine arena to reclaim afterwards.
+    async fn temp_db() -> (surrealdb::Surreal<Conn>, TestEnv) {
+        (open_mem().await.expect("open test db"), TestEnv)
     }
 
-    /// Scratch store for a single test. Hold the returned guard for the
-    /// whole test: dropping it frees the engine slot for the next one.
-    async fn temp_db() -> (surrealdb::Surreal<Conn>, TestEnv) {
-        let engine = super::harness::acquire();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.surrealkv");
-        let db = open(path.to_str().expect("utf8 path"))
-            .await
-            .expect("open test db");
-        (db, TestEnv { _dir: dir, _engine: engine })
-    }
+    /// Tenant used by tests that do not care about ownership.
+    pub(super) const OWNER: i64 = 4242;
 
     pub(super) fn row(uid: &str, name: &str, created_at: i64) -> FileRow {
         FileRow {
+            owner: OWNER,
             uid: uid.to_string(),
             name: name.to_string(),
             mime: "application/octet-stream".to_string(),
@@ -133,15 +152,15 @@ mod tests {
 
         assert!(get(&db, "missing").await.unwrap().is_none());
 
-        let all = list(&db, "", "", 100, 0).await.unwrap();
+        let all = list(&db, OWNER, "", "", 100, 0).await.unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].uid, "01B", "newest first");
 
-        let hits = list(&db, "hello", "", 100, 0).await.unwrap();
+        let hits = list(&db, OWNER, "hello", "", 100, 0).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].uid, "01A");
 
-        let paged = list(&db, "", "", 1, 1).await.unwrap();
+        let paged = list(&db, OWNER, "", "", 1, 1).await.unwrap();
         assert_eq!(paged.len(), 1);
         assert_eq!(paged[0].uid, "01A");
 
@@ -244,13 +263,16 @@ mod tests {
     #[tokio::test]
     async fn split_setting_roundtrip() {
         let (db, _dir) = temp_db().await;
-        assert_eq!(get_split(&db).await.unwrap(), 0, "default is off");
+        assert_eq!(get_split(&db, "111").await.unwrap(), 0, "default is off");
 
-        set_split(&db, 250 * 1024 * 1024).await.unwrap();
-        assert_eq!(get_split(&db).await.unwrap(), 250 * 1024 * 1024);
+        set_split(&db, "111", 250 * 1024 * 1024).await.unwrap();
+        assert_eq!(get_split(&db, "111").await.unwrap(), 250 * 1024 * 1024);
 
-        set_split(&db, 0).await.unwrap();
-        assert_eq!(get_split(&db).await.unwrap(), 0);
+        // Per-user isolation: another account keeps the default.
+        assert_eq!(get_split(&db, "222").await.unwrap(), 0);
+
+        set_split(&db, "111", 0).await.unwrap();
+        assert_eq!(get_split(&db, "111").await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -291,8 +313,8 @@ mod tests {
     async fn folders_crud_and_file_filtering() {
         let (db, _dir) = temp_db().await;
 
-        create_folder(&db, "F1", "Docs", "").await.unwrap();
-        create_folder(&db, "F2", "Invoices", "F1").await.unwrap();
+        create_folder(&db, OWNER, "F1", "Docs", "").await.unwrap();
+        create_folder(&db, OWNER, "F2", "Invoices", "F1").await.unwrap();
         assert!(get_folder(&db, "F2").await.unwrap().unwrap().parent == "F1");
 
         let mut r = row("01F", "tax.pdf", 10);
@@ -300,10 +322,10 @@ mod tests {
         insert(&db, &r).await.unwrap();
         insert(&db, &row("01R", "root.txt", 20)).await.unwrap();
 
-        let in_f1 = list(&db, "", "F1", 100, 0).await.unwrap();
+        let in_f1 = list(&db, OWNER, "", "F1", 100, 0).await.unwrap();
         assert_eq!(in_f1.len(), 1);
         assert_eq!(in_f1[0].uid, "01F");
-        let in_root = list(&db, "", "", 100, 0).await.unwrap();
+        let in_root = list(&db, OWNER, "", "", 100, 0).await.unwrap();
         assert_eq!(in_root.len(), 1);
         assert_eq!(in_root[0].uid, "01R");
 
@@ -313,7 +335,7 @@ mod tests {
         assert_eq!(delete_folder(&db, "F2").await.unwrap(), 1);
         assert_eq!(delete_folder(&db, "F2").await.unwrap(), 0);
 
-        let names: Vec<String> = list_folders(&db)
+        let names: Vec<String> = list_folders(&db, OWNER)
             .await
             .unwrap()
             .into_iter()
@@ -337,7 +359,7 @@ mod tests {
 
         // The startup purge drops only rows without a folder.
         assert_eq!(purge_legacy_rows(&db).await.unwrap(), 1);
-        let root = list(&db, "", "", 100, 0).await.unwrap();
+        let root = list(&db, OWNER, "", "", 100, 0).await.unwrap();
         assert_eq!(root.len(), 1);
         assert_eq!(root[0].uid, "01N");
         assert!(get(&db, "leg").await.unwrap().is_none());
@@ -403,11 +425,111 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(migrate(&db).await.unwrap(), 3);
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
         let row = get(&db, "v3").await.unwrap().unwrap();
         assert!(!row.public, "backfilled rows must be private");
         // Idempotent second run.
-        assert_eq!(migrate(&db).await.unwrap(), 3);
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
+    }
+
+    #[tokio::test]
+    async fn owners_cannot_see_each_others_rows() {
+        let (db, _dir) = temp_db().await;
+        const A: i64 = 111;
+        const B: i64 = 222;
+
+        let mut a = row("01A", "a.txt", 10);
+        a.owner = A;
+        insert(&db, &a).await.unwrap();
+        let mut b = row("01B", "b.txt", 20);
+        b.owner = B;
+        insert(&db, &b).await.unwrap();
+        create_folder(&db, A, "FA", "Alice", "").await.unwrap();
+        create_folder(&db, B, "FB", "Bob", "").await.unwrap();
+
+        let mine = list(&db, A, "", "", 100, 0).await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].uid, "01A");
+        assert_eq!(mine[0].owner, A);
+        // A search matching the other tenant's file still finds nothing.
+        assert!(list(&db, A, "b.txt", "", 100, 0).await.unwrap().is_empty());
+
+        let theirs = list(&db, B, "", "", 100, 0).await.unwrap();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].uid, "01B");
+
+        let a_folders = list_folders(&db, A).await.unwrap();
+        assert_eq!(a_folders.len(), 1);
+        assert_eq!(a_folders[0].name, "Alice");
+        assert_eq!(a_folders[0].owner, A);
+        let b_folders = list_folders(&db, B).await.unwrap();
+        assert_eq!(b_folders.len(), 1);
+        assert_eq!(b_folders[0].name, "Bob");
+
+        // uid-addressed reads stay global; callers authorize on `owner`.
+        assert_eq!(get(&db, "01B").await.unwrap().unwrap().owner, B);
+        assert_eq!(get_folder(&db, "FB").await.unwrap().unwrap().owner, B);
+    }
+
+    #[tokio::test]
+    async fn bot_pools_are_per_owner() {
+        let (db, _dir) = temp_db().await;
+        const A: i64 = 111;
+        const B: i64 = 222;
+        assert!(get_bots(&db, A).await.unwrap().is_empty());
+
+        let bot = |id: i64| BotInfo {
+            token: format!("{id}:tok"),
+            username: format!("b{id}"),
+            id,
+        };
+        set_bots(&db, A, &[bot(1), bot(2)]).await.unwrap();
+        set_bots(&db, B, &[bot(9)]).await.unwrap();
+
+        assert_eq!(get_bots(&db, A).await.unwrap().len(), 2);
+        let b_pool = get_bots(&db, B).await.unwrap();
+        assert_eq!(b_pool.len(), 1);
+        assert_eq!(b_pool[0].id, 9);
+
+        // Removing from one pool leaves the other untouched.
+        remove_bot(&db, A, 1).await.unwrap();
+        let a_pool = get_bots(&db, A).await.unwrap();
+        assert_eq!(a_pool.len(), 1);
+        assert_eq!(a_pool[0].id, 2);
+        assert_eq!(get_bots(&db, B).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn adopt_unowned_claims_legacy_rows_once() {
+        let (db, _dir) = temp_db().await;
+        const A: i64 = 111;
+
+        // A pre-multi-tenant store: rows and one global bot pool, no owners.
+        set_schema_version(&db, 3).await.unwrap();
+        db.query(
+            "CREATE file SET uid = 'old', name = 'old.bin', mime = 'm', size = 1, \
+             message_id = 1, chat = 'me', created_at = 1, folder = ''; \
+             CREATE folder SET uid = 'OF', name = 'Old', parent = ''; \
+             UPSERT setting:bots SET bots_json = '[{\"token\":\"t\",\"username\":\"u\",\"id\":7}]'",
+        )
+        .await
+        .unwrap();
+
+        // v4 only stamps them unowned: the data survives, visible to nobody.
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
+        assert_eq!(get(&db, "old").await.unwrap().unwrap().owner, UNOWNED);
+        assert!(list(&db, A, "", "", 100, 0).await.unwrap().is_empty());
+
+        // One file, one folder and the legacy pool.
+        assert_eq!(adopt_unowned(&db, A).await.unwrap(), 3);
+        assert_eq!(list(&db, A, "", "", 100, 0).await.unwrap().len(), 1);
+        assert_eq!(list_folders(&db, A).await.unwrap().len(), 1);
+        assert_eq!(get_bots(&db, A).await.unwrap()[0].id, 7);
+
+        // Idempotent: a second startup adoption claims nothing.
+        assert_eq!(adopt_unowned(&db, A).await.unwrap(), 0);
+        assert_eq!(list(&db, A, "", "", 100, 0).await.unwrap().len(), 1);
+        assert_eq!(get_bots(&db, A).await.unwrap().len(), 1);
     }
 }
 

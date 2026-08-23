@@ -45,9 +45,18 @@ pub async fn set_rules(
     Ok(())
 }
 
-/// Upload-split threshold in bytes (0 = never split); global setting.
-pub async fn get_split(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
-    let mut res = db.query("SELECT split_bytes FROM setting:upload").await?;
+/// Row id for a user's upload settings. Mirrors `setting_id`/`draft_id`.
+fn upload_id(user_key: &str) -> String {
+    format!("setting:upload_{}", user_key.replace([':', '-'], "_"))
+}
+
+/// Upload-split threshold in bytes (0 = never split), per user: several
+/// accounts share the process, and one tenant must not resize another
+/// tenant's uploads.
+pub async fn get_split(db: &surrealdb::Surreal<Conn>, user_key: &str) -> Result<u64, DbError> {
+    let mut res = db
+        .query(format!("SELECT split_bytes FROM {}", upload_id(user_key)))
+        .await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
     Ok(rows
         .into_iter()
@@ -57,9 +66,13 @@ pub async fn get_split(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
         .unwrap_or(0))
 }
 
-pub async fn set_split(db: &surrealdb::Surreal<Conn>, bytes: u64) -> Result<(), DbError> {
+pub async fn set_split(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+    bytes: u64,
+) -> Result<(), DbError> {
     let mut res = db
-        .query("UPSERT setting:upload SET split_bytes = $b")
+        .query(format!("UPSERT {} SET split_bytes = $b", upload_id(user_key)))
         .bind(("b", bytes as i64))
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;

@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 
-use grammers_client::client::{LoginToken, PasswordToken};
 use grammers_client::Client;
+use grammers_client::sender::SenderPoolHandle;
 use tokio::sync::Mutex;
 
 mod botfather;
 mod bots;
 mod channels;
+mod hub;
 mod login;
 mod session;
 mod transfer;
 
 pub use bots::bot_token_regex;
+pub use hub::{LoginStep, TgHub};
 pub(crate) use transfer::is_file_reference_error;
 
 /// Global round-robin counter, shared by upload-target selection and bot
@@ -68,22 +70,6 @@ pub struct TgStatus {
     pub relogin: bool,
 }
 
-enum LoginFlow {
-    None,
-    CodeSent {
-        phone: String,
-        token: Box<LoginToken>,
-    },
-    PasswordNeeded {
-        token: Box<PasswordToken>,
-    },
-}
-
-pub enum SignInOutcome {
-    Done,
-    PasswordRequired { hint: Option<String> },
-}
-
 /// A chat offered as a storage target by the picker UI.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChannelInfo {
@@ -99,30 +85,63 @@ struct BotHandle {
 }
 
 struct BotSession {
-    client: Client,
+    conn: Conn,
     username: String,
     id: i64,
     access_hash: Option<i64>,
 }
 
+/// A live MTProto connection: the client plus what is needed to stop its
+/// background runner, because the runner is what holds the session file
+/// open. Files must be closed before they can be moved or deleted.
+struct Conn {
+    client: Client,
+    pool: SenderPoolHandle,
+    runner: tokio::task::JoinHandle<()>,
+}
+
+/// How long to wait for a network runner to wind down before abandoning it.
+const RUNNER_STOP_SECS: u64 = 5;
+
+impl Conn {
+    /// Stops the network runner and waits for it to let go of the session
+    /// file. Bounded, so a runner stuck mid-connect cannot hang a request.
+    async fn close(self) {
+        self.pool.quit();
+        let abort = self.runner.abort_handle();
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(RUNNER_STOP_SECS),
+            self.runner,
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("telegram runner did not stop in time; abandoning it");
+            abort.abort();
+        }
+    }
+}
+
 struct State {
-    client: Option<Client>,
+    conn: Option<Conn>,
     config_error: Option<String>,
-    login: LoginFlow,
     peers: HashMap<String, PeerRef>,
     me: Option<UserInfo>,
     bots: HashMap<i64, BotSession>,
-    failed_logins: u32,
-    blocked_until: Option<std::time::Instant>,
 }
 
-/// Failed code/password attempts before login is temporarily blocked.
-const MAX_LOGIN_ATTEMPTS: u32 = 5;
-/// How long the block lasts.
-const LOGIN_BLOCK_SECS: u64 = 300;
+/// Placeholder id for a manager whose account is not known yet — a login
+/// still in flight. Real Telegram ids are always positive.
+const UNKNOWN_USER: i64 = 0;
 
+/// Everything one Telegram account can do. Each instance owns exactly one
+/// session file, so several accounts can be served side by side.
 pub struct TgManager {
     cfg: Config,
+    /// Session file backing this account only.
+    session_path: String,
+    /// Account this manager serves, or [`UNKNOWN_USER`] while signing in.
+    user_id: i64,
     st: Mutex<State>,
 }
 

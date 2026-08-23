@@ -316,9 +316,20 @@ function tokenFrom(res: AuthOk): string {
   throw new ApiError(500, 'Malformed login response');
 }
 
-/** POST /api/auth/phone -> {ok:true}; 401 when the phone is not allowlisted */
-export async function sendLoginPhone(phone: string): Promise<void> {
-  await request<{ ok: true }>('/api/auth/phone', { method: 'POST', body: { phone }, auth: false });
+/**
+ * POST /api/auth/phone -> {login_id}; 401 when the phone is not allowlisted.
+ * The id identifies this attempt so concurrent sign-ins never share state.
+ */
+export async function sendLoginPhone(phone: string): Promise<string> {
+  const res = await request<{ login_id: string }>('/api/auth/phone', {
+    method: 'POST',
+    body: { phone },
+    auth: false,
+  });
+  if (typeof res.login_id !== 'string' || res.login_id.length === 0) {
+    throw new ApiError(500, 'Malformed login response');
+  }
+  return res.login_id;
 }
 
 export type LoginResult =
@@ -326,20 +337,20 @@ export type LoginResult =
   | { status: 'password_required'; hint?: string };
 
 /** POST /api/auth/code — returns a token unless 2FA is enabled */
-export async function sendLoginCode(code: string): Promise<LoginResult> {
+export async function sendLoginCode(loginId: string, code: string): Promise<LoginResult> {
   const res = await request<AuthOk | { status: 'password_required'; hint?: string }>(
     '/api/auth/code',
-    { method: 'POST', body: { code }, auth: false },
+    { method: 'POST', body: { login_id: loginId, code }, auth: false },
   );
   if (res.status === 'ok') return { status: 'ok', token: tokenFrom(res) };
   return res;
 }
 
 /** POST /api/auth/password — 2FA step; returns the token on success */
-export async function sendLoginPassword(password: string): Promise<LoginResult> {
+export async function sendLoginPassword(loginId: string, password: string): Promise<LoginResult> {
   const res = await request<AuthOk>('/api/auth/password', {
     method: 'POST',
-    body: { password },
+    body: { login_id: loginId, password },
     auth: false,
   });
   return { status: 'ok', token: tokenFrom(res) };

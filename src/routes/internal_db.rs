@@ -73,14 +73,7 @@ mod tests {
     use crate::db::DbError;
 
     async fn test_db() -> Result<surrealdb::Surreal<surrealdb::engine::local::Db>, DbError> {
-        let dir = tempfile::tempdir()?;
-        let db = surrealdb::Surreal::new::<surrealdb::engine::local::SurrealKv>(
-            dir.path().join("t.db"),
-        )
-        .await?;
-        db.use_ns("drive").await?;
-        db.use_db("drive").await?;
-        Ok(db)
+        crate::db::open_mem().await
     }
 
     /// Bad SQL must fail via Response::check (surrealdb 3 yields
@@ -88,8 +81,6 @@ mod tests {
     /// info and empty-select shapes deserialize as arrays.
     #[tokio::test]
     async fn statement_shapes() -> Result<(), DbError> {
-        // This test opens its own engine; share the DB test budget.
-        let _engine = crate::db::harness::acquire();
         let db = test_db().await?;
         db.query("DEFINE TABLE IF NOT EXISTS file").await?;
 

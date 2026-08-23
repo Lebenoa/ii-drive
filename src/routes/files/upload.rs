@@ -2,9 +2,10 @@ use std::io;
 
 use axum::extract::multipart::Multipart;
 use axum::extract::State;
-use axum::Json;
+use axum::{Extension, Json};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::auth::Caller;
 use crate::db::FileRow;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -15,9 +16,15 @@ use super::{
 
 pub async fn upload_file(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Everything below runs on the caller's own account: their client posts
+    // the parts, into their channels, under their routing rules.
+    let tg = state.tg(uid).await?;
+    let user_key = uid.to_string();
+
     // grammers needs the exact byte count up front; the client provides it.
     let declared: u64 = headers
         .get("x-file-size")
@@ -49,9 +56,9 @@ pub async fn upload_file(
         .trim()
         .to_string();
     if !folder.is_empty()
-        && crate::db::get_folder(&state.db, &folder)
+        && !crate::db::get_folder(&state.db, &folder)
             .await?
-            .is_none()
+            .is_some_and(|f| f.owner == uid)
     {
         return Err(ApiError::bad_request("folder not found"));
     }
@@ -61,7 +68,9 @@ pub async fn upload_file(
     // connections, which is markedly faster for big files — especially with
     // several download bots, since each part message can be fetched by a
     // different bot under its own rate limit.
-    let split_bytes = crate::db::get_split(&state.db).await.unwrap_or(0);
+    let split_bytes = crate::db::get_split(&state.db, &user_key)
+        .await
+        .unwrap_or(0);
     // Chunk size: the user's split threshold when set (0 = off), never
     // above Telegram's per-document cap. Over-cap files always chunk —
     // they cannot fit a single document.
@@ -83,11 +92,9 @@ pub async fn upload_file(
     // channels. There is no fallback — the web UI forces channel selection
     // right after login, so reaching this point without channels means an
     // out-of-band API caller skipped setup.
-    let user_key = state.tg.current_user_id().await.map(|id| id.to_string());
-    let selected = match &user_key {
-        Some(k) => crate::db::get_channels(&state.db, k).await.unwrap_or_default(),
-        None => Vec::new(),
-    };
+    let selected = crate::db::get_channels(&state.db, &user_key)
+        .await
+        .unwrap_or_default();
     if selected.is_empty() {
         return Err(ApiError::bad_request(
             "no storage channels selected — complete channel selection in the drive first",
@@ -98,7 +105,7 @@ pub async fn upload_file(
     // Which channel is chosen rotates per upload so parallel large files
     // spread across the selection; ordinary split uploads keep the
     // per-part round-robin.
-    let base = state.tg.next_rotation();
+    let base = tg.next_rotation();
     let chat_for = |i: usize| -> String {
         let idx = if over_cap { base } else { base + i };
         selected[idx % selected.len()].chat.to_ascii_lowercase()
@@ -123,7 +130,7 @@ pub async fn upload_file(
             part_size
         };
         let mut meta = meta_rx.clone();
-        let tg = state.tg.clone();
+        let tg = tg.clone();
         let chat = chat_for(i);
         uploaders.push(tokio::spawn(async move {
             // Helper keeps the watch guard from living across an await.
@@ -259,7 +266,7 @@ pub async fn upload_file(
                 Err(_) => {}
             }
         }
-        cleanup_parts(&state, &parts).await;
+        cleanup_parts(&tg, &parts).await;
         // "upload aborted" means an uploader died first; its error is the
         // actual cause (e.g. Telegram down) and far more useful to the client.
         if err.1 == "upload aborted" && let Some(e) = uploader_err {
@@ -302,14 +309,14 @@ pub async fn upload_file(
         }
     }
     if let Some(e) = first_err {
-        cleanup_parts(&state, &parts).await;
+        cleanup_parts(&tg, &parts).await;
         return Err(ApiError::bad_request(e));
     }
 
     if fed != declared {
         // The messages may already be live in Telegram (a client that lied
         // low in X-File-Size); remove them so storage matches the error.
-        cleanup_parts(&state, &parts).await;
+        cleanup_parts(&tg, &parts).await;
         return Err(ApiError::bad_request(format!(
             "uploaded {fed} bytes but X-File-Size declared {declared}"
         )));
@@ -321,21 +328,20 @@ pub async fn upload_file(
     let mut folder = folder;
     if folder.is_empty()
         && !mime.is_empty()
-        && let Some(uid) = state.tg.current_user_id().await
             // Fail open to the root on a rules error, but never silently.
-            && let Ok(rules) = crate::db::get_rules(&state.db, &uid.to_string())
-                .await
-                .inspect_err(|e| tracing::warn!("routing rules unavailable, file stays in root: {e}"))
-            && let Some(rule) = rules
-                .iter()
-                .find(|r| mime.starts_with(r.mime.trim()))
-            && crate::db::get_folder(&state.db, &rule.folder)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
-        {
-            folder = rule.folder.clone();
+        && let Ok(rules) = crate::db::get_rules(&state.db, &user_key)
+            .await
+            .inspect_err(|e| tracing::warn!("routing rules unavailable, file stays in root: {e}"))
+        && let Some(rule) = rules
+            .iter()
+            .find(|r| mime.starts_with(r.mime.trim()))
+        && crate::db::get_folder(&state.db, &rule.folder)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|f| f.owner == uid)
+    {
+        folder = rule.folder.clone();
     }
     // Telegram makes no stripped thumbnail for audio; pull embedded cover
     // art (ID3 APIC / FLAC PICTURE) from the buffered stream head instead.
@@ -348,6 +354,7 @@ pub async fn upload_file(
     }
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     let row = FileRow {
+        owner: uid,
         uid: ulid::Ulid::generate().to_string(),
         name,
         mime,
@@ -363,7 +370,7 @@ pub async fn upload_file(
     if let Err(e) = crate::db::insert(&state.db, &row).await {
         // No metadata row means the file is unmanageable; drop the messages
         // rather than leaving orphans in the storage chats.
-        cleanup_parts(&state, &row.parts).await;
+        cleanup_parts(&tg, &row.parts).await;
         return Err(e.into());
     }
 
@@ -375,10 +382,10 @@ pub async fn upload_file(
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {
         let st = state.clone();
-        let uid = row.uid.clone();
+        let file_uid = row.uid.clone();
         let part0 = row.parts[0].clone();
         tokio::spawn(async move {
-            extract_media_thumb(&st, &uid, part0).await;
+            extract_media_thumb(&st, uid, &file_uid, part0).await;
         });
     }
 

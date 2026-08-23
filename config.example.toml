@@ -21,7 +21,10 @@ secret = "change-me-to-a-long-random-string"
 # Phone numbers allowed to log in via Telegram. Login sends a Telegram code
 # to the number, so possession of that Telegram account is the credential.
 # Formatting differences ("+1 555 010 2030" vs "+15550102030") don't matter.
-# An empty list means nobody can log in.
+# An empty list means nobody can log in. Any number of these accounts can be
+# signed in simultaneously; each one has its own files, folders, storage
+# channels, download bots, routing rules and upload settings, and cannot see
+# another account's.
 allowed_phones = ["+15551234567"]
 
 # How long issued login tokens stay valid, in seconds (default 30 days)
@@ -30,7 +33,10 @@ token_ttl_secs = 2592000
 # Embedded SurrealDB storage folder (created automatically)
 db_path = "data/drive.surrealkv"
 
-# Telegram MTProto session file (created automatically after first login)
+# Telegram MTProto session file. Each signed-in account keeps its own session
+# at "<this folder>/sessions/<telegram-user-id>.db"; the path below is only
+# read once, to migrate an install that predates multi-account support (its
+# files and folders are then assigned to that account).
 session_path = "data/session.db"
 
 # Maximum size of a single upload. Free Telegram accounts cap at 2 GiB.

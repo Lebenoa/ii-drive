@@ -1,8 +1,9 @@
 use axum::extract::State;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::auth::Caller;
 use crate::db::{BotDraft, DraftMsg};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -21,16 +22,6 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// Telegram id of the signed-in account, used to key the draft row.
-async fn draft_key(state: &AppState) -> Result<String, ApiError> {
-    state
-        .tg
-        .current_user_id()
-        .await
-        .map(|id| id.to_string())
-        .ok_or_else(|| ApiError::bad_request("Telegram is not connected"))
 }
 
 /// The stage the conversation is parked at, derived from the transcript so
@@ -67,15 +58,17 @@ fn draft_json(draft: &BotDraft) -> serde_json::Value {
     })
 }
 
-/// POST /api/botfather — relay one message to @BotFather over the signed-in
-/// user's Telegram session and return its reply.
+/// POST /api/botfather — relay one message to @BotFather over the caller's
+/// Telegram session and return its reply.
 ///
 /// BotFather owns the conversation state, which is exactly why the exchange
 /// is persisted here: if the wizard is abandoned mid-question, BotFather is
 /// still waiting, and the stored draft is what lets us resume that same
-/// conversation instead of firing a second `/newbot` into it.
+/// conversation instead of firing a second `/newbot` into it. The draft row
+/// is keyed by the caller, so each account resumes its own conversation.
 pub async fn send(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<BotFatherBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let text = body.text.trim();
@@ -85,16 +78,13 @@ pub async fn send(
     if text.len() > 256 {
         return Err(ApiError::bad_request("message too long"));
     }
-    let key = draft_key(&state).await?;
+    let tg = state.tg(uid).await?;
+    let key = uid.to_string();
     let mut draft = crate::db::get_bot_draft(&state.db, &key)
         .await?
         .unwrap_or_default();
 
-    let reply = state
-        .tg
-        .botfather_send(text)
-        .await
-        .map_err(ApiError::bad_request)?;
+    let reply = tg.botfather_send(text).await.map_err(ApiError::bad_request)?;
 
     draft.log.push(DraftMsg { who: "me".into(), text: text.to_string() });
     draft.log.push(DraftMsg { who: "bf".into(), text: reply.clone() });
@@ -117,11 +107,13 @@ pub async fn send(
     })))
 }
 
-/// GET /api/botfather/draft — the pending `/newbot` conversation, so the
-/// wizard can pick up where it left off after a reload or restart.
-pub async fn draft(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let key = draft_key(&state).await?;
-    match crate::db::get_bot_draft(&state.db, &key).await? {
+/// GET /api/botfather/draft — the caller's pending `/newbot` conversation,
+/// so the wizard can pick up where it left off after a reload or restart.
+pub async fn draft(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    match crate::db::get_bot_draft(&state.db, &uid.to_string()).await? {
         Some(d) => Ok(Json(draft_json(&d))),
         None => Ok(Json(json!({ "active": false }))),
     }
@@ -130,8 +122,11 @@ pub async fn draft(State(state): State<AppState>) -> ApiResult<Json<serde_json::
 /// DELETE /api/botfather/draft — tell BotFather to drop its pending
 /// question and forget the draft. Without this an abandoned wizard leaves
 /// BotFather waiting for an answer indefinitely.
-pub async fn cancel_draft(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let key = draft_key(&state).await?;
+pub async fn cancel_draft(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let key = uid.to_string();
     let Some(draft) = crate::db::get_bot_draft(&state.db, &key).await? else {
         return Ok(Json(json!({ "ok": true, "cancelled": false })));
     };
@@ -139,7 +134,7 @@ pub async fn cancel_draft(State(state): State<AppState>) -> ApiResult<Json<serde
     // BotFather's side; only an unfinished one needs the /cancel.
     let mut told = false;
     if draft.token.is_empty() {
-        match state.tg.botfather_send("/cancel").await {
+        match state.tg(uid).await?.botfather_send("/cancel").await {
             Ok(_) => told = true,
             // The draft is dropped either way: a failed /cancel must not
             // strand the wizard on a conversation it cannot clear.
@@ -157,15 +152,17 @@ pub struct BotTokenBody {
 
 /// GET /api/botfather/bots — ask @BotFather for /mybots and return the
 /// owned-bot names parsed from its inline menu button labels. Bots already
-/// configured in this drive are filtered out.
-pub async fn bots(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let names = state
-        .tg
+/// configured in the caller's drive are filtered out.
+pub async fn bots(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tg = state.tg(uid).await?;
+    let names = tg
         .botfather_my_bots()
         .await
         .map_err(ApiError::bad_request)?;
-    let configured: std::collections::HashSet<String> = state
-        .tg
+    let configured: std::collections::HashSet<String> = tg
         .bot_list()
         .await
         .into_iter()
@@ -182,6 +179,7 @@ pub async fn bots(State(state): State<AppState>) -> ApiResult<Json<serde_json::V
 /// owned bot's API token, so it can be imported without copy-paste.
 pub async fn token(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<BotTokenBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let bot = body.bot.trim();
@@ -189,7 +187,8 @@ pub async fn token(
         return Err(ApiError::bad_request("bot name must not be empty"));
     }
     let tok = state
-        .tg
+        .tg(uid)
+        .await?
         .botfather_bot_token(bot)
         .await
         .map_err(ApiError::bad_request)?;

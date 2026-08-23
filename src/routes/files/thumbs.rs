@@ -53,7 +53,16 @@ static FFMPEG_ENCODER: LazyLock<ThumbEncoder> = LazyLock::new(|| {
 /// extracts a 320px WebP thumbnail with ffmpeg (first frame for video,
 /// downscale for images), and stores it on the row. Runs in the background;
 /// failures are logged and simply leave no thumb.
-pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
+///
+/// `owner` is the account that holds the part message: this runs detached
+/// from the request, so the client is resolved here rather than borrowed
+/// from the caller.
+pub async fn extract_media_thumb(
+    state: &AppState,
+    owner: i64,
+    uid: &str,
+    part0: crate::db::FilePart,
+) {
     let encoder = tokio::task::block_in_place(|| *FFMPEG_ENCODER);
     if encoder == ThumbEncoder::None {
         tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
@@ -70,9 +79,16 @@ pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::
         return;
     }
     let path = dir.join(uid);
+    let tg = match state.hub.get(owner).await {
+        Some(tg) => tg,
+        None => {
+            tracing::info!("account {owner} signed out — skipping thumbnail for {uid}");
+            return;
+        }
+    };
     {
         use futures::StreamExt;
-        let mut stream = match crate::stream::file_stream(&state.tg, part0.message_id, &part0.chat)
+        let mut stream = match crate::stream::file_stream(&tg, part0.message_id, &part0.chat)
             .await
         {
             Ok(s) => Box::pin(s),
@@ -201,21 +217,11 @@ pub async fn file_thumb(
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
 
-    if !row.public {
-        let ok = req
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|t| state.tokens.verify(t))
-            || q.get("mt").is_some_and(|t| state.tokens.verify_media(t))
-            || q.get("sig").is_some_and(|s| state.tokens.verify_file(&row.uid, s));
-        if !ok {
-            return Err(ApiError(
-                axum::http::StatusCode::FORBIDDEN,
-                "file is private".into(),
-            ));
-        }
+    if !super::may_read(&state.tokens, &row, req.headers(), &q) {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "file is private".into(),
+        ));
     }
 
     let b64 = row

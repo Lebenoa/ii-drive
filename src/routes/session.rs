@@ -2,10 +2,11 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::response::Response as AxumResponse;
 use axum::http::header;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -24,7 +25,9 @@ pub struct PhoneBody {
     pub phone: String,
 }
 
-/// Step 1: request the Telegram login code.
+/// Step 1: request the Telegram login code. The returned `login_id` names
+/// this attempt; the code and password steps quote it back, so two people
+/// signing in at the same time never land in each other's login.
 pub async fn auth_phone(
     State(state): State<AppState>,
     Json(body): Json<PhoneBody>,
@@ -35,28 +38,32 @@ pub async fn auth_phone(
             "this phone number is not allowed on this drive",
         ));
     }
-    state
-        .tg
-        .send_code(phone)
-        .await
-        .map_err(tg_err)?;
-    Ok(Json(json!({ "ok": true })))
+    let login_id = state.hub.start_login(phone).await.map_err(tg_err)?;
+    Ok(Json(json!({ "login_id": login_id })))
 }
 
 #[derive(Deserialize)]
 pub struct CodeBody {
+    pub login_id: String,
     pub code: String,
 }
 
-/// True once the signed-in user has picked at least one storage channel.
-async fn channel_ready(state: &AppState) -> bool {
-    match state.tg.current_user_id().await {
-        Some(id) => !crate::db::get_channels(&state.db, &id.to_string())
-            .await
-            .unwrap_or_default()
-            .is_empty(),
-        None => false,
-    }
+/// True once `user_id` has picked at least one storage channel.
+async fn channel_ready(state: &AppState, user_id: i64) -> bool {
+    !crate::db::get_channels(&state.db, &user_id.to_string())
+        .await
+        .unwrap_or_default()
+        .is_empty()
+}
+
+/// The success payload of a completed login: the session token is minted for
+/// the account that just signed in, never for whoever asked.
+async fn signed_in(state: &AppState, user_id: i64) -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ok",
+        "token": state.tokens.issue(user_id),
+        "channel_selected": channel_ready(state, user_id).await,
+    }))
 }
 
 /// Step 2: confirm the code. Returns a token when no 2FA is configured.
@@ -64,21 +71,22 @@ pub async fn auth_code(
     State(state): State<AppState>,
     Json(body): Json<CodeBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    match state.tg.sign_in(body.code.trim()).await {
-        Ok(crate::tg::SignInOutcome::Done) => Ok(Json(json!({
-            "status": "ok",
-            "token": state.tokens.issue(),
-            "channel_selected": channel_ready(&state).await,
-        }))),
-        Ok(crate::tg::SignInOutcome::PasswordRequired { hint }) => {
+    let step = state
+        .hub
+        .submit_code(body.login_id.trim(), body.code.trim())
+        .await
+        .map_err(tg_err)?;
+    match step {
+        crate::tg::LoginStep::Done(user_id) => Ok(signed_in(&state, user_id).await),
+        crate::tg::LoginStep::PasswordRequired { hint } => {
             Ok(Json(json!({ "status": "password_required", "hint": hint })))
         }
-        Err(e) => Err(tg_err(e)),
     }
 }
 
 #[derive(Deserialize)]
 pub struct PasswordBody {
+    pub login_id: String,
     pub password: String,
 }
 
@@ -88,17 +96,13 @@ pub struct SelectBody {
 }
 
 /// Lists candidate storage channels (dialogs + Saved Messages) and the
-/// user's current selection.
-pub async fn list_channels(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let available = state
-        .tg
-        .list_channels()
-        .await
-        .map_err(tg_err)?;
-    let selected = match state.tg.current_user_id().await {
-        Some(id) => crate::db::get_channels(&state.db, &id.to_string()).await?,
-        None => Vec::new(),
-    };
+/// caller's current selection.
+pub async fn list_channels(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let available = state.tg(uid).await?.list_channels().await.map_err(tg_err)?;
+    let selected = crate::db::get_channels(&state.db, &uid.to_string()).await?;
     Ok(Json(serde_json::json!({
         "available": available,
         "selected": selected,
@@ -108,11 +112,10 @@ pub async fn list_channels(State(state): State<AppState>) -> ApiResult<Json<serd
 /// Persists the storage-channel selection; uploads round-robin across it.
 pub async fn select_channels(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<SelectBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let Some(user_id) = state.tg.current_user_id().await else {
-        return Err(ApiError::bad_request("Telegram is not connected"));
-    };
+    let tg = state.tg(uid).await?;
     if body.channels.len() > 20 {
         return Err(ApiError::bad_request("at most 20 storage channels"));
     }
@@ -121,14 +124,14 @@ pub async fn select_channels(
             return Err(ApiError::bad_request("channel key must not be empty"));
         }
     }
-    crate::db::set_channels(&state.db, &user_id.to_string(), body.channels.clone()).await?;
+    crate::db::set_channels(&state.db, &uid.to_string(), body.channels.clone()).await?;
 
     // Wire the existing download-bot pool into every selected channel —
     // including ones picked after the bots were added. Idempotent: bots
     // already promoted in a channel just re-run the harmless EditAdmin.
     let mut results: Vec<serde_json::Value> = Vec::new();
     for sel in &body.channels {
-        let res = state.tg.add_bots_to_chat(&sel.chat).await;
+        let res = tg.add_bots_to_chat(&sel.chat).await;
         for (bot, r) in res {
             if let Err(e) = r {
                 results.push(json!({
@@ -155,6 +158,7 @@ pub struct CreateBody {
 /// auto-selected; the client adds it to the selection and saves explicitly.
 pub async fn create_channel(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let title = body.title.trim();
@@ -168,16 +172,20 @@ pub async fn create_channel(
         return Err(ApiError::bad_request("description is too long (max 500)"));
     }
     let info = state
-        .tg
+        .tg(uid)
+        .await?
         .create_channel(title, about)
         .await
         .map_err(tg_err)?;
     Ok(Json(json!({ "channel": info })))
 }
 
-/// GET /api/bot — configured download bots (no tokens).
-pub async fn list_bots(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let bots = state.tg.bot_list().await;
+/// GET /api/bot — the caller's configured download bots (no tokens).
+pub async fn list_bots(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let bots = state.tg(uid).await?.bot_list().await;
     let items: Vec<serde_json::Value> = bots
         .into_iter()
         .map(|(id, username)| json!({ "id": id, "username": username }))
@@ -190,10 +198,12 @@ pub struct AddBotBody {
     pub token: String,
 }
 
-/// POST /api/bot — validate a bot token, add it to the pool, persist it,
-/// then invite/promote every pooled bot into all selected storage channels.
+/// POST /api/bot — validate a bot token, add it to the caller's pool,
+/// persist it, then invite/promote every pooled bot into all of the
+/// caller's selected storage channels.
 pub async fn add_bot(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<AddBotBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let token = body.token.trim();
@@ -203,44 +213,36 @@ pub async fn add_bot(
         ));
     }
 
-    let (username, id) = state
-        .tg
-        .configure_bot(token)
-        .await
-        .map_err(tg_err)?;
+    let tg = state.tg(uid).await?;
+    let (username, id) = tg.configure_bot(token).await.map_err(tg_err)?;
 
     // Persist (dedupe by id).
-    let mut pool = crate::db::get_bots(&state.db).await?;
+    let mut pool = crate::db::get_bots(&state.db, uid).await?;
     pool.retain(|b| b.id != id);
     pool.push(crate::db::BotInfo {
         token: token.to_string(),
         username: username.clone(),
         id,
     });
-    crate::db::set_bots(&state.db, &pool).await?;
+    crate::db::set_bots(&state.db, uid, &pool).await?;
 
     // The wizard's job is done once the bot is in the pool: drop the draft
     // so the next "create a bot" starts a fresh /newbot rather than
     // resuming a finished conversation.
-    if let Some(uid) = state.tg.current_user_id().await {
-        let key = uid.to_string();
-        if let Ok(Some(draft)) = crate::db::get_bot_draft(&state.db, &key).await {
-            if draft.token == token {
-                crate::db::clear_bot_draft(&state.db, &key).await?;
-            }
+    let key = uid.to_string();
+    if let Ok(Some(draft)) = crate::db::get_bot_draft(&state.db, &key).await {
+        if draft.token == token {
+            crate::db::clear_bot_draft(&state.db, &key).await?;
         }
     }
 
     // Wire the whole pool into every selected storage channel.
-    let selected = match state.tg.current_user_id().await {
-        Some(uid) => crate::db::get_channels(&state.db, &uid.to_string())
-            .await
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
+    let selected = crate::db::get_channels(&state.db, &key)
+        .await
+        .unwrap_or_default();
     let mut results: Vec<serde_json::Value> = Vec::new();
     for sel in &selected {
-        let res = state.tg.add_bots_to_chat(&sel.chat).await;
+        let res = tg.add_bots_to_chat(&sel.chat).await;
         for (bot, r) in res {
             results.push(json!({
                 "chat": sel.chat,
@@ -259,13 +261,14 @@ pub async fn add_bot(
     })))
 }
 
-/// DELETE /api/bot/{id} — remove a bot from the pool.
+/// DELETE /api/bot/{id} — remove a bot from the caller's pool.
 pub async fn remove_bot(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state.tg.drop_bot(id).await;
-    crate::db::remove_bot(&state.db, id).await?;
+    state.tg(uid).await?.drop_bot(id).await;
+    crate::db::remove_bot(&state.db, uid, id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -274,25 +277,31 @@ pub async fn auth_password(
     State(state): State<AppState>,
     Json(body): Json<PasswordBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    state
-        .tg
-        .check_password(&body.password)
+    let user_id = state
+        .hub
+        .submit_password(body.login_id.trim(), &body.password)
         .await
         .map_err(tg_err)?;
-    Ok(Json(json!({
-        "status": "ok",
-        "token": state.tokens.issue(),
-        "channel_selected": channel_ready(&state).await,
-    })))
+    Ok(signed_in(&state, user_id).await)
+}
+
+/// POST /api/auth/logout — sign the caller's account out of Telegram and
+/// forget its session. Only that one account: other tenants keep working.
+pub async fn auth_logout(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.hub.logout(uid).await.map_err(tg_err)?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// GET /api/me — connection status plus whether storage channels are set up.
-pub async fn me(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {    let status = state.tg.status().await;
-    let channel_selected = if status.authorized {
-        channel_ready(&state).await
-    } else {
-        false
-    };
+pub async fn me(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let status = state.tg(uid).await?.status().await;
+    let channel_selected = status.authorized && channel_ready(&state, uid).await;
     Ok(Json(json!({
         "connected": status.connected,
         "authorized": status.authorized,
@@ -303,9 +312,12 @@ pub async fn me(State(state): State<AppState>) -> ApiResult<Json<serde_json::Val
     })))
 }
 
-/// GET /api/avatar — the signed-in user's profile photo as image bytes.
-pub async fn avatar(State(state): State<AppState>) -> ApiResult<AxumResponse> {
-    let Some(bytes) = state.tg.avatar().await else {
+/// GET /api/avatar — the caller's profile photo as image bytes.
+pub async fn avatar(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<AxumResponse> {
+    let Some(bytes) = state.tg(uid).await?.avatar().await else {
         return Err(ApiError::not_found("no profile photo"));
     };
     AxumResponse::builder()
@@ -321,24 +333,23 @@ pub struct RulesBody {
     pub rules: Vec<crate::db::RouteRule>,
 }
 
-/// GET /api/rules — this user's auto-upload routing rules (ordered).
-pub async fn get_rules(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let Some(uid) = state.tg.current_user_id().await else {
-        return Err(ApiError::bad_request("Telegram is not connected"));
-    };
+/// GET /api/rules — the caller's auto-upload routing rules (ordered).
+pub async fn get_rules(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
     let rules = crate::db::get_rules(&state.db, &uid.to_string()).await?;
     Ok(Json(json!({ "rules": rules })))
 }
 
-/// PUT /api/rules — first-match-wins prefix rules; every target folder
-/// must exist, so stale folders cannot silently eat uploads.
+/// PUT /api/rules — first-match-wins prefix rules; every target folder must
+/// exist and belong to the caller, so neither a stale folder nor somebody
+/// else's folder can silently eat uploads.
 pub async fn save_rules(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<RulesBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let Some(uid) = state.tg.current_user_id().await else {
-        return Err(ApiError::bad_request("Telegram is not connected"));
-    };
     if body.rules.len() > 32 {
         return Err(ApiError::bad_request("at most 32 routing rules"));
     }
@@ -347,7 +358,10 @@ pub async fn save_rules(
         if mime.is_empty() || mime.len() > 64 {
             return Err(ApiError::bad_request("rule mime must be 1-64 characters"));
         }
-        if crate::db::get_folder(&state.db, &r.folder).await?.is_none() {
+        let mine = crate::db::get_folder(&state.db, &r.folder)
+            .await?
+            .is_some_and(|f| f.owner == uid);
+        if !mine {
             return Err(ApiError::bad_request(format!(
                 "folder `{}` not found",
                 r.folder
@@ -360,9 +374,13 @@ pub async fn save_rules(
 
 const MB: u64 = 1024 * 1024;
 
-/// GET /api/settings — upload-split threshold in MiB (0 = never split).
-pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    let bytes = crate::db::get_split(&state.db).await?;
+/// GET /api/settings — the caller's upload-split threshold in MiB
+/// (0 = never split).
+pub async fn get_settings(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let bytes = crate::db::get_split(&state.db, &uid.to_string()).await?;
     Ok(Json(json!({ "split_mb": bytes / MB })))
 }
 
@@ -379,6 +397,7 @@ pub struct SettingsBody {
 /// must fit in one document.
 pub async fn save_settings(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<SettingsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     const TG_DOC_CAP_MB: u64 = 2048;
@@ -397,7 +416,7 @@ pub async fn save_settings(
             "split threshold must be below the upload limit ({cap} MB) — use 0 to disable splitting"
         )));
     }
-    crate::db::set_split(&state.db, bytes).await?;
+    crate::db::set_split(&state.db, &uid.to_string(), bytes).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -414,3 +433,75 @@ pub async fn reload_config() -> ApiResult<Json<serde_json::Value>> {
     })))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scratch state on an in-memory store, so a handler test costs no
+    /// engine arena (see `db::harness`).
+    async fn temp_state() -> AppState {
+        let db = crate::db::open_mem().await.expect("open test db");
+        crate::app::shared_state(db)
+    }
+
+    /// The split threshold is one tenant's tuning knob: saving it must not
+    /// move anybody else's, which is exactly what the old global row did.
+    #[tokio::test]
+    async fn settings_are_scoped_to_the_caller() {
+        let state = temp_state().await;
+
+        let saved = save_settings(
+            State(state.clone()),
+            Extension(Caller(11)),
+            Json(SettingsBody { split_mb: 64 }),
+        )
+        .await
+        .expect("save");
+        assert_eq!(saved.0["ok"], true);
+
+        let mine = get_settings(State(state.clone()), Extension(Caller(11)))
+            .await
+            .expect("read own");
+        assert_eq!(mine.0["split_mb"], 64);
+
+        let theirs = get_settings(State(state), Extension(Caller(22)))
+            .await
+            .expect("read other");
+        assert_eq!(theirs.0["split_mb"], 0, "another tenant keeps its default");
+    }
+
+    /// A rule may only target a folder the caller owns — otherwise one
+    /// tenant could route their uploads into another tenant's folder.
+    #[tokio::test]
+    async fn rules_reject_a_foreign_folder() {
+        let state = temp_state().await;
+        crate::db::create_folder(&state.db, 11, "fold-11", "mine", "")
+            .await
+            .expect("folder");
+
+        let rule = crate::db::RouteRule {
+            mime: "image/".to_string(),
+            folder: "fold-11".to_string(),
+        };
+        let accepted = save_rules(
+            State(state.clone()),
+            Extension(Caller(11)),
+            Json(RulesBody { rules: vec![rule.clone()] }),
+        )
+        .await
+        .expect("own folder is accepted");
+        assert_eq!(accepted.0["ok"], true);
+
+        let err = save_rules(
+            State(state.clone()),
+            Extension(Caller(22)),
+            Json(RulesBody { rules: vec![rule] }),
+        )
+        .await
+        .expect_err("a foreign folder must not be routable");
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+
+        let stored = crate::db::get_rules(&state.db, "22").await.expect("rules");
+        assert!(stored.is_empty(), "the rejected rule set is not persisted");
+    }
+}

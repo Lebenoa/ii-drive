@@ -29,10 +29,10 @@ the interface.
    | `host` / `port` | `127.0.0.1:8080` | HTTP bind address |
    | `api_id` / `api_hash` | — | Telegram app credentials (required) |
    | `secret` | — | HMAC key for session tokens (required) |
-   | `allowed_phones` | `[]` | Phone numbers that may log in via Telegram |
+   | `allowed_phones` | `[]` | Phone numbers that may log in; any number of them may be signed in at once |
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
-   | `session_path` | `data/session.db` | MTProto session (grammers SQLite) |
+   | `session_path` | `data/session.db` | Pre-multi-account session, migrated on first start; per-account sessions live in `sessions/` beside it |
    | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
    | `media_thumbs` | `true` | ffmpeg image/video thumbnails; audio cover art is extracted regardless |
@@ -52,8 +52,18 @@ the interface.
 
 4. **Log in** — open `http://127.0.0.1:8080` and sign in with a phone number
    listed in `allowed_phones`: Telegram sends you a login code; enter it (and
-   your 2FA password, if enabled). The MTProto session persists to
-   `session_path`; the issued web token stays valid for `token_ttl_secs`.
+   your 2FA password, if enabled). The issued web token stays valid for
+   `token_ttl_secs`.
+
+   Every allowed phone number can be signed in **at the same time**. Each
+   account gets its own MTProto session under `<session_path's directory>/sessions/<telegram-user-id>.db`,
+   and its own files, folders, storage channels, download bots, routing rules
+   and upload-split threshold — an account never sees another's. Sessions are
+   restored on start, so a restart does not log anybody out; `POST
+   /api/auth/logout` drops just the calling account. An install that predates
+   multi-account support keeps working: the old single session at
+   `session_path` is migrated into the new layout on first start and every
+   existing file and folder is assigned to that account.
 
 
 ### Storage channels
@@ -134,9 +144,10 @@ just log in again through the web UI.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/auth/phone` | — | Start Telegram login (phone must be in `allowed_phones`) |
-| POST | `/api/auth/code` | — | Submit login code; returns token or `password_required` |
-| POST | `/api/auth/password` | — | Submit 2FA password; returns token |
+| POST | `/api/auth/phone` | — | Start Telegram login (phone must be in `allowed_phones`); returns a `login_id` |
+| POST | `/api/auth/code` | — | Submit `{login_id, code}`; returns token or `password_required` |
+| POST | `/api/auth/password` | — | Submit `{login_id, password}` (2FA); returns token |
+| POST | `/api/auth/logout` | token | Sign this account out; other signed-in accounts are untouched |
 | GET | `/api/me` | token | Connection status + user info |
 | GET/POST | `/api/channels` | token | List candidate dialogs / save storage-channel selection |
 | POST | `/api/channels/create` | token | Create a new broadcast channel and use it as storage |
@@ -145,7 +156,7 @@ just log in again through the web UI.
 | GET | `/api/botfather/bots` | token | Bots this account owns, parsed from @BotFather's `/mybots` |
 | POST | `/api/botfather/token` | token | Fetch one owned bot's API token via the @BotFather menus |
 | GET/DELETE | `/api/botfather/draft` | token | Resume an unfinished `/newbot` chat / `/cancel` it and forget |
-| GET/PUT | `/api/settings` | token | Upload-split threshold (`split_mb`, 0 = off) |
+| GET/PUT | `/api/settings` | token | This account's upload-split threshold (`split_mb`, 0 = off) |
 | GET/PUT | `/api/rules` | token | Auto-upload routing rules |
 | GET | `/api/files?q&folder&limit&offset` | token | List/search files (folder id, empty = root) |
 | POST | `/api/files` | token | Upload (`X-File-Size` required, `X-Folder` optional) |
