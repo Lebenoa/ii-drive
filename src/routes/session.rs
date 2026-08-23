@@ -1,14 +1,13 @@
+use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::response::Response as AxumResponse;
+use axum::http::header;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
-
-/// Login is a Telegram login: phone -> code -> (optional) 2FA password.
-/// Only phones present in `config.allowed_phones` may get past step one;
-/// possession of the Telegram account therefore is the credential.
 
 #[derive(Deserialize)]
 pub struct PhoneBody {
@@ -262,6 +261,18 @@ pub async fn me(State(state): State<AppState>) -> ApiResult<Json<serde_json::Val
         "relogin": status.relogin,
         "channel_selected": channel_selected,
     })))
+}
+
+/// GET /api/avatar — the signed-in user's profile photo as image bytes.
+pub async fn avatar(State(state): State<AppState>) -> ApiResult<AxumResponse> {
+    let Some(bytes) = state.tg.avatar().await else {
+        return Err(ApiError::not_found("no profile photo"));
+    };
+    AxumResponse::builder()
+        .header(header::CONTENT_TYPE, "image/jpeg")
+        .header(header::CACHE_CONTROL, "private, max-age=300")
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(format!("cannot build avatar response: {e}")))
 }
 
 #[derive(Deserialize)]

@@ -114,6 +114,19 @@ export async function request<T>(
   return data as T;
 }
 
+/**
+ * GET /api/avatar — the signed-in user's profile photo as a blob object URL.
+ * Returns null when the account has no photo (404) — callers fall back to
+ * the initial-letter avatar.
+ */
+export async function fetchAvatar(): Promise<string | null> {
+  const headers: Record<string, string> = {};
+  if (getToken()) headers['Authorization'] = `Bearer ${getToken()}`;
+  const res = await fetch('/api/avatar', { headers });
+  if (!res.ok) return null;
+  return URL.createObjectURL(await res.blob());
+}
+
 interface AuthOk {
   status: 'ok';
   token?: unknown;

@@ -22,6 +22,7 @@ pub fn build_router(state: AppState) -> Router {
 
     let protected = Router::new()
         .route("/api/me", get(crate::routes::me))
+        .route("/api/avatar", get(crate::routes::avatar))
         .route(
             "/api/channels",
             get(crate::routes::list_channels).post(crate::routes::select_channels),

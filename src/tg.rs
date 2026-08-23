@@ -679,6 +679,30 @@ impl TgManager {
         st.me.as_ref().map(|m| m.id)
     }
 
+    /// Current profile photo of the signed-in user as image bytes (largest
+    /// server-side thumbnail), for the navbar avatar. `None` when the user
+    /// has no photo or Telegram is unreachable — callers fall back to the
+    /// initial-letter avatar.
+    pub async fn avatar(&self) -> Option<Vec<u8>> {
+        let client = self.ensure().await.ok()?;
+        let self_ref: PeerRef = tl::types::InputPeerSelf {}.into();
+        let mut photos = client.iter_profile_photos(self_ref);
+        let photo = photos.next().await.ok()??;
+        // Stripped sizes are partial LQ previews; anything else downloads
+        // as a real JPEG via its input location.
+        let thumb = photo
+            .thumbs()
+            .into_iter()
+            .filter(|t| !matches!(t, grammers_client::media::PhotoSize::Stripped(_)))
+            .max_by_key(|t| t.size())?;
+        let mut it = client.iter_download(&thumb).chunk_size(64 * 1024);
+        let mut out = Vec::new();
+        while let Some(chunk) = it.next().await.ok()? {
+            out.extend_from_slice(&chunk);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// Resolves (and caches) a chat key — "me", "@username" or "-100<id>" —
     /// to a peer reference.
     pub async fn storage_peer(&self, chat: &str) -> Result<PeerRef, String> {
