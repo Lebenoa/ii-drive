@@ -332,22 +332,27 @@ impl TgManager {
             access_hash,
         });
 
-        // The bot's InputUser as seen from the user session.
+        // The bot's InputUser must be valid from THIS account's view. The
+        // hash captured during the bot's own sign-in often is not (it can
+        // even be 0), which makes channels.inviteToChannel answer
+        // USER_ID_INVALID — so resolve each bot by username here, through
+        // the user client, right before inviting.
         let st = self.st.lock().await;
-        let input_users: Vec<tl::enums::InputUser> = st
+        let stored: Vec<(String, Option<tl::enums::InputUser>)> = st
             .bots
             .values()
-            .filter_map(|b| {
-                b.access_hash
-                    .map(|h| {
+            .map(|b| {
+                (
+                    b.username.clone(),
+                    b.access_hash.map(|h| {
                         tl::enums::InputUser::User(tl::types::InputUser {
                             user_id: b.id,
                             access_hash: h,
                         })
-                    })
+                    }),
+                )
             })
             .collect();
-        let usernames: Vec<String> = st.bots.values().map(|b| b.username.clone()).collect();
         let user_client = st.client.clone();
         drop(st);
 
@@ -359,8 +364,34 @@ impl TgManager {
         };
 
         let mut results = Vec::new();
-        for (username, input_user) in usernames.into_iter().zip(input_users) {
+        for (username, stored_user) in stored {
             let res = (|| async {
+                let input_user = match user_client.resolve_username(&username).await {
+                    Ok(Some(peer)) => match peer {
+                        grammers_client::peer::Peer::User(wrapped) => match wrapped.raw {
+                            tl::enums::User::User(u) => {
+                                tl::enums::InputUser::User(tl::types::InputUser {
+                                    user_id: u.id,
+                                    access_hash: u.access_hash.unwrap_or(0),
+                                })
+                            }
+                            _ => stored_user.clone().ok_or_else(|| {
+                                format!("bot @{username} resolved to an empty account")
+                            })?,
+                        },
+                        _ => {
+                            stored_user.clone().ok_or_else(|| {
+                                format!("@{username} is not a user account")
+                            })?
+                        }
+                    },
+                    Ok(None) => stored_user.clone().ok_or_else(|| {
+                        format!(
+                            "bot @{username} not found — open a chat with it once in Telegram first"
+                        )
+                    })?,
+                    Err(e) => return Err(friendly(format!("resolve failed: {e}"))),
+                };
                 match user_client
                     .invoke(&tl::functions::channels::InviteToChannel {
                         channel: input_channel.clone(),
