@@ -227,6 +227,22 @@ export interface RouteRule {
   folder: string;
 }
 
+/** GET /api/internal-db/tables — table names in the embedded store. */
+export function dbTables(): Promise<{ tables: string[] }> {
+  return request('/api/internal-db/tables');
+}
+
+export interface DbQueryResult {
+  ok: boolean;
+  result?: unknown[];
+  error?: string;
+}
+
+/** POST /api/internal-db/query — run raw SurrealQL (internal admin tool). */
+export function dbQuery(sql: string): Promise<{ results: DbQueryResult[] }> {
+  return request('/api/internal-db/query', { method: 'POST', body: { sql } });
+}
+
 /** GET /api/rules — this user's auto-upload routing rules (ordered) */
 export async function getRules(): Promise<RouteRule[]> {
   const res = await request<{ rules: RouteRule[] }>('/api/rules');
