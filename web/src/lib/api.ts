@@ -204,8 +204,20 @@ export async function createChannel(title: string, about = ''): Promise<ChannelI
 }
 
 /** POST /api/channels — persist the storage-channel selection */
-export async function saveChannels(channels: ChannelInfo[]): Promise<void> {
-  await request('/api/channels', { method: 'POST', body: { channels } });
+export interface BotWireFailure {
+  chat: string;
+  title: string;
+  bot: string;
+  error: string;
+}
+
+/** POST /api/channels — persist selection; also wires bots into new channels. */
+export async function saveChannels(channels: ChannelInfo[]): Promise<BotWireFailure[]> {
+  const res = await request<{ ok: true; results: BotWireFailure[] }>('/api/channels', {
+    method: 'POST',
+    body: { channels },
+  });
+  return res.results ?? [];
 }
 
 export interface RouteRule {

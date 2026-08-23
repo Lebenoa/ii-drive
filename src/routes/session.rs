@@ -121,9 +121,27 @@ pub async fn select_channels(
             return Err(ApiError::bad_request("channel key must not be empty"));
         }
     }
-    crate::db::set_channels(&state.db, &user_id.to_string(), body.channels)
-    .await?;
-    Ok(Json(json!({ "ok": true })))
+    crate::db::set_channels(&state.db, &user_id.to_string(), body.channels.clone()).await?;
+
+    // Wire the existing download-bot pool into every selected channel —
+    // including ones picked after the bots were added. Idempotent: bots
+    // already promoted in a channel just re-run the harmless EditAdmin.
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for sel in &body.channels {
+        let res = state.tg.add_bots_to_chat(&sel.chat).await;
+        for (bot, r) in res {
+            if let Err(e) = r {
+                results.push(json!({
+                    "chat": sel.chat,
+                    "title": sel.title,
+                    "bot": bot,
+                    "error": e,
+                }));
+            }
+        }
+    }
+
+    Ok(Json(json!({ "ok": true, "results": results })))
 }
 
 #[derive(Deserialize)]

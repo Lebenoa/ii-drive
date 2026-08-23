@@ -1,6 +1,12 @@
 <script lang="ts">
   import { flip } from 'svelte/animate';
-  import { createChannel, fetchChannels, saveChannels, type ChannelInfo } from '$lib/api';
+  import {
+    createChannel,
+    fetchChannels,
+    saveChannels,
+    type BotWireFailure,
+    type ChannelInfo,
+  } from '$lib/api';
   import { fadeUp, flipDur, pop, stagger } from '$lib/motion';
 
   let {
@@ -17,6 +23,7 @@
   let newTitle = $state('');
   let creating = $state(false);
   let saved = $state(false);
+  let wireFailures = $state<BotWireFailure[]>([]);
 
   function toggle(chat: string): void {
     if (selectedChats.includes(chat)) {
@@ -65,13 +72,16 @@
     if (saving || selectedChats.length === 0) return;
     saving = true;
     error = '';
+    wireFailures = [];
     const chosen = selectedChats
       .map((chat) => available.find((a) => a.chat === chat))
       .filter((a): a is ChannelInfo => a !== undefined);
     try {
-      await saveChannels(chosen);
+      // The save succeeds even if wiring bots into a channel fails;
+      // surface those failures without blocking the selection.
+      wireFailures = await saveChannels(chosen);
       saved = true;
-      if (redirectOnSave && onDone) onDone();
+      if (redirectOnSave && onDone && wireFailures.length === 0) onDone();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -132,7 +142,6 @@
           disabled={creating}
         />
         <button
-          class="btn busy-btn"
           type="submit"
           disabled={creating || newTitle.trim().length === 0}
         >
@@ -142,7 +151,19 @@
       </form>
 
       {#if error}<p class="error-text">{error}</p>{/if}
-      {#if saved && !redirectOnSave}<p class="muted saved-note" transition:fadeUp>Saved.</p>{/if}
+      {#if wireFailures.length > 0}
+        <div class="wire-warn">
+          <p class="muted">Saved, but some bots could not join:</p>
+          <ul>
+            {#each wireFailures as f (f.bot + f.chat)}
+              <li><span class="error-text">{f.bot} → {f.title}: {f.error}</span></li>
+            {/each}
+          </ul>
+          <button class="btn ghost" type="button" onclick={() => void save()}>
+            Retry
+          </button>
+        </div>
+      {:else if saved && !redirectOnSave}<p class="muted saved-note" transition:fadeUp>Saved.</p>{/if}
 
       <button
         class="btn btn-primary busy-btn"
@@ -290,4 +311,16 @@
     justify-content: center;
     gap: 7px;
   }
+
+  .wire-warn {
+    margin-top: 8px;
+  }
+
+  .wire-warn ul {
+    list-style: none;
+    padding: 0;
+    margin: 4px 0 8px;
+    font-size: 12.5px;
+  }
 </style>
+
