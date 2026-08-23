@@ -529,7 +529,10 @@
   onclose={() => (previewFile = null)}
   onclick={(e: MouseEvent) => {
     const dlg = e.currentTarget as HTMLDialogElement | null;
-    if (dlg && e.target === dlg) dlg.close();
+    const t = e.target as HTMLElement | null;
+    // Light dismiss: the dialog itself (::backdrop) or the empty area of
+    // .pv-media around the media element — but not the media/controls.
+    if (dlg && (t === dlg || t?.classList.contains('pv-media'))) dlg.close();
   }}
 >
   {#if previewFile}
