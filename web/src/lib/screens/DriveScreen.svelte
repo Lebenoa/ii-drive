@@ -37,6 +37,7 @@
     // New-folder modal state.
     const NEW_FOLDER_DIALOG = "dlg-new-folder";
     let newName = $state("");
+    let newFolderInput = $state<HTMLInputElement | null>(null);
 
     // Delete-folder modal state.
     const DEL_FOLDER_DIALOG = "dlg-del-folder";
@@ -193,6 +194,14 @@
     $effect(() => {
         void refreshFolders();
     });
+    /** Opens the new-folder dialog with the name input focused. */
+    function openNewFolder(): void {
+        newName = "";
+        openDialog(NEW_FOLDER_DIALOG);
+        // Native autofocus is flagged by a11y linting; focus
+        // programmatically once the modal is up.
+        queueMicrotask(() => newFolderInput?.focus());
+    }
 
     async function addFolder(name: string): Promise<void> {
         if (creating) return;
@@ -323,12 +332,9 @@
                     type="button"
                     title="New folder in current location"
                     disabled={creating}
-                    onclick={() => {
-                        newName = "";
-                        openDialog(NEW_FOLDER_DIALOG);
-                    }}
-                >
-                    +
+                    onclick={openNewFolder}
+                    >
+                    <span aria-hidden="true">+</span>
                 </button>
             </div>
             <nav class="folder-list">
@@ -398,7 +404,6 @@
         <section
             class="file-area"
             class:dragging
-            role="region"
             aria-label="Files — drop here to upload into the current folder"
             ondragover={onDragOver}
             ondragleave={() => (dragging = false)}
@@ -591,7 +596,7 @@
             placeholder="Folder name"
             maxlength="128"
             bind:value={newName}
-            autofocus
+            bind:this={newFolderInput}
         />
         {#snippet actions()}
             <button class="btn" type="submit" {...closeAttrs(NEW_FOLDER_DIALOG)}>

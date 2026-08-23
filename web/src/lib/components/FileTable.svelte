@@ -288,6 +288,9 @@
           class:selected={selected.has(file.id)}
           class:cut={cutIds.has(file.id)}
           class:busy={deletingId === file.id || togglingId === file.id}
+          role="button"
+          tabindex="0"
+          aria-label="{file.name} — open preview"
           draggable="true"
           ondragstart={(e) => onDragStart(e, file)}
           in:fadeUp={{ delay: stagger(i) }}
@@ -531,6 +534,9 @@
   {#if previewFile}
     <div class="pv-media">
       {#if previewFile.mime.startsWith('video/')}
+        <!-- User-uploaded media has no caption tracks; the a11y rule
+             targets published video content. -->
+        <!-- svelte-ignore a11y_media_has_caption -->
         <video controls autoplay src={murl(previewFile, "raw")}></video>
       {:else if previewFile.mime.startsWith('audio/')}
         <div class="pv-audio">
