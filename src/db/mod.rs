@@ -49,17 +49,55 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
     Ok(db)
 }
 
+/// Test-only serialization for the embedded store.
+///
+/// Every `open()` builds a SurrealKv engine that commits roughly a
+/// gigabyte up front and releases it only once its store finishes closing
+/// on background tasks. `cargo test`'s default parallelism happily opens
+/// one per thread, so a dozen live arenas exhaust the machine and the
+/// process dies on a 1 GiB allocation — regardless of `--test-threads`,
+/// because each `#[tokio::test]` drops its own runtime before that close
+/// completes. Holding this lock keeps one engine live at a time.
+#[cfg(test)]
+pub(crate) mod harness {
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    static ENGINE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Held for the duration of a DB-backed test.
+    pub(crate) struct EngineGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    pub(crate) fn acquire() -> EngineGuard {
+        // Poisoning just means an earlier DB test panicked. This lock
+        // guards memory headroom, not shared data, so carry on.
+        let held = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        // The previous test released this lock as it unwound; wait for its
+        // engine to hand the arena back before opening the next one.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        EngineGuard(held)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    async fn temp_db() -> (surrealdb::Surreal<Conn>, tempfile::TempDir) {
+    /// Keeps one test's scratch directory and its engine slot alive.
+    struct TestEnv {
+        _dir: tempfile::TempDir,
+        _engine: super::harness::EngineGuard,
+    }
+
+    /// Scratch store for a single test. Hold the returned guard for the
+    /// whole test: dropping it frees the engine slot for the next one.
+    async fn temp_db() -> (surrealdb::Surreal<Conn>, TestEnv) {
+        let engine = super::harness::acquire();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("test.surrealkv");
         let db = open(path.to_str().expect("utf8 path"))
             .await
             .expect("open test db");
-        (db, dir)
+        (db, TestEnv { _dir: dir, _engine: engine })
     }
 
     pub(super) fn row(uid: &str, name: &str, created_at: i64) -> FileRow {
@@ -352,6 +390,7 @@ mod tests {
 
         // A second run is a no-op.
         assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
+    }
 
     #[tokio::test]
     async fn public_backfill_v3() {
@@ -370,7 +409,6 @@ mod tests {
         // Idempotent second run.
         assert_eq!(migrate(&db).await.unwrap(), 3);
     }
-    }
 }
 
 #[cfg(test)]
@@ -380,6 +418,8 @@ mod persist_tests {
 
     #[tokio::test]
     async fn rows_survive_reopen() {
+        // Same engine budget as temp_db(): this test opens two in a row.
+        let _engine = super::harness::acquire();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("p.surrealkv");
         let path_str = path.to_str().expect("utf8").to_string();
@@ -397,3 +437,4 @@ mod persist_tests {
         assert!(got.is_some(), "row must survive reopen");
     }
 }
+

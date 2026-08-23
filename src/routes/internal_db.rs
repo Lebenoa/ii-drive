@@ -70,7 +70,6 @@ pub async fn query(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::db::DbError;
 
     async fn test_db() -> Result<surrealdb::Surreal<surrealdb::engine::local::Db>, DbError> {
@@ -89,6 +88,8 @@ mod tests {
     /// info and empty-select shapes deserialize as arrays.
     #[tokio::test]
     async fn statement_shapes() -> Result<(), DbError> {
+        // This test opens its own engine; share the DB test budget.
+        let _engine = crate::db::harness::acquire();
         let db = test_db().await?;
         db.query("DEFINE TABLE IF NOT EXISTS file").await?;
 

@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
@@ -19,42 +21,40 @@ enum ThumbEncoder {
     Avif,
 }
 
-fn ffmpeg_encoder() -> ThumbEncoder {
-    use std::sync::OnceLock;
-    static ENC: OnceLock<ThumbEncoder> = OnceLock::new();
-    *ENC.get_or_init(|| {
-        let runs = std::process::Command::new("ffmpeg")
-            .arg("-version")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .is_ok_and(|o| !o.stdout.is_empty());
-        if !runs {
-            return ThumbEncoder::None;
-        }
-        // -encoders lists on stderr; look for the AV1 still-image encoder.
-        let has_aom = std::process::Command::new("ffmpeg")
-            .arg("-encoders")
-            .output()
-            .is_ok_and(|o| {
-                let text = String::from_utf8_lossy(&o.stdout);
-                let err = String::from_utf8_lossy(&o.stderr);
-                text.contains("libaom-av1") || err.contains("libaom-av1")
-            });
-        if has_aom {
-            ThumbEncoder::Avif
-        } else {
-            ThumbEncoder::Webp
-        }
-    })
-}
+/// Probed once on first touch. The probe shells out to ffmpeg twice, so
+/// every reader forces it inside `block_in_place`.
+static FFMPEG_ENCODER: LazyLock<ThumbEncoder> = LazyLock::new(|| {
+    let runs = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| !o.stdout.is_empty());
+    if !runs {
+        return ThumbEncoder::None;
+    }
+    // -encoders lists on stderr; look for the AV1 still-image encoder.
+    let has_aom = std::process::Command::new("ffmpeg")
+        .arg("-encoders")
+        .output()
+        .is_ok_and(|o| {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let err = String::from_utf8_lossy(&o.stderr);
+            text.contains("libaom-av1") || err.contains("libaom-av1")
+        });
+    if has_aom {
+        ThumbEncoder::Avif
+    } else {
+        ThumbEncoder::Webp
+    }
+});
 
 /// Downloads the first part of a freshly uploaded video or image (bounded),
 /// extracts a 320px WebP thumbnail with ffmpeg (first frame for video,
 /// downscale for images), and stores it on the row. Runs in the background;
 /// failures are logged and simply leave no thumb.
 pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::FilePart) {
-    let encoder = tokio::task::block_in_place(ffmpeg_encoder);
+    let encoder = tokio::task::block_in_place(|| *FFMPEG_ENCODER);
     if encoder == ThumbEncoder::None {
         tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
         return;
