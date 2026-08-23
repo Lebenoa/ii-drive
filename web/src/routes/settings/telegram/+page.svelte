@@ -60,7 +60,6 @@
     }
   }
 
-
   $effect(() => {
     void (async () => {
       bots = await getBots();
@@ -86,10 +85,10 @@
   }
 
   /** Called by the BotFather wizard with the freshly minted token. */
-  async function addFromBotFather(token: string): Promise<void> {
+  async function addFromBotFather(t: string): Promise<void> {
     botError = '';
     try {
-      const res = await addBot(token);
+      const res = await addBot(t);
       bots = await getBots();
       results = res.results;
     } catch (err) {
@@ -122,22 +121,22 @@
   </section>
 
   <section class="card section" in:fadeUp={{ delay: stagger(1) }}>
-    <h2>Download bots</h2>
+    <div class="head-row">
+      <h2>Download bots</h2>
+      {#if bots.length > 0}<span class="pill">{bots.length}</span>{/if}
+    </div>
     <p class="muted hint">
-      Bots download files through their own rate limits, so several bots
-      spread the load. Adding a bot invites it into every selected storage
-      channel as an admin.
-    </p>
-    <p class="muted hint">
-      No token yet? <button class="linklike" type="button" onclick={() => chat?.openChat()}>
-        Create a bot with @BotFather
-      </button> right here — or import an existing one below.
+      Bots download through their own rate limits, so several spread the
+      load. Adding a bot invites it into every selected storage channel as
+      an admin.
     </p>
     <BotFatherChat bind:this={chat} onCreated={(t) => addFromBotFather(t)} />
-
-    <div class="owned">
-      <div class="owned-head">
-        <strong>Import existing bot</strong>
+    <div class="sub">
+      <div class="sub-head">
+        <div class="sub-title">
+          <strong>Import existing bot</strong>
+          <span class="muted sub-note">token fetched from @BotFather automatically</span>
+        </div>
         <button
           class="btn ghost busy-btn"
           type="button"
@@ -150,10 +149,13 @@
       </div>
       {#if ownedError}<p class="error-text">{ownedError}</p>{/if}
       {#if owned.length > 0}
-        <ul class="owned-list">
+        <ul class="row-list">
           {#each owned as name, i (name)}
-            <li in:fadeUp={{ delay: stagger(i) }}>
-              <span>{name}</span>
+            <li class="row-item" in:fadeUp={{ delay: stagger(i) }}>
+              <span class="who">
+                <span class="avatar">{name.slice(0, 1)}</span>
+                <span>{name}</span>
+              </span>
               <button
                 class="btn ghost busy-btn"
                 type="button"
@@ -161,49 +163,63 @@
                 onclick={() => void importBot(name)}
               >
                 {#if importing === name}<span class="spinner btn-spin"></span>{/if}
-                {importing === name ? 'Importing…' : 'Add'}
+                {importing === name ? 'Importing…' : 'Import'}
               </button>
             </li>
           {/each}
         </ul>
       {:else if !loadingOwned && !ownedError}
-        <p class="muted hint">No bots listed yet — press "List my bots".</p>
+        <p class="muted hint">Nothing listed yet — press "List my bots".</p>
       {/if}
     </div>
 
-
-    <form
-      class="bot-row"
-      onsubmit={(e) => {
-        e.preventDefault();
-        void add();
-      }}
-    >
-      <input
-        class="field"
-        type="password"
-        placeholder="123456:AA… bot token"
-        autocomplete="off"
-        bind:value={token}
-        disabled={adding}
-      />
-      <button
-        class="btn btn-primary busy-btn"
-        type="submit"
-        disabled={adding || token.trim().length === 0}
+    <div class="sub">
+      <div class="sub-head">
+        <div class="sub-title">
+          <strong>New bot</strong>
+          <span class="muted sub-note">walks @BotFather, or paste any token below</span>
+        </div>
+        <button class="btn ghost" type="button" onclick={() => chat?.openChat()}>
+          Open @BotFather
+        </button>
+      </div>
+      <form
+        class="bot-row"
+        onsubmit={(e) => {
+          e.preventDefault();
+          void add();
+        }}
       >
-        {#if adding}<span class="spinner btn-spin"></span>{/if}
-        {adding ? 'Adding…' : 'Add bot'}
-      </button>
-    </form>
+        <input
+          class="field"
+          type="password"
+          placeholder="123456:AA… bot token"
+          autocomplete="off"
+          bind:value={token}
+          disabled={adding}
+        />
+        <button
+          class="btn btn-primary busy-btn"
+          type="submit"
+          disabled={adding || token.trim().length === 0}
+        >
+          {#if adding}<span class="spinner btn-spin"></span>{/if}
+          {adding ? 'Adding…' : 'Add bot'}
+        </button>
+      </form>
+
+    </div>
 
     {#if botError}<p class="error-text">{botError}</p>{/if}
 
     {#if bots.length > 0}
-      <ul class="bot-list">
+      <ul class="row-list">
         {#each bots as b, i (b.id)}
-          <li class="bot-item" in:fadeUp={{ delay: stagger(i) }} out:collapse>
-            <span>@{b.username}</span>
+          <li class="row-item" in:fadeUp={{ delay: stagger(i) }} out:collapse>
+            <span class="who">
+              <span class="avatar">{b.username.slice(0, 1)}</span>
+              <span>@{b.username}</span>
+            </span>
             <button
               class="btn ghost busy-btn"
               type="button"
@@ -226,7 +242,7 @@
         <ul>
           {#each results as r, i (i)}
             <li in:fadeUp={{ delay: stagger(i) }}>
-              <span>{r.ok ? '✓' : '✗'} @{r.bot} in {r.title}</span>
+              <span class={r.ok ? 'ok-text' : 'error-text'}>{r.ok ? '✓' : '✗'} @{r.bot} in {r.title}</span>
               {#if !r.ok}<span class="error-text">{r.error}</span>{/if}
             </li>
           {/each}
@@ -243,23 +259,12 @@
     margin-bottom: 10px;
   }
 
-  .linklike {
-    appearance: none;
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    color: var(--accent, inherit);
-    text-decoration: underline;
-    cursor: pointer;
-  }
-
   .bot-row .field {
     flex: 1;
     margin: 0;
   }
 
-  .bot-list {
+  .row-list {
     list-style: none;
     padding: 0;
     margin: 0;
@@ -268,13 +273,35 @@
     gap: 6px;
   }
 
-  .bot-item {
+  .row-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 7px 10px;
+  }
+
+  .who {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+  }
+
+  .avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    flex-shrink: 0;
   }
 
   .results ul {
@@ -293,34 +320,56 @@
     justify-content: space-between;
   }
 
-  .owned {
-    border-top: 1px solid var(--block-border, var(--border));
-    margin-top: 12px;
-    padding-top: 12px;
+  .head-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
-  .owned-head {
+  .head-row h2 {
+    margin: 0;
+  }
+
+  .pill {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    border-radius: 999px;
+    padding: 1px 9px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .sub {
+    border-top: 1px solid var(--border);
+    margin-top: 12px;
+    padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .sub-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
   }
 
-  .owned-list {
-    list-style: none;
-    padding: 0;
-    margin: 8px 0 0;
+  .sub-title {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 1px;
   }
 
-  .owned-list li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 7px 10px;
+  .sub-title strong {
+    font-size: 13.5px;
+  }
+
+  .sub-note {
+    font-size: 12px;
+  }
+
+  .results .ok-text {
+    margin: 0;
   }
 </style>
