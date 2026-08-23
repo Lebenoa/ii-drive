@@ -116,6 +116,36 @@ struct StreamState {
     discard: u64,
 }
 
+/// Caps a byte stream at `limit` bytes: Range responses must send exactly
+/// the declared Content-Length or browsers abort the transfer.
+pub fn cap<S>(s: S, limit: u64) -> impl Stream<Item = std::io::Result<Bytes>> + use<S>
+where
+    S: Stream<Item = std::io::Result<Bytes>>,
+{
+    unfold((Box::pin(s), limit, true), |(s, mut left, alive)| {
+        let mut s = s;
+        async move {
+            if !alive || left == 0 {
+                return None; // end the stream, not just this item
+            }
+            match s.next().await {
+                Some(Ok(b)) => {
+                    let take = left.min(b.len() as u64) as usize;
+                    left -= take as u64;
+                    let out = if take == b.len() {
+                        b
+                    } else {
+                        b.slice(..take)
+                    };
+                    Some((Ok(out), (s, left, left > 0)))
+                }
+                Some(Err(e)) => Some((Err(e), (s, left, false))),
+                None => None,
+            }
+        }
+    })
+}
+
 type BoxedPart = std::pin::Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>;
 
 /// Serves a multi-part file as one contiguous byte stream: parts are fetched
@@ -171,4 +201,37 @@ struct PartsState {
     parts: Vec<crate::db::FilePart>,
     idx: usize,
     cur: Option<BoxedPart>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn chunk(n: u8) -> std::io::Result<Bytes> {
+        Ok(Bytes::from(vec![n; 4]))
+    }
+
+    #[tokio::test]
+    async fn cap_bounds_stream_to_limit() {
+        let src = futures::stream::iter(vec![chunk(1), chunk(2), chunk(3)]);
+        let out: Vec<_> = cap(src, 10)
+            .map(|r| r.unwrap().to_vec())
+            .collect()
+            .await;
+        // 10 of 12 bytes: first two chunks whole, third sliced to 2.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2].len(), 2);
+        assert_eq!(out.iter().map(|v| v.len()).sum::<usize>(), 10);
+    }
+
+    #[tokio::test]
+    async fn cap_at_zero_ends_immediately() {
+        let src = futures::stream::iter(vec![chunk(1)]);
+        let out: Vec<_> = cap(src, 0)
+            .map(|r| r.unwrap().to_vec())
+            .collect()
+            .await;
+        assert!(out.is_empty());
+    }
 }

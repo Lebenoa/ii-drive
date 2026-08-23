@@ -797,7 +797,9 @@ pub async fn raw_file(
     let stream = crate::stream::parts_stream_from(state.tg.clone(), row.parts.clone(), start)
         .await
         .map_err(ApiError::unavailable)?;
-    let body = Body::from_stream(stream);
+    // Bound to the declared Content-Length — the underlying Telegram
+    // stream runs to EOF regardless of the requested range.
+    let body = Body::from_stream(crate::stream::cap(stream, len));
     let disposition = if q.get("dl").is_some_and(|v| v == "1") {
         "attachment"
     } else {
