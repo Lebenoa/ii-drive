@@ -14,9 +14,6 @@
   } from '$lib/api';
   import { collapse, fadeUp, stagger } from '$lib/motion';
 
-  type Tab = 'split' | 'routing';
-  let tab = $state<Tab>('split');
-
   // --- Split uploads ---
   let splitMb = $state(0);
   let splitLoaded = $state(false);
@@ -28,6 +25,13 @@
 
   function splitLabel(mb: number): string {
     return mb === 0 ? 'Off' : mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
+  }
+
+  async function loadSplit(): Promise<void> {
+    if (splitLoaded) return;
+    const s = await getSettings();
+    splitMb = s.split_mb;
+    splitLoaded = true;
   }
 
   async function saveSplit(): Promise<void> {
@@ -64,6 +68,14 @@
 
   const MIME_PRESETS = ['image/', 'video/', 'audio/', 'application/pdf', 'text/'];
 
+  async function loadRouting(): Promise<void> {
+    if (rulesLoaded) return;
+    const [loadedRules, loadedFolders] = await Promise.all([getRules(), listFolders()]);
+    rules = loadedRules.map((r) => ({ ...r, uid: ruleSeq++ }));
+    folders = loadedFolders;
+    rulesLoaded = true;
+  }
+
   function addRule(): void {
     rules = [...rules, { uid: ruleSeq++, mime: 'image/', folder: folders[0]?.uid ?? '' }];
     rulesMsg = '';
@@ -93,191 +105,125 @@
     }
   }
 
-  // Load each tab's data the first time it is shown.
+  // Both panels are on screen together, so their loads run concurrently
+  // instead of waiting on each other.
   $effect(() => {
-    void (async () => {
-      if (tab === 'split' && !splitLoaded) {
-        const s = await getSettings();
-        splitMb = s.split_mb;
-        splitLoaded = true;
-      }
-      if (tab === 'routing' && !rulesLoaded) {
-        const [loadedRules, loadedFolders] = await Promise.all([getRules(), listFolders()]);
-        rules = loadedRules.map((r) => ({ ...r, uid: ruleSeq++ }));
-        folders = loadedFolders;
-        rulesLoaded = true;
-      }
-    })();
+    void Promise.all([loadSplit(), loadRouting()]);
   });
 </script>
 
 <main class="content">
-  <div class="tabs" role="tablist" aria-label="Upload settings">
-    <button
-      class="tab"
-      class:active={tab === 'split'}
-      type="button"
-      role="tab"
-      aria-selected={tab === 'split'}
-      onclick={() => (tab = 'split')}
-    >
-      Split uploads
-    </button>
-    <button
-      class="tab"
-      class:active={tab === 'routing'}
-      type="button"
-      role="tab"
-      aria-selected={tab === 'routing'}
-      onclick={() => (tab = 'routing')}
-    >
-      Auto-routing
-    </button>
-  </div>
-
   <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
-    {#if tab === 'split'}
-      <h2>Split uploads</h2>
-      <p class="muted hint">
-        Files larger than this threshold upload as parallel parts — one part
-        per selected bot plus your own account, so big files finish much
-        faster. 0 disables splitting.
-      </p>
-      {#if splitLoaded}
-        <div class="split-row">
-          {#each SPLIT_PRESETS as p (p)}
-            <button
-              class="btn ghost preset"
-              class:active={splitMb === p}
-              type="button"
-              onclick={() => (splitMb = p)}
-            >
-              {splitLabel(p)}
-            </button>
-          {/each}
-          <input
-            class="field split-input"
-            type="number"
-            min="0"
-            bind:value={splitMb}
-          />
-          <span class="muted">MB</span>
+    <h2>Split uploads</h2>
+    <p class="muted hint">
+      Files larger than this threshold upload as parallel parts — one part
+      per selected bot plus your own account, so big files finish much
+      faster. 0 disables splitting.
+    </p>
+    {#if splitLoaded}
+      <div class="split-row">
+        {#each SPLIT_PRESETS as p (p)}
           <button
-            class="btn btn-primary busy-btn"
+            class="btn ghost preset"
+            class:active={splitMb === p}
             type="button"
-            disabled={splitSaving}
-            onclick={() => void saveSplit()}
+            onclick={() => (splitMb = p)}
           >
-            {#if splitSaving}<span class="spinner btn-spin"></span>{/if}
-            {splitSaving ? 'Saving…' : 'Save'}
+            {splitLabel(p)}
           </button>
-        </div>
-        <p class="muted hint">
-          Current threshold: {splitLabel(splitMb)} — parts upload in parallel,
-          so more bots means faster large uploads.
-        </p>
-        {#if splitMsg}<p class="ok-text" transition:fadeUp>{splitMsg}</p>{/if}
-        {#if splitError}<p class="error-text">{splitError}</p>{/if}
-      {:else}
-        <p class="muted">Loading…</p>
-      {/if}
+        {/each}
+        <input
+          class="field split-input"
+          type="number"
+          min="0"
+          bind:value={splitMb}
+        />
+        <span class="muted">MB</span>
+        <button
+          class="btn btn-primary busy-btn"
+          type="button"
+          disabled={splitSaving}
+          onclick={() => void saveSplit()}
+        >
+          {#if splitSaving}<span class="spinner btn-spin"></span>{/if}
+          {splitSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      <p class="muted hint">
+        Current threshold: {splitLabel(splitMb)} — parts upload in parallel,
+        so more bots means faster large uploads.
+      </p>
+      {#if splitMsg}<p class="ok-text" transition:fadeUp>{splitMsg}</p>{/if}
+      {#if splitError}<p class="error-text">{splitError}</p>{/if}
     {:else}
-      <h2>Auto-upload routing</h2>
-      <p class="muted hint">
-        Files uploaded to the root folder are sorted automatically: the
-        first rule whose type prefix matches claims the file. Explicit
-        folder picks in the drive always win over rules.
-      </p>
-      {#if rulesLoaded}
-        {#if rules.length > 0}
-          <ul class="rule-list">
-            {#each rules as rule, i (rule.uid)}
-              <li class="rule-row" in:fadeUp={{ delay: stagger(i) }} out:collapse>
-                <input
-                  class="field rule-mime"
-                  list="mime-presets"
-                  placeholder="image/"
-                  bind:value={rule.mime}
-                />
-                <span class="muted">→</span>
-                <select class="field rule-folder" bind:value={rule.folder}>
-                  {#each folders as f (f.uid)}
-                    <option value={f.uid}>{f.name}</option>
-                  {/each}
-                </select>
-                <button class="icon-btn danger" type="button" title="Remove rule" onclick={() => removeRule(i)}>
-                  ✕
-                </button>
-              </li>
-            {/each}
-          </ul>
-          <datalist id="mime-presets">
-            {#each MIME_PRESETS as p (p)}
-              <option value={p}></option>
-            {/each}
-          </datalist>
-        {:else}
-          <p class="muted">No rules — uploads to the root stay in the root.</p>
-        {/if}
-        <div class="rule-actions">
-          <button class="btn ghost" type="button" onclick={addRule} disabled={folders.length === 0}>
-            + Add rule
-          </button>
-          <button
-            class="btn btn-primary busy-btn"
-            type="button"
-            disabled={rulesSaving || folders.length === 0}
-            onclick={() => void saveRouting()}
-          >
-            {#if rulesSaving}<span class="spinner btn-spin"></span>{/if}
-            {rulesSaving ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-        {#if folders.length === 0}
-          <p class="muted hint">Create a folder in the drive first.</p>
-        {/if}
-        {#if rulesMsg}<p class="ok-text" transition:fadeUp>{rulesMsg}</p>{/if}
-        {#if rulesError}<p class="error-text">{rulesError}</p>{/if}
+      <p class="muted">Loading…</p>
+    {/if}
+  </section>
+
+  <section class="card section" in:fadeUp={{ delay: stagger(1) }}>
+    <h2>Auto-upload routing</h2>
+    <p class="muted hint">
+      Files uploaded to the root folder are sorted automatically: the
+      first rule whose type prefix matches claims the file. Explicit
+      folder picks in the drive always win over rules.
+    </p>
+    {#if rulesLoaded}
+      {#if rules.length > 0}
+        <ul class="rule-list">
+          {#each rules as rule, i (rule.uid)}
+            <li class="rule-row" in:fadeUp={{ delay: stagger(i) }} out:collapse>
+              <input
+                class="field rule-mime"
+                list="mime-presets"
+                placeholder="image/"
+                bind:value={rule.mime}
+              />
+              <span class="muted">→</span>
+              <select class="field rule-folder" bind:value={rule.folder}>
+                {#each folders as f (f.uid)}
+                  <option value={f.uid}>{f.name}</option>
+                {/each}
+              </select>
+              <button class="icon-btn danger" type="button" title="Remove rule" onclick={() => removeRule(i)}>
+                ✕
+              </button>
+            </li>
+          {/each}
+        </ul>
+        <datalist id="mime-presets">
+          {#each MIME_PRESETS as p (p)}
+            <option value={p}></option>
+          {/each}
+        </datalist>
       {:else}
-        <p class="muted">Loading…</p>
+        <p class="muted">No rules — uploads to the root stay in the root.</p>
       {/if}
+      <div class="rule-actions">
+        <button class="btn ghost" type="button" onclick={addRule} disabled={folders.length === 0}>
+          + Add rule
+        </button>
+        <button
+          class="btn btn-primary busy-btn"
+          type="button"
+          disabled={rulesSaving || folders.length === 0}
+          onclick={() => void saveRouting()}
+        >
+          {#if rulesSaving}<span class="spinner btn-spin"></span>{/if}
+          {rulesSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {#if folders.length === 0}
+        <p class="muted hint">Create a folder in the drive first.</p>
+      {/if}
+      {#if rulesMsg}<p class="ok-text" transition:fadeUp>{rulesMsg}</p>{/if}
+      {#if rulesError}<p class="error-text">{rulesError}</p>{/if}
+    {:else}
+      <p class="muted">Loading…</p>
     {/if}
   </section>
 </main>
 
 <style>
-  .tabs {
-    display: flex;
-    gap: 6px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 12px;
-  }
-
-  .tab {
-    appearance: none;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--muted);
-    font: inherit;
-    font-size: 13.5px;
-    padding: 6px 10px;
-    cursor: pointer;
-    transition:
-      color var(--dur-fast) var(--ease),
-      border-color var(--dur-fast) var(--ease);
-  }
-
-  .tab:hover {
-    color: inherit;
-  }
-
-  .tab.active {
-    color: inherit;
-    border-bottom-color: var(--accent, currentColor);
-    font-weight: 600;
-  }
-
   .split-row {
     display: flex;
     align-items: center;
