@@ -363,14 +363,22 @@ pub struct SettingsBody {
 /// PUT /api/settings — files larger than `split_mb` MiB upload as parallel
 /// parts. A threshold at or above the upload cap can never trigger (no file
 /// can exceed it), which would make it a disguised "off", so it is rejected.
+/// Values above Telegram's 2 GiB per-document cap are rejected too — parts
+/// must fit in one document.
 pub async fn save_settings(
     State(state): State<AppState>,
     Json(body): Json<SettingsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    const TG_DOC_CAP_MB: u64 = 2048;
     let bytes = body
         .split_mb
         .checked_mul(MB)
         .ok_or_else(|| ApiError::bad_request("split threshold too large"))?;
+    if body.split_mb > TG_DOC_CAP_MB {
+        return Err(ApiError::bad_request(format!(
+            "split threshold cannot exceed Telegram's document limit ({TG_DOC_CAP_MB} MB)"
+        )));
+    }
     if body.split_mb > 0 && bytes >= crate::config::get().max_file_size {
         let cap = crate::config::get().max_file_size / MB;
         return Err(ApiError::bad_request(format!(

@@ -242,13 +242,15 @@ pub async fn upload_file(
     // several download bots, since each part message can be fetched by a
     // different bot under its own rate limit.
     let split_bytes = crate::db::get_split(&state.db).await.unwrap_or(0);
-    let part_size = if over_cap {
-        // The Telegram document cap wins over the user's split threshold.
-        TG_DOC_CAP
-    } else if split_bytes > 0 && declared > split_bytes {
-        split_bytes
-    } else {
+    // Chunk size: the user's split threshold when set (0 = off), never
+    // above Telegram's per-document cap. Over-cap files always chunk —
+    // they cannot fit a single document.
+    let part_size = if !over_cap && (split_bytes == 0 || declared <= split_bytes) {
         declared.max(1)
+    } else if split_bytes > 0 {
+        split_bytes.min(TG_DOC_CAP)
+    } else {
+        TG_DOC_CAP
     };
     let nparts = declared.div_ceil(part_size).max(1) as usize;
     if nparts > 64 {
