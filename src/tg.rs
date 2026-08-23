@@ -404,11 +404,14 @@ impl TgManager {
                         let s = e.to_string();
                         // Already a member / privacy limits: admin promotion
                         // below is what actually matters for downloads.
+                        // USER_BOT: bots cannot join channels as plain
+                        // members at all — the EditAdmin below adds and
+                        // promotes them in one step, which is all we need.
                         if s.contains("USER_ALREADY_PARTICIPANT")
                             || s.contains("USER_NOT_MUTUAL_CONTACT")
                             || s.contains("USER_CHANNELS_TOO_MUCH")
+                            || s.contains("USER_BOT")
                         {
-                            tracing::warn!("invite said: {s}; promoting anyway");
                             Ok(())
                         } else {
                             Err(friendly(format!("invite failed: {s}")))
