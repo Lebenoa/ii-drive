@@ -39,9 +39,13 @@ fn is_auth_error(err: &str) -> bool {
     MARKERS.iter().any(|m| err.contains(m))
 }
 
+/// Stable copy for auth-dead errors; the API layer maps this exact string
+/// to HTTP 401 so clients can react structurally, not by matching prose.
+pub const SESSION_INVALID_MSG: &str = "Telegram session expired or was revoked — sign in again";
+
 fn friendly(err: String) -> String {
     if is_auth_error(&err) {
-        "Telegram session expired or was revoked — sign in again".to_string()
+        SESSION_INVALID_MSG.to_string()
     } else {
         err
     }

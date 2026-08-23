@@ -9,6 +9,16 @@ use serde_json::json;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
+/// Maps a Telegram error to an API error; the stable session-invalid copy
+/// becomes 401 so clients can log out structurally instead of matching prose.
+fn tg_err(e: String) -> ApiError {
+    if e == crate::tg::SESSION_INVALID_MSG {
+        ApiError::unauthorized(e)
+    } else {
+        ApiError::bad_request(e)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct PhoneBody {
     pub phone: String,
@@ -29,7 +39,7 @@ pub async fn auth_phone(
         .tg
         .send_code(phone)
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(tg_err)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -63,7 +73,7 @@ pub async fn auth_code(
         Ok(crate::tg::SignInOutcome::PasswordRequired { hint }) => {
             Ok(Json(json!({ "status": "password_required", "hint": hint })))
         }
-        Err(e) => Err(ApiError::bad_request(e)),
+        Err(e) => Err(tg_err(e)),
     }
 }
 
@@ -84,7 +94,7 @@ pub async fn list_channels(State(state): State<AppState>) -> ApiResult<Json<serd
         .tg
         .list_channels()
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(tg_err)?;
     let selected = match state.tg.current_user_id().await {
         Some(id) => crate::db::get_channels(&state.db, &id.to_string()).await?,
         None => Vec::new(),
@@ -143,7 +153,7 @@ pub async fn create_channel(
         .tg
         .create_channel(title, about)
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(tg_err)?;
     Ok(Json(json!({ "channel": info })))
 }
 
@@ -179,7 +189,7 @@ pub async fn add_bot(
         .tg
         .configure_bot(token)
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(tg_err)?;
 
     // Persist (dedupe by id).
     let mut pool = crate::db::get_bots(&state.db).await?;
@@ -238,7 +248,7 @@ pub async fn auth_password(
         .tg
         .check_password(&body.password)
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(tg_err)?;
     Ok(Json(json!({
         "status": "ok",
         "token": state.tokens.issue(),
@@ -339,13 +349,17 @@ pub async fn save_settings(
     State(state): State<AppState>,
     Json(body): Json<SettingsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if body.split_mb > 0 && body.split_mb * MB >= state.config.max_file_size {
+    let bytes = body
+        .split_mb
+        .checked_mul(MB)
+        .ok_or_else(|| ApiError::bad_request("split threshold too large"))?;
+    if body.split_mb > 0 && bytes >= state.config.max_file_size {
         let cap = state.config.max_file_size / MB;
         return Err(ApiError::bad_request(format!(
             "split threshold must be below the upload limit ({cap} MB) — use 0 to disable splitting"
         )));
     }
-    crate::db::set_split(&state.db, body.split_mb * MB).await?;
+    crate::db::set_split(&state.db, bytes).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

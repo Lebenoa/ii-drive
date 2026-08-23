@@ -30,6 +30,37 @@
     if (!loadedThumbs.has(id)) loadedThumbs = new Set([...loadedThumbs, id]);
   }
 
+  /** Signed media URLs keyed by `${id}:${kind}:${dl}`. Private files must
+   *  never carry the session token in a URL, so each raw/thumb link is
+   *  minted against the short-lived media token instead. */
+  let mediaUrls = $state<Record<string, string>>({});
+
+  function mediaKey(id: string, kind: 'raw' | 'thumb', dl = false): string {
+    return `${id}:${kind}:${dl ? 1 : 0}`;
+  }
+
+  $effect(() => {
+    const variants = [
+      ['thumb', false],
+      ['raw', false],
+      ['raw', true],
+    ] as const;
+    for (const f of files) {
+      for (const [kind, dl] of variants) {
+        const key = mediaKey(f.id, kind, dl);
+        if (key in mediaUrls) continue;
+        (kind === 'thumb' ? thumbUrl(f.id) : rawUrl(f.id, dl)).then((url) => {
+          mediaUrls[key] = url;
+        });
+      }
+    }
+  });
+
+  /** Resolved media URL; undefined while minting so the src attr is omitted. */
+  function murl(file: DriveFile, kind: 'raw' | 'thumb', dl = false): string | undefined {
+    return mediaUrls[mediaKey(file.id, kind, dl)];
+  }
+
   let selected = $state<Set<string>>(new Set());
   let bulkBusy = $state(false);
   let bulkError = $state('');
@@ -148,7 +179,7 @@
 
   /** Only reachable for public files — the button is not rendered otherwise. */
   async function copyLink(file: DriveFile): Promise<void> {
-    const url = rawUrl(file.id);
+    const url = await rawUrl(file.id);
     try {
       await navigator.clipboard.writeText(url);
       copiedId = file.id;
@@ -250,7 +281,7 @@
 {/if}
 
 {#if view === 'grid'}
-  <div class="grid">
+  <div class="grid" in:fadeOnly>
     {#each files as file, i (file.id)}
       <div
           class="card-f"
@@ -289,7 +320,7 @@
             <img
               class="g-img"
               class:is-loaded={loadedThumbs.has(file.id)}
-              src={thumbUrl(file.id, file.public)}
+              src={murl(file, "thumb")}
               alt=""
               loading="lazy"
               onload={() => markLoaded(file.id)}
@@ -299,7 +330,7 @@
             <img
               class="g-img"
               class:is-loaded={loadedThumbs.has(file.id)}
-              src={rawUrl(file.id, false, file.public)}
+              src={murl(file, "raw")}
               alt=""
               loading="lazy"
               onload={() => markLoaded(file.id)}
@@ -330,7 +361,7 @@
               </span>
             </button>
           {/if}
-          <a class="icon-btn" href={rawUrl(file.id, true, file.public)} title="Download">⬇</a>
+          <a class="icon-btn" href={murl(file, "raw", true)} title="Download">⬇</a>
           <button
             class="icon-btn"
             type="button"
@@ -358,7 +389,7 @@
     {/each}
   </div>
 {:else}
-  <table class="tbl">
+  <table class="tbl" in:fadeOnly>
     <thead>
       <tr>
         <th class="c-sel">
@@ -402,7 +433,7 @@
               <img
                 class="thumb"
                 class:is-loaded={loadedThumbs.has(file.id)}
-                src={thumbUrl(file.id, file.public)}
+                src={murl(file, "thumb")}
                 alt=""
                 loading="lazy"
                 title={file.mime}
@@ -413,7 +444,7 @@
               <img
                 class="thumb"
                 class:is-loaded={loadedThumbs.has(file.id)}
-                src={rawUrl(file.id, false, file.public)}
+                src={murl(file, "raw")}
                 alt=""
                 loading="lazy"
                 title={file.mime}
@@ -455,7 +486,7 @@
                 </span><span class="act-lbl">{copiedId === file.id ? 'copied' : ''}</span>
               </button>
             {/if}
-            <a class="icon-btn" href={rawUrl(file.id, true, file.public)} title="Download">⬇</a>
+            <a class="icon-btn" href={murl(file, "raw", true)} title="Download">⬇</a>
             <button
               class="icon-btn"
               type="button"
@@ -500,23 +531,23 @@
   {#if previewFile}
     <div class="pv-media">
       {#if previewFile.mime.startsWith('video/')}
-        <video controls autoplay src={rawUrl(previewFile.id, false, previewFile.public)}></video>
+        <video controls autoplay src={murl(previewFile, "raw")}></video>
       {:else if previewFile.mime.startsWith('audio/')}
         <div class="pv-audio">
           {#if previewFile.has_thumb && !brokenThumbs.has(previewFile.id)}
-            <img src={thumbUrl(previewFile.id, previewFile.public)} alt="" />
+            <img src={murl(previewFile, "thumb")} alt="" />
           {/if}
           <span class="pv-audio-name" title={previewFile.name}>{previewFile.name}</span>
-          <audio controls autoplay src={rawUrl(previewFile.id, false, previewFile.public)}></audio>
+          <audio controls autoplay src={murl(previewFile, "raw")}></audio>
         </div>
       {:else}
-        <img src={rawUrl(previewFile.id, false, previewFile.public)} alt={previewFile.name} />
+        <img src={murl(previewFile, "raw")} alt={previewFile.name} />
       {/if}
     </div>
     <div class="pv-bar">
       <span class="pv-name" title={previewFile.name}>{previewFile.name}</span>
       <span class="pv-meta muted">{humanSize(previewFile.size)}</span>
-      <a class="icon-btn" href={rawUrl(previewFile.id, true, previewFile.public)} title="Download">⬇</a>
+      <a class="icon-btn" href={murl(previewFile, "raw", true)} title="Download">⬇</a>
       <button
         class="icon-btn"
         type="button"

@@ -2,8 +2,8 @@ mod files;
 mod session;
 
 pub use files::{
-    create_folder, delete_file, delete_folder, health, list_files, list_folders, limits,
-    file_link, file_thumb, move_file, raw_file, set_visibility, upload_file,
+    create_folder, delete_file, delete_folder, file_link, file_thumb, health, list_files,
+    list_folders, limits, media_token, move_file, raw_file, set_visibility, upload_file,
 };
 pub use session::{
     add_bot, auth_code, auth_password, auth_phone, avatar, create_channel, get_rules, get_settings,

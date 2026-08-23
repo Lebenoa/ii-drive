@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
@@ -85,6 +85,36 @@ impl Tokens {
             return false;
         }
         let expected = self.sign(&format!("f/{uid}/{exp_str}"));
+        expected.len() == mac.len()
+            && !mac.is_empty()
+            && expected.as_bytes().ct_eq(mac.as_bytes()).into()
+    }
+
+    /// Signs a short-lived media-read token: `<expiry>.<hex sig over "m/{exp}">`.
+    /// Grants read access to any private file's raw/thumb endpoints — meant
+    /// for `<img>`/`<video>` srcs so the long-lived session token never
+    /// appears in a URL (logs, history, Referer).
+    pub fn sign_media(&self, ttl_secs: u64) -> String {
+        let exp = now_unix() + ttl_secs;
+        let payload = format!("m/{exp}");
+        format!("{exp}.{}", self.sign(&payload))
+    }
+
+    /// Verifies a `sign_media` signature.
+    pub fn verify_media(&self, sig: &str) -> bool {
+        let mut parts = sig.split('.');
+        let (Some(exp_str), Some(mac), None) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let Ok(exp) = exp_str.parse::<u64>() else {
+            return false;
+        };
+        if exp < now_unix() {
+            return false;
+        }
+        let expected = self.sign(&format!("m/{exp_str}"));
         expected.len() == mac.len()
             && !mac.is_empty()
             && expected.as_bytes().ct_eq(mac.as_bytes()).into()

@@ -149,7 +149,7 @@ pub async fn create_folder(
         return Err(ApiError::bad_request("parent folder not found"));
     }
     let row = crate::db::FolderRow {
-        uid: ulid::Ulid::new().to_string(),
+        uid: ulid::Ulid::generate().to_string(),
         name: name.to_string(),
         parent: body.parent,
     };
@@ -386,14 +386,31 @@ pub async fn upload_file(
                 _ => break,
             }
         }
+        // Uploaders that had already finalized a part before the abort
+        // posted live Telegram messages — collect and remove them so no
+        // orphan stays behind (size is irrelevant for cleanup).
+        let mut parts: Vec<crate::db::FilePart> = Vec::new();
+        let mut uploader_err: Option<String> = None;
+        for (i, u) in uploaders.into_iter().enumerate() {
+            match u
+                .await
+                .map_err(|e| format!("upload task failed: {e}"))
+                .and_then(|r| r)
+            {
+                Ok((message_id, _, _, _)) => parts.push(crate::db::FilePart {
+                    message_id,
+                    chat: chat_for(i),
+                    size: 0,
+                }),
+                Err(e) if uploader_err.is_none() => uploader_err = Some(e),
+                Err(_) => {}
+            }
+        }
+        cleanup_parts(&state, &parts).await;
         // "upload aborted" means an uploader died first; its error is the
         // actual cause (e.g. Telegram down) and far more useful to the client.
-        if err.1 == "upload aborted" {
-            for u in uploaders {
-                if let Ok(Err(tg_err)) = u.await {
-                    return Err(ApiError::bad_request(tg_err));
-                }
-            }
+        if err.1 == "upload aborted" && let Some(e) = uploader_err {
+            return Err(ApiError::bad_request(e));
         }
         return Err(err);
     }
@@ -478,7 +495,7 @@ pub async fn upload_file(
     }
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     let row = FileRow {
-        uid: ulid::Ulid::new().to_string(),
+        uid: ulid::Ulid::generate().to_string(),
         name,
         mime,
         size: declared as i64,
@@ -708,6 +725,13 @@ async fn cleanup_parts(state: &AppState, parts: &[crate::db::FilePart]) {
     }
 }
 
+/// True when a delete failure only means the message was already gone —
+/// retrying the file delete must still be able to succeed over those.
+fn is_message_gone(err: &str) -> bool {
+    let norm = err.to_lowercase().replace('_', "");
+    norm.contains("messageidinvalid") || norm.contains("messageinvalid")
+}
+
 pub async fn delete_file(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -723,13 +747,20 @@ pub async fn delete_file(
         return Err(ApiError::not_found("file not found"));
     }
     // Delete every part's message; on the first failure restore the row so
-    // the file stays listed and the delete can be retried (the messages
-    // deleted so far are gone from Telegram, which is harmless).
+    // the file stays listed and the delete can be retried. Parts that are
+    // already gone on Telegram (e.g. a previous partial delete) are skipped
+    // instead of failing the whole delete.
     let mut failed: Option<String> = None;
     for p in &row.parts {
-        if let Err(e) = state.tg.delete_message(p.message_id, &p.chat).await {
-            failed = Some(e);
-            break;
+        match state.tg.delete_message(p.message_id, &p.chat).await {
+            Ok(()) => {}
+            Err(e) if is_message_gone(&e) => {
+                tracing::warn!(message_id = p.message_id, "part already deleted: {e}");
+            }
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
         }
     }
     if let Some(e) = failed {
@@ -752,8 +783,9 @@ pub async fn raw_file(
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
 
-    // Private files need a valid session token: either the usual
-    // Authorization header or ?token= for plain browser links/downloads.
+    // Private files need a valid credential: the usual Authorization header,
+    // a single-file share sig, or the short-lived media token (?mt=) used
+    // by <img>/<video> srcs — never the long-lived session token itself.
     if !row.public {
         let ok = req
             .headers()
@@ -761,9 +793,7 @@ pub async fn raw_file(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .is_some_and(|t| state.tokens.verify(t))
-            || q
-                .get("token")
-                .is_some_and(|t| state.tokens.verify(t))
+            || q.get("mt").is_some_and(|t| state.tokens.verify_media(t))
             || q.get("sig").is_some_and(|s| state.tokens.verify_file(&row.uid, s));
         if !ok {
             return Err(ApiError(
@@ -880,7 +910,7 @@ pub async fn file_thumb(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .is_some_and(|t| state.tokens.verify(t))
-            || q.get("token").is_some_and(|t| state.tokens.verify(t))
+            || q.get("mt").is_some_and(|t| state.tokens.verify_media(t))
             || q.get("sig").is_some_and(|s| state.tokens.verify_file(&row.uid, s));
         if !ok {
             return Err(ApiError(
@@ -941,5 +971,29 @@ pub async fn file_link(
     Ok(Json(serde_json::json!({
         "url": format!("/api/files/{}/raw?sig={sig}", row.uid),
         "expires_in": FILE_LINK_TTL_SECS,
+    })))
+}
+
+/// TTL of the short-lived media-read token handed to the web client.
+const MEDIA_TTL_SECS: u64 = 3600;
+
+/// GET /api/media-token — bearer-authenticated short-lived signed token for
+/// private raw/thumb URLs (`?mt=`), so `<img>`/`<video>` srcs never carry
+/// the long-lived session token (which would leak via logs/history/Referer).
+pub async fn media_token(
+    State(state): State<AppState>,
+    req_headers: axum::http::HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let authed = req_headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| state.tokens.verify(t));
+    if !authed {
+        return Err(ApiError::unauthorized("unauthorized"));
+    }
+    Ok(Json(serde_json::json!({
+        "token": state.tokens.sign_media(MEDIA_TTL_SECS),
+        "expires_in": MEDIA_TTL_SECS,
     })))
 }

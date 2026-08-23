@@ -6,23 +6,41 @@
   // The navbar is owned by the layout, so it fetches its own user info.
   let user = $state<TgUser | null>(null);
 
+  // Profile photo for the account button; null = keep the initial-letter
+  // fallback (no photo on the account, or the fetch failed).
+  let avatarUrl = $state<string | null>(null);
+  let avatarLoaded = $state(false);
+  // Bumps on every refetch/logout so a slow stale response can never revoke
+  // or overwrite the blob URL of a newer one.
+  let avatarGen = 0;
+
+  function dropAvatar(): void {
+    avatarGen++;
+    if (avatarUrl) URL.revokeObjectURL(avatarUrl);
+    avatarUrl = null;
+    avatarLoaded = false;
+  }
+
   // Depends on the route: logging in does not remount the layout, so the
   // token check must re-run on navigation for the avatar to appear.
   $effect(() => {
     void page.url.pathname;
     if (!getToken()) {
       user = null;
-      if (avatarUrl) URL.revokeObjectURL(avatarUrl);
-      avatarUrl = null;
-      avatarLoaded = false;
+      dropAvatar();
       return;
     }
     void getMe()
       .then((m) => {
         if (m.authorized) {
           user = m.user;
+          const gen = ++avatarGen;
           void fetchAvatar()
             .then((url) => {
+              if (gen !== avatarGen) {
+                if (url) URL.revokeObjectURL(url);
+                return;
+              }
               if (avatarUrl) URL.revokeObjectURL(avatarUrl);
               avatarUrl = url;
               avatarLoaded = false;
@@ -31,11 +49,6 @@
         }
       })
   });
-
-  // Profile photo for the account button; null = keep the initial-letter
-  // fallback (no photo on the account, or the fetch failed).
-  let avatarUrl = $state<string | null>(null);
-  let avatarLoaded = $state(false);
 
   	// Navigation is brand + account menu only: Files is the root, Channels is
 	// reached via the boot redirect, Settings lives in the account menu.

@@ -24,12 +24,12 @@ export class ApiError extends Error {
 }
 
 /**
- * Reacts to "session expired/revoked" errors from any endpoint: drops the
- * local token and bounces to the login page. Returns true when it fired so
- * callers can skip their own error handling.
+ * Reacts to session-invalid errors (HTTP 401 from the API): drops the local
+ * token and bounces to the login page. Returns true when it fired so callers
+ * can skip their own error handling.
  */
-export function handleSessionInvalid(message: string): boolean {
-  if (!message.includes('sign in again')) return false;
+export function handleSessionInvalid(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 401) return false;
   clearToken();
   if (!location.pathname.startsWith('/login')) void goto('/login');
   return true;
@@ -107,13 +107,13 @@ export async function request<T>(
   const data = await parseBody(res);
   if (!res.ok) {
     const msg = errMessage(data, `Request failed (${res.status})`);
-    handleSessionInvalid(msg);
-    throw new ApiError(res.status, msg);
+    const apiErr = new ApiError(res.status, msg);
+    handleSessionInvalid(apiErr);
+    throw apiErr;
   }
   // Trusted boundary: backend serves the documented contract.
   return data as T;
 }
-
 /**
  * GET /api/avatar — the signed-in user's profile photo as a blob object URL.
  * Returns null when the account has no photo (404) — callers fall back to
@@ -334,29 +334,48 @@ export async function setFileVisibility(id: string, isPublic: boolean): Promise<
   });
 }
 
-/**
- * URL for a file's raw stream. Public files work for anyone; private ones
- * need the session token appended (?token=) — used for logged-in downloads.
- */
-export function rawUrl(id: string, download = false, isPublic = true): string {
-  return fileUrl(id, 'raw', download ? { dl: '1' } : {}, isPublic);
-}
+/** Short-lived media token cache (backend TTL is 1h). */
+let mediaToken: string | null = null;
 
-/** GET /api/files/{id}/thumb — tiny cached JPEG, same auth rules as raw */
-export function thumbUrl(id: string, isPublic = true): string {
-  return fileUrl(id, 'thumb', {}, isPublic);
+async function ensureMediaToken(): Promise<string | null> {
+  if (!getToken()) return null;
+  if (!mediaToken) {
+    try {
+      const res = await request<{ token: string }>('/api/media-token');
+      mediaToken = res.token;
+    } catch {
+      return null;
+    }
+  }
+  return mediaToken;
 }
 
 function fileUrl(
   id: string,
   kind: 'raw' | 'thumb',
   extra: Record<string, string>,
-  isPublic: boolean,
+  mt: string | null,
 ): string {
   const params = new URLSearchParams(extra);
-  if (!isPublic && getToken()) params.set('token', getToken() as string);
+  if (mt) params.set('mt', mt);
   const qs = params.toString();
   return `${location.origin}/api/files/${encodeURIComponent(id)}/${kind}${qs ? `?${qs}` : ''}`;
+}
+
+/**
+ * URL for a file's raw stream. Public files work for anyone; private ones
+ * carry a short-lived signed media token — never the session token, which
+ * would leak via server logs, browser history and Referer headers.
+ */
+export async function rawUrl(id: string, download = false): Promise<string> {
+  const mt = await ensureMediaToken();
+  return fileUrl(id, 'raw', download ? { dl: '1' } : {}, mt);
+}
+
+/** GET /api/files/{id}/thumb — tiny cached JPEG, same auth rules as raw */
+export async function thumbUrl(id: string): Promise<string> {
+  const mt = await ensureMediaToken();
+  return fileUrl(id, 'thumb', {}, mt);
 }
 
 let cachedMax: number | null = null;
@@ -404,8 +423,9 @@ export async function uploadFile(
     const body: unknown = xhr.response;
     if (xhr.status < 200 || xhr.status >= 300) {
       const msg = errMessage(body, `Upload failed (${xhr.status})`);
-      handleSessionInvalid(msg);
-      reject(new ApiError(xhr.status, msg));
+      const apiErr = new ApiError(xhr.status, msg);
+      handleSessionInvalid(apiErr);
+      reject(apiErr);
       return;
     }
     resolve(
