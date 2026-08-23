@@ -41,7 +41,6 @@ interface.
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
    | `session_path` | `data/session.db` | MTProto session (grammers SQLite) |
-   | `storage_chat` | `me` | Fallback storage target when the user has not picked channels |
    | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
 
@@ -70,8 +69,7 @@ After signing in you are asked to pick one or more **storage channels** (any
 channel or group the account can post to, plus Saved Messages). The choice is
 stored in SurrealDB and uploads are spread across the selected channels
 round-robin; each file remembers which channel holds it, so downloads and
-deletes keep working even if you change the selection later. Until a selection
-is made, files go to `storage_chat` from the config.
+deletes keep working even if you change the selection later.
 
 ### Split uploads
 

@@ -189,6 +189,11 @@ export function botfatherSend(text: string): Promise<{ reply: string }> {
   return request('/api/botfather', { method: 'POST', body: { text } });
 }
 
+/** POST /api/config/reload — re-read config.toml; hot-applies runtime fields. */
+export function reloadConfig(): Promise<{ ok: true }> {
+  return request('/api/config/reload', { method: 'POST' });
+}
+
 /** POST /api/channels/create — creates a broadcast channel on Telegram */
 export async function createChannel(title: string, about = ''): Promise<ChannelInfo> {
   const res = await request<{ channel: ChannelInfo }>('/api/channels/create', {
