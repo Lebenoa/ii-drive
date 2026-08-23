@@ -898,7 +898,14 @@ async fn collect_folder(
     Ok(())
 }
 
-/// Adds every joined channel/group from a chats array to the output.
+/// Adds every chat this account can actually use for storage to the output.
+///
+/// Membership is not enough. Storage wiring invites each download bot
+/// (`channels.inviteToChannel`) and promotes it to admin
+/// (`channels.editAdmin`), so the account needs `invite_users` and
+/// `add_admins` there. Creators hold every right implicitly. Chats we only
+/// read — someone else's group, a channel we merely joined — are dropped so
+/// they never reach the picker.
 fn harvest_chats(
     chats: &[tl::enums::Chat],
     out: &mut Vec<ChannelInfo>,
@@ -909,6 +916,16 @@ fn harvest_chats(
             tl::enums::Chat::Channel(ch) => {
                 if ch.left && !ch.creator {
                     continue; // we left it — cannot post
+                }
+                if !ch.creator && !Self::can_wire_bots(ch.admin_rights.as_ref()) {
+                    // Read-only for us — bots cannot be wired in.
+                    tracing::debug!(
+                        title = %ch.title,
+                        megagroup = ch.megagroup,
+                        admin = ch.admin_rights.is_some(),
+                        "skipping chat: no rights to wire download bots"
+                    );
+                    continue;
                 }
                 let key = format!("-100{}", ch.id);
                 if seen.insert(key.clone()) {
@@ -921,6 +938,16 @@ fn harvest_chats(
             _ => {}
         }
     }
+}
+
+/// Whether an admin-rights grant covers inviting a download bot and
+/// promoting it to admin. Both are required: an un-promoted bot cannot read
+/// the channel's files back.
+fn can_wire_bots(rights: Option<&tl::enums::ChatAdminRights>) -> bool {
+    let Some(tl::enums::ChatAdminRights::Rights(r)) = rights else {
+        return false;
+    };
+    r.invite_users && r.add_admins
 }
 
 /// Builds an InputPeer for pagination offsets from the same response's
