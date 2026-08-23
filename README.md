@@ -2,9 +2,9 @@
 
 A personal file drive backed by Telegram, in the spirit of
 [teldrive](https://github.com/teldrive/teldrive). Files are uploaded as
-documents to a Telegram chat of your choice (default: Saved Messages) and
-streamed back on demand — Telegram is the storage backend, this server is the
-interface.
+documents to Telegram **storage channels** you pick after signing in and
+streamed back on demand — Telegram is the storage backend, this server is
+the interface.
 - **Backend:** Rust, [axum](https://github.com/tokio-rs/axum) +
   [grammers](https://github.com/Lonami/grammers) (MTProto), embedded
   [SurrealDB](https://surrealdb.com) (SurrealKv) for metadata.
@@ -43,6 +43,7 @@ interface.
    | `session_path` | `data/session.db` | MTProto session (grammers SQLite) |
    | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
+   | `media_thumbs` | `true` | Generate image/video thumbnails (ffmpeg on PATH for videos) |
 
 2. **Build the web UI:**
 
@@ -70,16 +71,21 @@ channel or group the account can post to, plus Saved Messages). The choice is
 stored in SurrealDB and uploads are spread across the selected channels
 round-robin; each file remembers which channel holds it, so downloads and
 deletes keep working even if you change the selection later.
+Settings lives under `/settings` with two categories:
+
+- **Telegram** — pick storage channels, and manage download bots. Bots
+  download files through their own rate limits, so several spread the load;
+  adding a bot invites it into every storage channel as an admin. No token
+  yet? A guided **@BotFather** chat in the UI walks you through `/newbot`
+  and offers one-click add of the minted token.
+- **Uploads** — split-upload threshold and auto-upload routing rules
+  (mime-prefix → folder), as tabs.
 
 ### Split uploads
 
-In **Settings** you can set a split threshold (e.g. 250 MB, with quick
-presets; 0 = off). Files larger than the threshold are cut into parts that
-upload **in parallel** over separate connections instead of one long stream —
-typically much faster for big files. With several download bots configured,
-each part can also be fetched by a different bot under its own rate limit,
-which speeds downloads up as well. Parts are re-joined transparently when the
-file is streamed or downloaded, and deleted together with the file. The
+Files larger than the split threshold upload as parallel parts — one per
+download bot plus your own account — and are re-joined transparently when
+streamed or downloaded; parts are deleted together with the file. The
 threshold only affects new uploads; existing files keep their layout.
 
 ### Troubleshooting login
@@ -91,8 +97,10 @@ just log in again through the web UI.
 
 ## Usage
 - **Upload:** drag & drop or browse; progress is tracked via `X-File-Size`.
-- **Stream/download:** every file gets a stable public URL
-  `/api/files/{id}/raw`; add `?dl=1` to force a download. Streams resume
+- **Stream/download:** every file gets a stable URL `/api/files/{id}/raw`;
+  add `?dl=1` to force a download. Files are private by default — URLs need
+  the session (Authorization header), a short-lived media token, or a share
+  link; flip visibility to public for shareable links. Streams resume
   transparently when Telegram's file references expire mid-transfer.
 - **Search:** substring match on file names from the search box.
 
@@ -103,13 +111,21 @@ just log in again through the web UI.
 | POST | `/api/auth/phone` | — | Start Telegram login (phone must be in `allowed_phones`) |
 | POST | `/api/auth/code` | — | Submit login code; returns token or `password_required` |
 | POST | `/api/auth/password` | — | Submit 2FA password; returns token |
+| GET | `/api/me` | token | Connection status + user info |
+| GET/POST | `/api/channels` | token | List candidate dialogs / save storage-channel selection |
+| GET/POST/DELETE | `/api/bot`(`/ {id}`) | token | Manage download bots |
+| POST | `/api/botfather` | token | Relay one message to @BotFather; returns its reply |
+| GET/PUT | `/api/settings` | token | Upload-split threshold (`split_mb`, 0 = off) |
+| GET/PUT | `/api/rules` | token | Auto-upload routing rules |
 | GET | `/api/files?q&folder&limit&offset` | token | List/search files (folder id, empty = root) |
 | POST | `/api/files` | token | Upload (`X-File-Size` required, `X-Folder` optional) |
-| GET/POST | `/api/folders` | token | List / create folders (nested via `parent`) |
-| DELETE | `/api/folders/{id}` | token | Delete folder (must be empty) |
-| DELETE | `/api/files/{id}` | token | Delete file + Telegram message |
-| GET | `/api/files/{id}/raw` | — | Stream file (public, shareable) |
-| GET/PUT | `/api/settings` | token | Upload-split threshold (`split_mb`, 0 = off) |
+| PATCH | `/api/files/{id}/move` `/visibility` | token | Move file / toggle public-private |
+| DELETE | `/api/files/{id}` | token | Delete file + Telegram parts |
+| GET | `/api/files/{id}/raw` `/thumb` | — / token / `?mt=` / `?sig=` | Stream or thumbnail; public files need nothing |
+| GET | `/api/files/{id}/link` | token | Mint time-limited share URL |
+| GET/POST | `/api/folders`(`/{id}`) | token | List / create / delete folders |
+| GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
+| POST | `/api/config/reload` | token | Re-read config.toml (runtime fields hot-apply) |
 | GET | `/health` | — | Liveness probe |
 
 ## Development
@@ -126,9 +142,10 @@ Telegram) and logs you out of MTProto.
 
 ## Notes
 
-- The raw endpoint is unauthenticated by design so links can be shared; keep
-  the server on a trusted network or front it with your own auth proxy if
-  that's not acceptable.
+- Files are private by default; their URLs require the session, a
+  short-lived media token (`?mt=`), or a time-limited share link. Only files
+  explicitly made public are link-shareable. Either way, keep the server on
+  a trusted network or front it with your own auth proxy.
 - Bot tokens added through the settings UI are stored **plaintext** in the
   embedded SurrealDB — treat `data/` like any other secret store.
 - Uploads are streamed: memory use stays constant regardless of file size.
