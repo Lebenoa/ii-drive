@@ -573,7 +573,7 @@ pub async fn extract_media_thumb(state: &AppState, uid: &str, part0: crate::db::
         return;
     }
 
-    let dir = std::env::temp_dir().join("ii-task-thumbs");
+    let dir = std::env::temp_dir().join("ii-drive-thumbs");
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         tracing::warn!("thumb temp dir: {e}");
         return;

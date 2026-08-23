@@ -54,7 +54,7 @@ interface.
 
    ```sh
    cargo build --release
-   ./target/release/ii-task
+   ./target/release/ii-drive
    ```
 
 4. **Log in** — open `http://127.0.0.1:8080` and sign in with a phone number
