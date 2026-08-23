@@ -10,5 +10,6 @@ pub use files::{
 pub use botfather::send as botfather_send;
 pub use session::{
     add_bot, auth_code, auth_password, auth_phone, avatar, create_channel, get_rules, get_settings,
-    list_bots, list_channels, me, remove_bot, save_rules, save_settings, select_channels,
+    list_bots, list_channels, me, reload_config, remove_bot, save_rules, save_settings,
+    select_channels,
 };

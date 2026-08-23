@@ -24,8 +24,8 @@ const DRAIN_CAP: u64 = 32 * 1024 * 1024;
 const HEAD_CAP: usize = 512 * 1024;
 
 /// Public upload limits so clients can pre-check files before transferring.
-pub async fn limits(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "max_file_size": state.config.max_file_size }))
+pub async fn limits() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "max_file_size": crate::config::get().max_file_size }))
 }
 
 #[derive(serde::Serialize)]
@@ -192,7 +192,7 @@ pub async fn upload_file(
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| ApiError::bad_request("missing X-File-Size header"))?;
 
-    let max = state.config.max_file_size;
+    let max = crate::config::get().max_file_size;
     if declared > max {
         return Err(ApiError::too_large(format!(
             "file exceeds limit of {max} bytes"
@@ -237,18 +237,21 @@ pub async fn upload_file(
     }
 
     // Storage target per part: round-robin across the user's selected
-    // channels, or the configured fallback.
+    // channels. There is no fallback — the web UI forces channel selection
+    // right after login, so reaching this point without channels means an
+    // out-of-band API caller skipped setup.
     let user_key = state.tg.current_user_id().await.map(|id| id.to_string());
     let selected = match &user_key {
         Some(k) => crate::db::get_channels(&state.db, k).await.unwrap_or_default(),
         None => Vec::new(),
     };
+    if selected.is_empty() {
+        return Err(ApiError::bad_request(
+            "no storage channels selected — complete channel selection in the drive first",
+        ));
+    }
     let chat_for = |i: usize| -> String {
-        if selected.is_empty() {
-            state.config.storage_chat.trim().to_ascii_lowercase()
-        } else {
-            selected[i % selected.len()].chat.to_ascii_lowercase()
-        }
+        selected[i % selected.len()].chat.to_ascii_lowercase()
     };
 
     // Uploaders start immediately (they must, to drain their channels while
@@ -517,7 +520,7 @@ pub async fn upload_file(
     // Videos get a first-frame thumbnail and non-JPEG images a converted
     // one in the background (ffmpeg); JPEGs usually arrive with a stripped
     // Telegram thumb already stored above.
-    if state.config.media_thumbs
+    if crate::config::get().media_thumbs
         && row.thumb.is_none()
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {

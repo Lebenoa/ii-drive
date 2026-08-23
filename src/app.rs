@@ -9,7 +9,7 @@ use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     // Multipart overhead beyond the raw file bytes: boundary, headers.
-    let upload_limit = state.config.max_file_size as usize + 1024 * 1024;
+    let upload_limit = crate::config::get().max_file_size as usize + 1024 * 1024;
     let public = Router::new()
         .route("/health", get(crate::routes::health))
         .route("/api/limits", get(crate::routes::limits))
@@ -40,6 +40,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/settings",
             get(crate::routes::get_settings).put(crate::routes::save_settings),
         )
+        .route("/api/config/reload", post(crate::routes::reload_config))
         .route(
             "/api/rules",
             get(crate::routes::get_rules).put(crate::routes::save_rules),
@@ -68,7 +69,7 @@ pub fn build_router(state: AppState) -> Router {
             crate::auth::guard,
         ));
 
-    let web_dist = state.config.web_dist.clone();
+    let web_dist = crate::config::get().web_dist;
     let app: Router<()> = public.merge(protected).with_state(state);
     let dist = std::path::Path::new(&web_dist);
     if dist.is_dir() {
@@ -109,7 +110,8 @@ pub async fn run(state: AppState) -> std::io::Result<()> {
         let _ = warmer.status().await;
     });
 
-    let addr = format!("{}:{}", state.config.host, state.config.port);
+    let cfg = crate::config::get();
+    let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
     axum::serve(listener, build_router(state))
@@ -120,10 +122,9 @@ pub async fn run(state: AppState) -> std::io::Result<()> {
         .await
 }
 
-pub fn shared_state(cfg: crate::config::Config, db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> AppState {
-    let cfg = Arc::new(cfg);
+pub fn shared_state(db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> AppState {
+    let cfg = crate::config::get();
     AppState {
-        config: cfg.clone(),
         db: Arc::new(db),
         tokens: Arc::new(crate::auth::Tokens::new(&cfg.secret, cfg.token_ttl_secs)),
         tg: Arc::new(crate::tg::TgManager::new(cfg)),

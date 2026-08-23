@@ -1,4 +1,18 @@
+use anyhow::{Result};
+use std::sync::{LazyLock, OnceLock, RwLock};
+
 use serde::Deserialize;
+
+/// Process-wide configuration. Loaded once at startup via [`init`], read
+/// through [`get`] (cheap snapshot clone), and refreshed from disk with
+/// [`reload`]. `LazyLock` makes the static self-initializing without
+/// needing a `once_cell`-style dance in `main`.
+static CONFIG: LazyLock<RwLock<Config>> =
+    LazyLock::new(|| RwLock::new(Config::default()));
+
+/// Where the config was loaded from, kept so [`reload`] re-reads the same
+/// file even when the server was started with an explicit path argument.
+static CONFIG_PATH: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -10,7 +24,6 @@ pub struct Config {
     pub token_ttl_secs: u64,
     pub db_path: String,
     pub session_path: String,
-    pub storage_chat: String,
     pub max_file_size: u64,
     pub web_dist: String,
     pub allowed_phones: Vec<String>,
@@ -28,11 +41,71 @@ struct RawConfig {
     token_ttl_secs: Option<u64>,
     db_path: Option<String>,
     session_path: Option<String>,
-    storage_chat: Option<String>,
     max_file_size: Option<SizeRepr>,
     web_dist: Option<String>,
     allowed_phones: Option<Vec<String>>,
     media_thumbs: Option<bool>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            host: "127.0.0.1".into(),
+            port: 8080,
+            api_id: 0,
+            api_hash: String::new(),
+            secret: "change-me".into(),
+            token_ttl_secs: 30 * 24 * 3600,
+            db_path: "data/drive.surrealkv".into(),
+            session_path: "data/session.db".into(),
+            max_file_size: 2 * 1024 * 1024 * 1024,
+            web_dist: "web/dist".into(),
+            allowed_phones: Vec::new(),
+            media_thumbs: true,
+        }
+    }
+}
+
+/// Loads `path`, anchors its relative data paths against the file's
+/// directory, and installs it as the process-wide config.
+pub fn init(path: &str) -> anyhow::Result<Config> {
+    let cfg = anchor_paths(Config::load(path)?, path);
+    let _ = CONFIG_PATH.set(path.to_string());
+    *CONFIG.write().expect("config lock poisoned") = cfg.clone();
+    Ok(cfg)
+}
+
+/// Snapshot of the current configuration; cheap enough to call per request.
+pub fn get() -> Config {
+    CONFIG.read().expect("config lock poisoned").clone()
+}
+
+/// Re-reads the config file from disk and swaps it in. Startup-only fields
+/// (`db_path`, `session_path`, credentials/secret already baked into open
+/// sessions and issued tokens) are re-read but have no effect until restart.
+pub fn reload() -> anyhow::Result<Config> {
+    let path = CONFIG_PATH.get().map(String::as_str).unwrap_or("config.toml");
+    init(path)
+}
+
+/// Resolves the config's relative filesystem paths against the config
+/// file's directory so the server behaves identically regardless of the
+/// working directory it was started from.
+fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
+    let base = std::path::Path::new(config_path);
+    let Some(dir) = base.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return cfg; // config in the CWD — nothing to anchor
+    };
+    let anchor = |p: String| -> String {
+        if std::path::Path::new(&p).is_absolute() {
+            p
+        } else {
+            dir.join(p).to_string_lossy().into_owned()
+        }
+    };
+    cfg.session_path = anchor(cfg.session_path);
+    cfg.web_dist = anchor(cfg.web_dist);
+    cfg
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +119,7 @@ pub const DEFAULT_SECRET_WARNING: &str =
     "config secret is the default placeholder — anyone can log in; set a real `secret` in config.toml";
 
 impl Config {
-    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(path: &str) -> anyhow::Result<Self> {
         let raw: RawConfig = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -63,7 +136,7 @@ impl Config {
 
         let max_file_size = match raw.max_file_size {
             Some(SizeRepr::Num(n)) => n,
-            Some(SizeRepr::Str(s)) => parse_size(&s)?,
+            Some(SizeRepr::Str(s)) => parse_size(&s).map_err(anyhow::Error::msg)?,
             None => 2 * 1024 * 1024 * 1024, // 2 GiB
         };
 
@@ -78,7 +151,6 @@ impl Config {
             session_path: raw
                 .session_path
                 .unwrap_or_else(|| "data/session.db".into()),
-            storage_chat: raw.storage_chat.unwrap_or_else(|| "me".into()),
             max_file_size,
             web_dist: raw.web_dist.unwrap_or_else(|| "web/dist".into()),
             allowed_phones: raw

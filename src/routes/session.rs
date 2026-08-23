@@ -30,7 +30,7 @@ pub async fn auth_phone(
     Json(body): Json<PhoneBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let phone = body.phone.trim();
-    if !state.config.phone_allowed(phone) {
+    if !crate::config::get().phone_allowed(phone) {
         return Err(ApiError::unauthorized(
             "this phone number is not allowed on this drive",
         ));
@@ -353,13 +353,26 @@ pub async fn save_settings(
         .split_mb
         .checked_mul(MB)
         .ok_or_else(|| ApiError::bad_request("split threshold too large"))?;
-    if body.split_mb > 0 && bytes >= state.config.max_file_size {
-        let cap = state.config.max_file_size / MB;
+    if body.split_mb > 0 && bytes >= crate::config::get().max_file_size {
+        let cap = crate::config::get().max_file_size / MB;
         return Err(ApiError::bad_request(format!(
             "split threshold must be below the upload limit ({cap} MB) — use 0 to disable splitting"
         )));
     }
     crate::db::set_split(&state.db, bytes).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// POST /api/config/reload — re-reads config.toml from disk. Hot-applies
+/// runtime fields (upload cap, phone allowlist, thumbnail toggle); paths and
+/// credentials only take effect after a restart.
+pub async fn reload_config() -> ApiResult<Json<serde_json::Value>> {
+    let cfg = crate::config::reload().map_err(|e| e.to_string()).map_err(ApiError::bad_request)?;
+    Ok(Json(json!({
+        "ok": true,
+        "max_file_size": cfg.max_file_size,
+        "allowed_phones": cfg.allowed_phones.len(),
+        "media_thumbs": cfg.media_thumbs,
+    })))
 }
 

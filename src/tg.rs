@@ -116,13 +116,13 @@ const MAX_LOGIN_ATTEMPTS: u32 = 5;
 const LOGIN_BLOCK_SECS: u64 = 300;
 
 pub struct TgManager {
-    cfg: Arc<Config>,
+    cfg: Config,
     st: Mutex<State>,
 }
 
 
 impl TgManager {
-    pub fn new(cfg: Arc<Config>) -> Self {
+    pub fn new(cfg: Config) -> Self {
         TgManager {
             cfg,
             st: Mutex::new(State {
