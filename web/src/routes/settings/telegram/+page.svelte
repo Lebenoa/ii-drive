@@ -6,6 +6,7 @@
   import {
     addBot,
     botfatherBots,
+    botfatherDraft,
     botfatherToken,
     getBots,
     removeBot,
@@ -28,6 +29,8 @@
   let loadingOwned = $state(false);
   let ownedError = $state('');
   let importing = $state('');
+  // An unfinished @BotFather /newbot conversation the user can pick back up.
+  let draftPending = $state(false);
 
   async function loadOwned(): Promise<void> {
     if (loadingOwned) return;
@@ -63,6 +66,17 @@
   $effect(() => {
     void (async () => {
       bots = await getBots();
+    })();
+  });
+
+  // Surface a half-finished wizard without making the user open it first.
+  $effect(() => {
+    void (async () => {
+      try {
+        draftPending = (await botfatherDraft()).active;
+      } catch {
+        draftPending = false;
+      }
     })();
   });
 
@@ -130,7 +144,11 @@
       load. Adding a bot invites it into every selected storage channel as
       an admin.
     </p>
-    <BotFatherChat bind:this={chat} onCreated={(t) => addFromBotFather(t)} />
+    <BotFatherChat
+      bind:this={chat}
+      onCreated={(t) => addFromBotFather(t)}
+      ondraft={(active) => (draftPending = active)}
+    />
     <div class="sub">
       <div class="sub-head">
         <div class="sub-title">
@@ -177,10 +195,19 @@
       <div class="sub-head">
         <div class="sub-title">
           <strong>New bot</strong>
-          <span class="muted sub-note">walks @BotFather, or paste any token below</span>
+          <span class="muted sub-note">
+            {draftPending
+              ? 'a bot setup is still open with @BotFather'
+              : 'walks @BotFather, or paste any token below'}
+          </span>
         </div>
-        <button class="btn ghost" type="button" onclick={() => chat?.openChat()}>
-          Open @BotFather
+        <button
+          class="btn ghost"
+          class:accent-outline={draftPending}
+          type="button"
+          onclick={() => void chat?.openChat()}
+        >
+          {draftPending ? 'Resume bot setup' : 'Open @BotFather'}
         </button>
       </div>
       <form
@@ -253,6 +280,12 @@
 </main>
 
 <style>
+  /* Marks the entry point when a /newbot conversation is still open. */
+  .accent-outline {
+    border-color: var(--accent);
+    color: inherit;
+  }
+
   .bot-row {
     display: flex;
     gap: 8px;

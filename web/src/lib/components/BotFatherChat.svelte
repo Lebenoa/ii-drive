@@ -1,36 +1,82 @@
 <script lang="ts">
-  import { botfatherSend, type BotEntry } from '$lib/api';
+  import {
+    botfatherCancel,
+    botfatherDraft,
+    botfatherSend,
+    type BotEntry,
+    type DraftMsg,
+  } from '$lib/api';
   import { closeDialog, openDialog } from '$lib/invoker';
   import { fadeUp, stagger } from '$lib/motion';
   import Modal from './Modal.svelte';
 
   let {
     onCreated,
-  }: { onCreated: (token: string, bot: BotEntry) => void | Promise<void> } = $props();
+    ondraft,
+  }: {
+    onCreated: (token: string, bot: BotEntry) => void | Promise<void>;
+    /** Fires whenever the pending-draft state changes, so the page can
+        label its entry point "resume" instead of "create". */
+    ondraft?: (active: boolean) => void;
+  } = $props();
 
   const DIALOG = 'dlg-botfather';
-  const TOKEN_RE = /(\d{6,12}:[A-Za-z0-9_-]{30,})/;
 
   let busy = $state(false);
   let input = $state('');
   // Chat transcript; `me` entries are what we sent, `bf` BotFather's replies.
-  let log = $state<Array<{ who: 'me' | 'bf'; text: string }>>([]);
+  let log = $state<DraftMsg[]>([]);
   // Set once the transcript contains a bot token — enables one-click add.
   let foundToken = $state('');
+  // What BotFather is waiting for, so a resumed chat says so out loud.
+  let stage = $state<'name' | 'username' | 'token' | ''>('');
+  // True when the transcript was restored rather than started fresh.
+  let resumed = $state(false);
+  let cancelling = $state(false);
 
-  export function openChat(): void {
+  const STAGE_HINT: Record<string, string> = {
+    name: 'BotFather is waiting for the bot’s display name.',
+    username: 'BotFather is waiting for a username ending in “bot”.',
+    token: 'BotFather issued the token — add it to the pool.',
+  };
+
+  /**
+   * Opens the wizard. A previous run that was closed mid-question left
+   * BotFather waiting on that question, so resume the saved conversation;
+   * sending a second /newbot would be answering it with the command text.
+   */
+  export async function openChat(): Promise<void> {
     openDialog(DIALOG);
-    if (log.length === 0) void sendRaw('/newbot');
+    if (log.length > 0) return;
+    busy = true;
+    try {
+      const d = await botfatherDraft();
+      if (d.active) {
+        log = d.log;
+        foundToken = d.token;
+        stage = d.stage;
+        resumed = true;
+        ondraft?.(true);
+        return;
+      }
+    } catch {
+      // No draft readable — fall through to a fresh conversation.
+    } finally {
+      busy = false;
+    }
+    await sendRaw('/newbot');
   }
 
   export function closeChat(): void {
     closeDialog(DIALOG);
   }
 
+  /**
+   * The transcript is deliberately NOT cleared here: the conversation is
+   * still open on BotFather's side, and the server keeps the draft. Use
+   * "Cancel with BotFather" to actually end it.
+   */
   function onDialogClose(): void {
-    // Reset the transcript so a reopened chat starts a fresh /newbot.
-    log = [];
-    foundToken = '';
     busy = false;
   }
 
@@ -40,10 +86,13 @@
     input = '';
     log = [...log, { who: 'me', text }];
     try {
-      const { reply } = await botfatherSend(text);
+      const { reply, draft } = await botfatherSend(text);
       log = [...log, { who: 'bf', text: reply }];
-      const m = reply.match(TOKEN_RE);
-      if (m) foundToken = m[1];
+      if (draft.active) {
+        foundToken = draft.token;
+        stage = draft.stage;
+        ondraft?.(true);
+      }
     } catch (err) {
       log = [
         ...log,
@@ -54,6 +103,32 @@
     }
   }
 
+  /** Ends the conversation at BotFather's end and drops the saved draft. */
+  async function cancelDraft(): Promise<void> {
+    if (cancelling) return;
+    cancelling = true;
+    try {
+      await botfatherCancel();
+      reset();
+      ondraft?.(false);
+      closeChat();
+    } catch (err) {
+      log = [
+        ...log,
+        { who: 'bf', text: err instanceof Error ? err.message : String(err) },
+      ];
+    } finally {
+      cancelling = false;
+    }
+  }
+
+  function reset(): void {
+    log = [];
+    foundToken = '';
+    stage = '';
+    resumed = false;
+  }
+
   async function addCreated(): Promise<void> {
     if (!foundToken) return;
     // Derive a username for display from the token's bot id prefix.
@@ -61,17 +136,31 @@
       id: Number(foundToken.split(':')[0]),
       username: foundToken.split(':')[0],
     });
+    // The server drops the draft once the bot is in the pool.
+    reset();
+    ondraft?.(false);
     closeChat();
   }
 </script>
 
 <Modal id={DIALOG} title="Create a bot with @BotFather" onclose={onDialogClose}>
+  {#if resumed}
+    <p class="resumed" transition:fadeUp>
+      Picked up where you left off — this conversation is still open with
+      @BotFather.
+    </p>
+  {/if}
+
   <div class="chat">
     {#each log as m, i (i)}
       <p class="bubble {m.who}" in:fadeUp={{ delay: stagger(i) }}>{m.text}</p>
     {/each}
     {#if busy}<span class="spinner"></span>{/if}
   </div>
+
+  {#if stage && STAGE_HINT[stage]}
+    <p class="muted stage-hint">{STAGE_HINT[stage]}</p>
+  {/if}
 
   <!-- Not a <form>: Modal already wraps children in a method="dialog"
        form and nested forms are invalid HTML. -->
@@ -98,13 +187,25 @@
     </button>
   </div>
 
-  {#if foundToken}
-    <div class="created">
+  <div class="actions">
+    {#if foundToken}
       <button class="btn btn-primary" type="button" onclick={() => void addCreated()}>
         Add @{foundToken.split(':')[0]} to the pool
       </button>
-    </div>
-  {/if}
+    {/if}
+    {#if log.length > 0 && !foundToken}
+      <button
+        class="btn ghost busy-btn"
+        type="button"
+        disabled={cancelling}
+        onclick={() => void cancelDraft()}
+        title="Tell @BotFather to drop the half-finished bot"
+      >
+        {#if cancelling}<span class="spinner btn-spin"></span>{/if}
+        {cancelling ? 'Cancelling…' : 'Cancel with @BotFather'}
+      </button>
+    {/if}
+  </div>
 </Modal>
 
 <style>
@@ -156,8 +257,46 @@
     margin: 8px 0 0;
   }
 
-  .created {
+  /* Both footer actions share one row; either may be absent. */
+  .actions {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
     margin-top: 8px;
-    text-align: center;
+  }
+
+  .actions:empty {
+    margin-top: 0;
+  }
+
+  .resumed {
+    margin: 0 0 8px;
+    font-size: 12.5px;
+    padding: 6px 9px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .stage-hint {
+    font-size: 12.5px;
+    margin: 6px 0 0;
+  }
+
+  /* Matches the global control spinner at inline scale. */
+  .btn-spin {
+    width: 13px;
+    height: 13px;
+    border-width: 2px;
+    border-color: color-mix(in srgb, currentColor 28%, transparent);
+    border-top-color: currentColor;
+    flex-shrink: 0;
+  }
+
+  .busy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
   }
 </style>

@@ -1225,9 +1225,14 @@ fn input_peer_for(raw_id: i64, chats: &[tl::enums::Chat]) -> tl::enums::InputPee
 
 
 /// Bot API tokens look like `123456789:AA...` (digits, colon, ~35 chars).
-pub fn bot_token_regex() -> regex::Regex {
-    regex::Regex::new(r"\d{6,12}:[A-Za-z0-9_-]{30,}").expect("static regex")
+/// Compiled once: the botfather relay checks every reply against it.
+pub fn bot_token_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\d{6,12}:[A-Za-z0-9_-]{30,}").expect("static regex")
+    });
+    &RE
 }
+
 /// Rebuilds a displayable JPEG from Telegram's stripped thumbnail bytes
 /// (https://core.tlgr.org/api/files#stripped-thumbnails). Mirrors
 /// grammers' private StrippedSize::data — same header, dimensions from

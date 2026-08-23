@@ -625,6 +625,80 @@ pub async fn set_channels(
     Ok(())
 }
 
+/// A half-finished @BotFather `/newbot` conversation. BotFather keeps its
+/// own pending question, so abandoning the wizard leaves it waiting for an
+/// answer forever. Persisting the transcript lets the wizard resume that
+/// same conversation instead of firing a second `/newbot` at it — and keeps
+/// an issued token from being lost before the bot joins the pool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BotDraft {
+    /// Transcript, oldest first.
+    pub log: Vec<DraftMsg>,
+    /// Token once BotFather issued one; empty until then.
+    pub token: String,
+    /// Unix seconds of the last exchange, for staleness display.
+    pub updated_at: i64,
+}
+
+/// One line of a draft transcript. `me` is what we sent, `bf` the reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DraftMsg {
+    pub who: String,
+    pub text: String,
+}
+
+fn draft_id(user_key: &str) -> String {
+    format!("setting:botdraft_{}", user_key.replace([':', '-'], "_"))
+}
+
+/// The user's pending bot-creation draft, or None when the wizard is idle.
+pub async fn get_bot_draft(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+) -> Result<Option<BotDraft>, DbError> {
+    let mut res = db
+        .query(format!("SELECT draft_json FROM {}", draft_id(user_key)))
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    match row.get("draft_json").and_then(|v| v.as_str()) {
+        Some(s) => serde_json::from_str(s)
+            .map(Some)
+            .map_err(|e| DbError::Shape(format!("bot draft shape: {e}"))),
+        None => Ok(None),
+    }
+}
+
+pub async fn set_bot_draft(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+    draft: &BotDraft,
+) -> Result<(), DbError> {
+    let json = serde_json::to_string(draft)
+        .map_err(|e| DbError::Shape(format!("bot draft serialize: {e}")))?;
+    let mut res = db
+        .query(format!("UPSERT {} SET draft_json = $j", draft_id(user_key)))
+        .bind(("j", json))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
+/// Forgets the draft. Used once the bot reaches the pool, and when the user
+/// cancels the conversation outright.
+pub async fn clear_bot_draft(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+) -> Result<(), DbError> {
+    let mut res = db
+        .query(format!("DELETE {}", draft_id(user_key)))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +782,48 @@ mod tests {
 
         set_channels(&db, "12345", vec![]).await.unwrap();
         assert!(get_channels(&db, "12345").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bot_draft_roundtrip() {
+        let (db, _dir) = temp_db().await;
+
+        // Idle wizard: nothing stored, so nothing to resume.
+        assert!(get_bot_draft(&db, "12345").await.unwrap().is_none());
+
+        let draft = BotDraft {
+            log: vec![
+                DraftMsg { who: "me".into(), text: "/newbot".into() },
+                DraftMsg { who: "bf".into(), text: "Alright, a new bot. How are we going to call it?".into() },
+            ],
+            token: String::new(),
+            updated_at: 1_700_000_000,
+        };
+        set_bot_draft(&db, "12345", &draft).await.unwrap();
+
+        let got = get_bot_draft(&db, "12345").await.unwrap().expect("draft exists");
+        assert_eq!(got.log.len(), 2);
+        assert_eq!(got.log[1].who, "bf");
+        assert!(got.token.is_empty(), "no token issued yet");
+        assert_eq!(got.updated_at, 1_700_000_000);
+
+        // Per-user isolation: another account has its own wizard.
+        assert!(get_bot_draft(&db, "99999").await.unwrap().is_none());
+
+        // A token survives the round-trip, so an interrupted wizard can
+        // still hand the created bot to the pool.
+        let issued = BotDraft {
+            token: "123456:AAtoken".into(),
+            ..draft
+        };
+        set_bot_draft(&db, "12345", &issued).await.unwrap();
+        assert_eq!(
+            get_bot_draft(&db, "12345").await.unwrap().expect("draft").token,
+            "123456:AAtoken"
+        );
+
+        clear_bot_draft(&db, "12345").await.unwrap();
+        assert!(get_bot_draft(&db, "12345").await.unwrap().is_none());
     }
 
     #[tokio::test]

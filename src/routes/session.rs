@@ -219,6 +219,18 @@ pub async fn add_bot(
     });
     crate::db::set_bots(&state.db, &pool).await?;
 
+    // The wizard's job is done once the bot is in the pool: drop the draft
+    // so the next "create a bot" starts a fresh /newbot rather than
+    // resuming a finished conversation.
+    if let Some(uid) = state.tg.current_user_id().await {
+        let key = uid.to_string();
+        if let Ok(Some(draft)) = crate::db::get_bot_draft(&state.db, &key).await {
+            if draft.token == token {
+                crate::db::clear_bot_draft(&state.db, &key).await?;
+            }
+        }
+    }
+
     // Wire the whole pool into every selected storage channel.
     let selected = match state.tg.current_user_id().await {
         Some(uid) => crate::db::get_channels(&state.db, &uid.to_string())

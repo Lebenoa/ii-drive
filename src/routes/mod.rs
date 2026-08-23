@@ -8,7 +8,10 @@ pub use files::{
     list_folders, limits, media_token, move_file, raw_file, set_visibility, upload_file,
 };
 
-pub use botfather::{bots as botfather_bots, send as botfather_send, token as botfather_token};
+pub use botfather::{
+    bots as botfather_bots, cancel_draft as botfather_cancel, draft as botfather_draft,
+    send as botfather_send, token as botfather_token,
+};
 pub use session::{
     add_bot, auth_code, auth_password, auth_phone, avatar, create_channel, get_rules, get_settings,
     list_bots, list_channels, me, reload_config, remove_bot, save_rules, save_settings,

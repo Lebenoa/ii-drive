@@ -184,9 +184,40 @@ export async function removeBot(id: number): Promise<void> {
   await request(`/api/bot/${id}`, { method: 'DELETE' });
 }
 
+/** One line of a saved @BotFather transcript. */
+export interface DraftMsg {
+  who: 'me' | 'bf';
+  text: string;
+}
+
+/**
+ * A pending /newbot conversation. BotFather holds the question it asked, so
+ * the wizard resumes this instead of starting a second one.
+ * `stage` says what BotFather is waiting for.
+ */
+export type BotDraft =
+  | { active: false }
+  | {
+      active: true;
+      stage: 'name' | 'username' | 'token';
+      token: string;
+      updated_at: number;
+      log: DraftMsg[];
+    };
+
 /** POST /api/botfather — relay one message to @BotFather, get its reply. */
-export function botfatherSend(text: string): Promise<{ reply: string }> {
+export function botfatherSend(text: string): Promise<{ reply: string; draft: BotDraft }> {
   return request('/api/botfather', { method: 'POST', body: { text } });
+}
+
+/** GET /api/botfather/draft — the unfinished /newbot conversation, if any. */
+export function botfatherDraft(): Promise<BotDraft> {
+  return request('/api/botfather/draft');
+}
+
+/** DELETE /api/botfather/draft — /cancel at BotFather, then forget the draft. */
+export function botfatherCancel(): Promise<{ ok: true; cancelled: boolean }> {
+  return request('/api/botfather/draft', { method: 'DELETE' });
 }
 
 /** GET /api/botfather/bots — owned bot names parsed from BotFather's /mybots menu */

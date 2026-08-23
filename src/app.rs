@@ -31,6 +31,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/botfather/token", post(crate::routes::botfather_token))
         .route(
+            "/api/botfather/draft",
+            get(crate::routes::botfather_draft).delete(crate::routes::botfather_cancel),
+        )
+        .route(
             "/api/channels",
             get(crate::routes::list_channels).post(crate::routes::select_channels),
         )
