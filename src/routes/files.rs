@@ -180,6 +180,19 @@ pub async fn delete_folder(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// Human-readable byte count for error messages ("2.0 GiB").
+fn bytes_repr(n: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if n >= GIB {
+        format!("{:.1} GiB", n as f64 / GIB as f64)
+    } else if n >= MIB {
+        format!("{:.1} MiB", n as f64 / MIB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 pub async fn upload_file(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -195,9 +208,17 @@ pub async fn upload_file(
     let max = crate::config::get().max_file_size;
     if declared > max {
         return Err(ApiError::too_large(format!(
-            "file exceeds limit of {max} bytes"
+            "file exceeds limit of {} bytes",
+            bytes_repr(max)
         )));
     }
+
+    // Telegram stores each document separately and caps its size (2 GiB on
+    // a free account) regardless of the configured drive limit — so a
+    // `max_file_size` above that is honored by transparently chunking the
+    // file into cap-sized documents and re-joining them on download.
+    const TG_DOC_CAP: u64 = 2 * 1024 * 1024 * 1024;
+    let over_cap = declared > TG_DOC_CAP;
 
     // Target folder comes from a header ("" = root); multipart bodies cannot
     // carry extra fields alongside the streamed file field.
@@ -221,18 +242,18 @@ pub async fn upload_file(
     // several download bots, since each part message can be fetched by a
     // different bot under its own rate limit.
     let split_bytes = crate::db::get_split(&state.db).await.unwrap_or(0);
-    let part_size = if split_bytes > 0 && declared > split_bytes {
+    let part_size = if over_cap {
+        // The Telegram document cap wins over the user's split threshold.
+        TG_DOC_CAP
+    } else if split_bytes > 0 && declared > split_bytes {
         split_bytes
     } else {
         declared.max(1)
     };
-    // More than 64 parts means the split threshold is far below the file
-    // limit; refuse rather than silently merging the tail into one huge
-    // last part.
     let nparts = declared.div_ceil(part_size).max(1) as usize;
     if nparts > 64 {
         return Err(ApiError::bad_request(format!(
-            "file would split into {nparts} parts (max 64); raise the split threshold in settings"
+            "file would need {nparts} parts (max 64)"
         )));
     }
 
@@ -250,8 +271,15 @@ pub async fn upload_file(
             "no storage channels selected — complete channel selection in the drive first",
         ));
     }
+    // Over-cap chunked files keep ALL parts in one channel — a single
+    // file re-joined from parts of one chat is cleaner to fetch and audit.
+    // Which channel is chosen rotates per upload so parallel large files
+    // spread across the selection; ordinary split uploads keep the
+    // per-part round-robin.
+    let base = state.tg.next_rotation();
     let chat_for = |i: usize| -> String {
-        selected[i % selected.len()].chat.to_ascii_lowercase()
+        let idx = if over_cap { base } else { base + i };
+        selected[idx % selected.len()].chat.to_ascii_lowercase()
     };
 
     // Uploaders start immediately (they must, to drain their channels while
