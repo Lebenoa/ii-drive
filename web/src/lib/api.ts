@@ -184,6 +184,11 @@ export async function removeBot(id: number): Promise<void> {
   await request(`/api/bot/${id}`, { method: 'DELETE' });
 }
 
+/** POST /api/botfather — relay one message to @BotFather, get its reply. */
+export function botfatherSend(text: string): Promise<{ reply: string }> {
+  return request('/api/botfather', { method: 'POST', body: { text } });
+}
+
 /** POST /api/channels/create — creates a broadcast channel on Telegram */
 export async function createChannel(title: string, about = ''): Promise<ChannelInfo> {
   const res = await request<{ channel: ChannelInfo }>('/api/channels/create', {

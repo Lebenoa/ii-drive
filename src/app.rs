@@ -24,6 +24,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/me", get(crate::routes::me))
         .route("/api/avatar", get(crate::routes::avatar))
         .route("/api/media-token", get(crate::routes::media_token))
+        .route("/api/botfather", post(crate::routes::botfather_send))
         .route(
             "/api/channels",
             get(crate::routes::list_channels).post(crate::routes::select_channels),

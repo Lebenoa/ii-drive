@@ -1,0 +1,111 @@
+.settings-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.back {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13.5px;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.back:hover {
+  color: inherit;
+}
+
+.title {
+  font-weight: 700;
+}
+
+/* Category navigation under the topbar. */
+.cats {
+  width: min(720px, 100%);
+  margin: 14px auto 0;
+  padding: 0 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cat {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+  background: var(--panel);
+  transition:
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.cat:hover {
+  color: inherit;
+}
+
+.cat.active {
+  color: inherit;
+  border-color: var(--accent, currentColor);
+  font-weight: 600;
+}
+
+.content {
+  width: min(720px, 100%);
+  margin: 14px auto 16px;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Cards here carry mostly single controls — tighten the generous
+   global card padding instead of shipping empty margins. */
+.section {
+  padding: 16px 18px;
+}
+
+.section h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.hint {
+  font-size: 12.5px;
+  margin: 0 0 10px;
+}
+
+.ok-text {
+  color: var(--ok, #2e9e5b);
+  font-size: 12.5px;
+  margin: 4px 0 0;
+}
+
+.busy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+/* Reuses the global .spinner animation at control scale. */
+.btn-spin {
+  width: 13px;
+  height: 13px;
+  border-width: 2px;
+  border-color: color-mix(in srgb, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  flex-shrink: 0;
+}
