@@ -39,14 +39,26 @@ pub struct BotTokenBody {
 }
 
 /// GET /api/botfather/bots — ask @BotFather for /mybots and return the
-/// owned-bot names parsed from its inline menu button labels.
+/// owned-bot names parsed from its inline menu button labels. Bots already
+/// configured in this drive are filtered out.
 pub async fn bots(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     let names = state
         .tg
         .botfather_my_bots()
         .await
         .map_err(ApiError::bad_request)?;
-    Ok(Json(json!({ "bots": names })))
+    let configured: std::collections::HashSet<String> = state
+        .tg
+        .bot_list()
+        .await
+        .into_iter()
+        .map(|(_, username)| username.trim_start_matches('@').to_lowercase())
+        .collect();
+    let bots: Vec<String> = names
+        .into_iter()
+        .filter(|n| !configured.contains(&n.trim_start_matches('@').to_lowercase()))
+        .collect();
+    Ok(Json(json!({ "bots": bots })))
 }
 
 /// POST /api/botfather/token {bot} — walk the BotFather menus to fetch one
