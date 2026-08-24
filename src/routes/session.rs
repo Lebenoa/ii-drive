@@ -437,8 +437,8 @@ pub async fn reload_config() -> ApiResult<Json<serde_json::Value>> {
 mod tests {
     use super::*;
 
-    /// Scratch state on an in-memory store, so a handler test costs no
-    /// engine arena (see `db::harness`).
+    /// Scratch state on an in-memory store, so a handler test needs no temp
+    /// directory (see `db::open_mem`).
     async fn temp_state() -> AppState {
         let db = crate::db::open_mem().await.expect("open test db");
         crate::app::shared_state(db)

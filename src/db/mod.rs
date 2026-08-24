@@ -45,8 +45,9 @@ pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
 }
 
 /// Scratch store for tests. Same `local::Db` client as [`open`], so every
-/// query behaves identically, but nothing touches the filesystem and no
-/// arena has to be reclaimed between cases.
+/// query behaves identically, with no filesystem to set up or clean out.
+/// Measured: the suite runs in ~1.5s on this engine versus ~6.5s
+/// file-backed, and a test can never see another's leftover files.
 #[cfg(test)]
 pub(crate) async fn open_mem() -> Result<surrealdb::Surreal<Conn>, DbError> {
     let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(()).await?;
@@ -73,14 +74,12 @@ async fn bootstrap(db: &surrealdb::Surreal<Conn>) -> Result<(), DbError> {
 
 /// Test-only serialization for the *file-backed* store.
 ///
-/// Every `open()` builds a SurrealKv engine that commits roughly a
-/// gigabyte up front and releases it only once its store finishes closing
-/// on background tasks — and the close outlives the test, because each
-/// `#[tokio::test]` drops its runtime first. Arenas therefore accumulate
-/// across a run and the process dies on a 1 GiB allocation at whatever
-/// test happens to be next, at any `--test-threads`. Logic tests avoid the
-/// problem entirely by using [`open_mem`]; the few cases that genuinely
-/// need a file on disk hold this lock so only one arena is ever live.
+/// Opening several SurrealKv engines at once has crashed a run here, and a
+/// store keeps closing on background tasks after its test has dropped the
+/// runtime, so the overlap is not visible from the test body. Measured
+/// cause unknown; holding this lock keeps one file-backed engine live at a
+/// time, which is cheap insurance for the two tests that need a real file.
+/// Logic tests sidestep it entirely with [`open_mem`].
 #[cfg(test)]
 pub(crate) mod harness {
     use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -92,10 +91,10 @@ pub(crate) mod harness {
 
     pub(crate) fn acquire() -> EngineGuard {
         // Poisoning just means an earlier DB test panicked. This lock
-        // guards memory headroom, not shared data, so carry on.
+        // orders engine startup, not shared data, so carry on.
         let held = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        // The previous test released this lock as it unwound; wait for its
-        // engine to hand the arena back before opening the next one.
+        // The previous test released this lock as it unwound, while its
+        // store was still closing; give that a moment to finish.
         std::thread::sleep(std::time::Duration::from_millis(250));
         EngineGuard(held)
     }
@@ -109,8 +108,7 @@ mod tests {
     /// the same as they did when the store was a temp directory.
     struct TestEnv;
 
-    /// Scratch store for a single test: real schema, no filesystem, no
-    /// engine arena to reclaim afterwards.
+    /// Scratch store for a single test: real schema, no filesystem.
     async fn temp_db() -> (surrealdb::Surreal<Conn>, TestEnv) {
         (open_mem().await.expect("open test db"), TestEnv)
     }
