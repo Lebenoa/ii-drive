@@ -165,12 +165,22 @@ export function splitNumber(
   current: Country,
 ): { country: Country; national: string } {
   const digits = raw.replace(/\D/g, '');
-  // "+" or the "00" international prefix both mean "a country code follows".
-  const international = raw.trim().startsWith('+') || digits.startsWith('00');
-  const body = digits.startsWith('00') ? digits.slice(2) : digits;
+  const trimmed = raw.trim();
+  // "+" or a literal "00" prefix mean "a country code follows". Checked on
+  // the raw text, not the digit-crunched form: internal separators could
+  // otherwise fabricate a leading "00" out of a plain national number.
+  const international = trimmed.startsWith('+') || trimmed.startsWith('00');
+  const body = digits.startsWith('00') && international ? digits.slice(2) : digits;
 
   if (international && body.length > 0) {
-    const hit = BY_DIAL_LENGTH.find((c) => body.startsWith(c.dial) && body.length > c.dial.length);
+    // Several entries share a dial code (+1 US/Canada, +7 RU/KZ). When the
+    // current selection dials the same code, keep it, so an American typing
+    // "+1…" is not told they are in Canada.
+    const matches = (c: Country) => body.startsWith(c.dial) && body.length > c.dial.length;
+    const hit =
+      BY_DIAL_LENGTH.find((c) => matches(c) && c.iso2 === current.iso2) ??
+      BY_DIAL_LENGTH.find((c) => matches(c) && c.iso2 === guessCountry().iso2) ??
+      BY_DIAL_LENGTH.find(matches);
     if (hit) return { country: hit, national: stripTrunk(body.slice(hit.dial.length)) };
     // Digits so far are still inside a dial code (mid-typing): keep them as
     // the national part rather than guessing a country.
@@ -178,18 +188,32 @@ export function splitNumber(
   return { country: current, national: stripTrunk(body) };
 }
 
-/** Drops the national trunk prefix: "0988962019" -> "988962019". */
+/**
+ * Drops the national trunk prefix — at most one zero. Italy is the reason
+ * this is not `/^0+/`: its landline numbers keep the leading zero even
+ * internationally (+39 06…), so a greedy strip mangles them.
+ */
 export function stripTrunk(digits: string): string {
-  return digits.replace(/^0+/, '');
-}
-
-/** The value the API wants: "+" + dial code + national digits. */
-export function toE164(country: Country, national: string): string {
-  return `+${country.dial}${stripTrunk(national.replace(/\D/g, ''))}`;
+  return digits.replace(/^0/, '');
 }
 
 /**
- * Whether this platform actually draws flag emoji.
+ * The value the API wants: "+" + dial code + national digits.
+ *
+ * Deliberately does NOT re-run `stripTrunk`: the caller has already applied
+ * it at the layer that knew whether a zero was a trunk prefix or part of the
+ * number (Italy keeps hers).
+ */
+export function toE164(country: Country, national: string): string {
+  return `+${country.dial}${national.replace(/\D/g, '')}`;
+}
+
+let flagSupport: boolean | null = null;
+
+/**
+ * Whether this platform actually draws flag emoji. Measured once, lazily:
+ * the first call may happen during SSR, where the answer is trivially no,
+ * and that must not poison the client's answer.
  *
  * Windows ships no flag glyphs, so a regional-indicator pair falls back to
  * the two letters ("TH"). Measuring is the only way to know: the pair is
@@ -198,6 +222,7 @@ export function toE164(country: Country, national: string): string {
  * flag.
  */
 export function flagsRender(): boolean {
+  if (flagSupport !== null) return flagSupport;
   if (typeof document === 'undefined') return false;
   const ctx = document.createElement('canvas').getContext('2d');
   if (!ctx) return false;
@@ -205,5 +230,6 @@ export function flagsRender(): boolean {
   const flag = ctx.measureText(flagOf('TH')).width;
   const letters = ctx.measureText('TH').width;
   // Same width means the glyphs are the letters themselves.
-  return flag > 0 && flag < letters * 0.9;
+  flagSupport = flag > 0 && flag < letters * 0.9;
+  return flagSupport;
 }

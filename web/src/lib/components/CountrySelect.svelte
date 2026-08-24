@@ -42,6 +42,12 @@
     ];
   });
 
+  /** Row the arrow keys point at, for `aria-activedescendant`. */
+  const activeId = $derived.by(() => {
+    const hit = matches[active];
+    return open && hit ? `country-opt-${hit.iso2}` : undefined;
+  });
+
   function show(): void {
     if (disabled) return;
     open = true;
@@ -178,7 +184,8 @@
         aria-label="Search countries"
         role="combobox"
         aria-expanded="true"
-        aria-controls="country-list"
+        aria-controls={open ? 'country-list' : undefined}
+        aria-activedescendant={activeId}
         onkeydown={onKey}
       />
       <div id="country-list" class="list" role="listbox" aria-label="Countries" bind:this={listEl}>
@@ -188,6 +195,7 @@
             class="row"
             class:picked={c.iso2 === country.iso2}
             data-active={i === active}
+            id={`country-opt-${c.iso2}`}
             role="option"
             aria-selected={c.iso2 === country.iso2}
             onclick={() => choose(c)}
