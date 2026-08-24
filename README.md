@@ -16,12 +16,32 @@ the interface.
 
 ### What you need
 
-- Rust 1.85+ and Node.js 18+ (any package manager; examples use `nub`)
+- A bundle for your platform from
+  [GitHub Releases](https://github.com/Lebenoa/ii-drive/releases):
+  `ii-drive-<version>-windows-x64.zip` or `ii-drive-<version>-linux-x64.tar.gz`.
+  Everything is inside — server, web UI, config template. No Rust, Node or
+  build tools required.
 - A Telegram **api_id / api_hash** — create an app at
   <https://my.telegram.org/apps>
 - A Telegram account (a normal user account, not a bot) and its phone number
 
-### 1. Configure the server
+Prefer building from source? See [Development](#development).
+
+### 1. Unpack the bundle
+
+Download and extract the archive for your platform. You get one folder:
+
+```
+ii-drive[.exe]          the server (web UI already included)
+config.example.toml     configuration template
+web/dist/               the built web app
+locales/en.json         English dictionary
+README.md
+```
+
+Keep the files together — relative paths resolve beside the executable.
+
+### 2. Configure
 
 ```sh
 cp config.example.toml config.toml
@@ -38,17 +58,10 @@ Open `config.toml` and set four things:
 Everything else has sane defaults. The full option table is under
 [Configuration reference](#configuration-reference).
 
-### 2. Build
-
-```sh
-cd web && nub install && nub run build && cd ..   # or: npm/pnpm/bun run build
-cargo build --release
-```
-
 ### 3. Run
 
 ```sh
-./target/release/ii-drive        # or target\release\ii-drive.exe on Windows
+./ii-drive              # Windows: ii-drive.exe
 ```
 
 The server listens on `http://127.0.0.1:8080` unless you changed
@@ -262,6 +275,17 @@ just log in again through the web UI.
 - A Telegram **api_id / api_hash** from <https://my.telegram.org/apps>
 - A Telegram account (user account, not a bot) for uploads
 
+### Building from source
+
+```sh
+cd web && nub install && nub run build && cd ..   # or: npm/pnpm/bun run build
+cargo build --release
+./target/release/ii-drive
+```
+
+The release bundle layout matches the repo defaults, so a source build runs
+the same way: keep `web/dist` and `locales/en.json` beside the binary, or
+point `web_dist`/`locales_dir` in config.toml at them.
 ### Commands
 
 ```sh
