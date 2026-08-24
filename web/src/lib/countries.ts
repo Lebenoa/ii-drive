@@ -207,29 +207,3 @@ export function stripTrunk(digits: string): string {
 export function toE164(country: Country, national: string): string {
   return `+${country.dial}${national.replace(/\D/g, '')}`;
 }
-
-let flagSupport: boolean | null = null;
-
-/**
- * Whether this platform actually draws flag emoji. Measured once, lazily:
- * the first call may happen during SSR, where the answer is trivially no,
- * and that must not poison the client's answer.
- *
- * Windows ships no flag glyphs, so a regional-indicator pair falls back to
- * the two letters ("TH"). Measuring is the only way to know: the pair is
- * markedly narrower as one flag than as two letters. Callers show an ISO
- * chip instead when this is false, which beats letters pretending to be a
- * flag.
- */
-export function flagsRender(): boolean {
-  if (flagSupport !== null) return flagSupport;
-  if (typeof document === 'undefined') return false;
-  const ctx = document.createElement('canvas').getContext('2d');
-  if (!ctx) return false;
-  ctx.font = '24px sans-serif';
-  const flag = ctx.measureText(flagOf('TH')).width;
-  const letters = ctx.measureText('TH').width;
-  // Same width means the glyphs are the letters themselves.
-  flagSupport = flag > 0 && flag < letters * 0.9;
-  return flagSupport;
-}

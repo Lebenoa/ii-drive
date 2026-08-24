@@ -1,3 +1,17 @@
+/*
+ * Country flags as emoji do not exist in Windows fonts, so a
+ * regional-indicator pair degrades to two letters ("US"). This bundled font
+ * supplies the missing glyphs; 76 KB covers every flag. Art is Twemoji,
+ * (c) Twitter, Inc, CC-BY 4.0 — packaged by
+ * country-flag-emoji-polyfill (MIT). Listed first in .flag font stacks.
+ */
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  src: url('$lib/fonts/TwemojiCountryFlags.woff2') format('woff2');
+  font-display: swap;
+  unicode-range: U+1F1E6-1F1FF;
+}
+
 :root {
   --bg: #0e1116;
   --panel: #151a23;

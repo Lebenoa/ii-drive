@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { COUNTRIES, flagsRender, type Country } from '$lib/countries';
+  import { COUNTRIES, type Country } from '$lib/countries';
   import { pop } from '$lib/motion';
 
   /**
@@ -20,11 +20,6 @@
   let rootEl = $state<HTMLElement | null>(null);
   let searchEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLElement | null>(null);
-
-  // Measured once: Windows has no flag glyphs, so a regional-indicator pair
-  // renders as the two letters. Where that happens we show a deliberate ISO
-  // chip instead of letters masquerading as a flag.
-  const flags = flagsRender();
 
   const matches = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -162,11 +157,7 @@
       }
     }}
   >
-    {#if flags}
-      <span class="flag" aria-hidden="true">{country.flag}</span>
-    {:else}
-      <span class="iso" aria-hidden="true">{country.iso2}</span>
-    {/if}
+    <span class="flag" aria-hidden="true">{country.flag}</span>
     <span class="dial">+{country.dial}</span>
     <span class="caret" aria-hidden="true">▾</span>
   </button>
@@ -201,11 +192,7 @@
             onclick={() => choose(c)}
             onmousemove={() => (active = i)}
           >
-            {#if flags}
-              <span class="flag" aria-hidden="true">{c.flag}</span>
-            {:else}
-              <span class="iso" aria-hidden="true">{c.iso2}</span>
-            {/if}
+            <span class="flag" aria-hidden="true">{c.flag}</span>
             <span class="name">{c.name}</span>
             <span class="muted code">+{c.dial}</span>
           </button>
@@ -257,21 +244,16 @@
     cursor: not-allowed;
   }
 
+  /* Bundled font first: Windows has no flag glyphs of its own. */
   .flag {
+    font-family:
+      'Twemoji Country Flags',
+      'Apple Color Emoji',
+      'Segoe UI Emoji',
+      'Noto Color Emoji',
+      sans-serif;
     font-size: 17px;
     line-height: 1;
-  }
-
-  /* Flag stand-in where the platform lacks the glyphs. */
-  .iso {
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    color: var(--muted);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 3px;
-    line-height: 1.2;
   }
 
   .dial {
