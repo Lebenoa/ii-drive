@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod error;
 mod routes;
+mod setup;
 mod state;
 mod stream;
 mod tg;
@@ -22,6 +23,20 @@ async fn main() {
         .nth(1)
         .filter(|a| !a.starts_with('-'))
         .unwrap_or_else(|| "config.toml".to_string());
+
+    // First run on this data directory: no config yet — serve the setup
+    // wizard, which writes the file and exits. Starting again then boots
+    // the real server.
+    if !std::path::Path::new(&config_path).exists() {
+        tracing::info!("`{config_path}` not found — starting first-run setup wizard");
+        if let Err(e) = setup::run(std::path::PathBuf::from(&config_path)).await {
+            eprintln!("setup wizard error: {e}");
+            std::process::exit(1);
+        }
+        println!();
+        println!("Setup complete. Start ii-drive again to launch your drive.");
+        std::process::exit(0);
+    }
 
     // Relative data paths must follow the config file, not the process CWD:
     // starting the binary from another directory would otherwise create a
