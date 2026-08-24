@@ -14,6 +14,71 @@ the interface.
 
 ## Get started
 
+### What you need
+
+- Rust 1.85+ and Node.js 18+ (any package manager; examples use `nub`)
+- A Telegram **api_id / api_hash** — create an app at
+  <https://my.telegram.org/apps>
+- A Telegram account (a normal user account, not a bot) and its phone number
+
+### 1. Configure the server
+
+```sh
+cp config.example.toml config.toml
+```
+
+Open `config.toml` and set four things:
+
+| Key | Where to get it |
+|---|---|
+| `api_id` / `api_hash` | from my.telegram.org (step above) |
+| `allowed_phones` | your phone number(s), e.g. `["+15551234567"]` — only these may sign in |
+| `secret` | any long random string; it signs web session tokens |
+
+Everything else has sane defaults. The full option table is under
+[Configuration reference](#configuration-reference).
+
+### 2. Build
+
+```sh
+cd web && nub install && nub run build && cd ..   # or: npm/pnpm/bun run build
+cargo build --release
+```
+
+### 3. Run
+
+```sh
+./target/release/ii-drive        # or target\release\ii-drive.exe on Windows
+```
+
+The server listens on `http://127.0.0.1:8080` unless you changed
+`host`/`port`.
+
+### 4. Sign in
+
+Open `http://127.0.0.1:8080`, enter your phone number, and confirm with the
+code Telegram sends you (plus your 2FA password, if enabled). You are now
+signed in to the drive.
+
+### 5. Pick storage channels
+
+Right after login the UI asks you to choose one or more **storage channels** —
+these are where your files actually live inside Telegram. You can pick any
+channel you created or administer, or Saved Messages. No channels selected =
+no uploads.
+
+### 6. Add download bots (recommended)
+
+Under **Settings → Telegram**, add one or more bots — either import an
+existing one or let the built-in @BotFather chat create one for you. Bots are
+invited into your storage channels automatically and give uploads and
+downloads extra parallel connections; more bots means more speed. Skip this
+and everything still works through your own account.
+
+That's it — drag files into the drive to upload them.
+
+### Configuration reference
+
 1. **Configure** — copy the example and edit:
 
    ```sh
@@ -38,34 +103,20 @@ the interface.
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
    | `locales_dir` | `locales` | Web-UI translation files, served under `/locales/`; downloaded on demand |
    | `media_thumbs` | `true` | ffmpeg image/video thumbnails; audio cover art is extracted regardless |
+   | `upload_strategy` | `stream` | How an accepted upload reaches Telegram: `stream` relays the body directly, `spill` buffers to disk first so all parts drain at full rate |
+   | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (`spill` strategy + resumable uploads) |
 
-2. **Build the web UI:**
+### Multi-account notes
 
-   ```sh
-   cd web && nub install && nub run build && cd ..   # or: npm/pnpm/bun install && npm/pnpm/bun run build
-   ```
-
-3. **Build and run the server:**
-
-   ```sh
-   cargo build --release
-   ./target/release/ii-drive
-   ```
-
-4. **Log in** — open `http://127.0.0.1:8080` and sign in with a phone number
-   listed in `allowed_phones`: Telegram sends you a login code; enter it (and
-   your 2FA password, if enabled). The issued web token stays valid for
-   `token_ttl_secs`.
-
-   Every allowed phone number can be signed in **at the same time**. Each
-   account gets its own MTProto session under `<session_path's directory>/sessions/<telegram-user-id>.db`,
-   and its own files, folders, storage channels, download bots, routing rules
-   and upload-split threshold — an account never sees another's. Sessions are
-   restored on start, so a restart does not log anybody out; `POST
-   /api/auth/logout` drops just the calling account. An install that predates
-   multi-account support keeps working: the old single session at
-   `session_path` is migrated into the new layout on first start and every
-   existing file and folder is assigned to that account.
+Every allowed phone number can be signed in **at the same time**. Each
+account gets its own MTProto session under `<session_path's directory>/sessions/<telegram-user-id>.db`,
+and its own files, folders, storage channels, download bots, routing rules
+and upload-split threshold — an account never sees another's. Sessions are
+restored on start, so a restart does not log anybody out; `POST
+/api/auth/logout` drops just the calling account. An install that predates
+multi-account support keeps working: the old single session at
+`session_path` is migrated into the new layout on first start and every
+existing file and folder is assigned to that account.
 
 
 ### Storage channels
