@@ -3,6 +3,7 @@
   import CountrySelect from '$lib/components/CountrySelect.svelte';
   import { guessCountry, splitNumber, toE164, type Country } from '$lib/countries';
   import { fadeOnly, slideX } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   let { onSuccess }: { onSuccess: () => void } = $props();
 
@@ -57,7 +58,7 @@
     if (loginId.length === 0) {
       code = '';
       step = 'phone';
-      error = 'That sign-in attempt is no longer valid. Request a new code.';
+      error = t('login.staleAttempt');
       return;
     }
     busy = true;
@@ -85,7 +86,7 @@
     try {
       const res = await sendLoginPassword(loginId, tgPassword);
       if (res.status === 'ok') finish(res.token);
-      else error = res.hint ?? 'Password required.';
+      else error = res.hint ?? t('login.passwordRequired');
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -100,7 +101,7 @@
     onsubmit={step === 'phone' ? submitPhone : step === 'code' ? submitCode : submitPassword}
   >
     <h1 class="brand">ii-drive</h1>
-    <p class="muted tagline">Sign in with your Telegram account</p>
+    <p class="muted tagline">{t('login.tagline')}</p>
 
     <!-- Keyed so each step is its own block: the outgoing one fades while
          the incoming slides in over it. Both share one grid cell, so the
@@ -109,7 +110,7 @@
       {#key step}
         <div class="step" in:slideX={{ x: 14 }} out:fadeOnly>
           {#if step === 'phone'}
-            <label class="lbl" for="phone">Phone number</label>
+            <label class="lbl" for="phone">{t('login.phone')}</label>
             <div class="phone-row">
               <CountrySelect
                 {country}
@@ -136,7 +137,7 @@
               />
             </div>
           {:else if step === 'code'}
-            <label class="lbl" for="code">Confirmation code sent to Telegram</label>
+            <label class="lbl" for="code">{t('login.codeLabel')}</label>
             <input
               id="code"
               class="field"
@@ -148,7 +149,7 @@
               disabled={busy}
             />
           {:else}
-            <label class="lbl" for="tgpw">Two-factor password</label>
+            <label class="lbl" for="tgpw">{t('login.password')}</label>
             <input
               id="tgpw"
               class="field"
@@ -177,12 +178,12 @@
     >
       {#if busy}<span class="spinner btn-spin"></span>{/if}
       {busy
-        ? 'Working…'
+        ? t('common.working')
         : step === 'phone'
-          ? 'Send code'
+          ? t('login.sendCode')
           : step === 'code'
-            ? 'Sign in'
-            : 'Confirm'}
+            ? t('login.signIn')
+            : t('login.confirm')}
     </button>
   </form>
 </div>

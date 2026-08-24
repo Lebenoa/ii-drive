@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use futures::stream::{Stream, unfold};
 use futures::StreamExt;
+use futures::stream::{Stream, unfold};
 
 use crate::tg::{PeerRef, is_file_reference_error};
 
@@ -28,7 +28,7 @@ pub async fn file_stream_from(
     chat: &str,
     start: u64,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
-    let (client, peer) = tg.download_target(chat).await?;
+    let (client, peer, _bot) = tg.pool_target(chat).await?;
 
     let st = StreamState {
         client,
@@ -132,11 +132,7 @@ where
                 Some(Ok(b)) => {
                     let take = left.min(b.len() as u64) as usize;
                     left -= take as u64;
-                    let out = if take == b.len() {
-                        b
-                    } else {
-                        b.slice(..take)
-                    };
+                    let out = if take == b.len() { b } else { b.slice(..take) };
                     Some((Ok(out), (s, left, left > 0)))
                 }
                 Some(Err(e)) => Some((Err(e), (s, left, false))),
@@ -173,7 +169,12 @@ pub async fn parts_stream_from(
     let first = &parts[idx];
     let cur: BoxedPart =
         Box::pin(file_stream_from(&tg, first.message_id, &first.chat, skip).await?);
-    let st = PartsState { tg, parts, idx, cur: Some(cur) };
+    let st = PartsState {
+        tg,
+        parts,
+        idx,
+        cur: Some(cur),
+    };
     Ok(unfold(st, |mut st| async move {
         loop {
             let item = match st.cur.as_mut()?.next().await {
@@ -215,10 +216,7 @@ mod tests {
     #[tokio::test]
     async fn cap_bounds_stream_to_limit() {
         let src = futures::stream::iter(vec![chunk(1), chunk(2), chunk(3)]);
-        let out: Vec<_> = cap(src, 10)
-            .map(|r| r.unwrap().to_vec())
-            .collect()
-            .await;
+        let out: Vec<_> = cap(src, 10).map(|r| r.unwrap().to_vec()).collect().await;
         // 10 of 12 bytes: first two chunks whole, third sliced to 2.
         assert_eq!(out.len(), 3);
         assert_eq!(out[2].len(), 2);
@@ -228,10 +226,7 @@ mod tests {
     #[tokio::test]
     async fn cap_at_zero_ends_immediately() {
         let src = futures::stream::iter(vec![chunk(1)]);
-        let out: Vec<_> = cap(src, 0)
-            .map(|r| r.unwrap().to_vec())
-            .collect()
-            .await;
+        let out: Vec<_> = cap(src, 0).map(|r| r.unwrap().to_vec()).collect().await;
         assert!(out.is_empty());
     }
 }

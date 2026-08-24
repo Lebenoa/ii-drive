@@ -39,6 +39,15 @@ tempfile = "3"
 surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-mem"] }
 
 [profile.release]
+# Whole-program view: fat LTO plus a single codegen unit let LLVM inline
+# and prune across crate boundaries. Compile time rises sharply; that cost
+# belongs to releases only.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# No unwinding machinery: smaller binary, faster panic path. Consequence:
+# a panic in ANY task takes down the whole process instead of killing only
+# that task (tokio can no longer contain it).
+panic = "abort"
 strip = true
-lto = true
 

@@ -22,7 +22,9 @@ pub fn extract(data: &[u8]) -> Option<Vec<u8>> {
 
 /// Sanity check that the payload starts like a real image.
 fn looks_like_image(b: &[u8]) -> bool {
-    b.starts_with(&[0xff, 0xd8]) || b.starts_with(&[0x89, b'P', b'N', b'G']) || b.starts_with(b"GIF")
+    b.starts_with(&[0xff, 0xd8])
+        || b.starts_with(&[0x89, b'P', b'N', b'G'])
+        || b.starts_with(b"GIF")
 }
 
 fn id3_apic(data: &[u8]) -> Option<Vec<u8>> {
@@ -63,7 +65,10 @@ fn apic_payload(frame: &[u8]) -> Option<Vec<u8>> {
     let enc = frame[0];
     let mime_end = frame[1..].iter().position(|&b| b == 0)? + 1;
     let mime = &frame[1..1 + mime_end - 1];
-    if !mime.is_empty() && !mime.eq_ignore_ascii_case(b"image/jpeg") && !mime.eq_ignore_ascii_case(b"image/png") {
+    if !mime.is_empty()
+        && !mime.eq_ignore_ascii_case(b"image/jpeg")
+        && !mime.eq_ignore_ascii_case(b"image/png")
+    {
         // Unknown mime: still try — the bytes decide below.
     }
     let mut p = 1 + mime_end + 1; // skip encoding, mime+NUL, picture type
@@ -148,9 +153,19 @@ mod tests {
 
     fn id3(frames: &[u8]) -> Vec<u8> {
         let mut out = vec![b'I', b'D', b'3', 3, 0, 0];
-        let sz = syncsafe(&[0, (frames.len() >> 14) as u8, (frames.len() >> 7) as u8, frames.len() as u8]);
+        let sz = syncsafe(&[
+            0,
+            (frames.len() >> 14) as u8,
+            (frames.len() >> 7) as u8,
+            frames.len() as u8,
+        ]);
         assert_eq!(sz, frames.len(), "test frame must fit syncsafe");
-        out.extend_from_slice(&[0, (frames.len() >> 14) as u8 & 0x7f, (frames.len() >> 7) as u8 & 0x7f, frames.len() as u8 & 0x7f]);
+        out.extend_from_slice(&[
+            0,
+            (frames.len() >> 14) as u8 & 0x7f,
+            (frames.len() >> 7) as u8 & 0x7f,
+            frames.len() as u8 & 0x7f,
+        ]);
         out.extend_from_slice(frames);
         out
     }
@@ -167,7 +182,11 @@ mod tests {
 
     #[test]
     fn flac_cover() {
-        let png: Vec<u8> = [0x89, b'P', b'N', b'G'].iter().copied().chain([0x7; 24]).collect();
+        let png: Vec<u8> = [0x89, b'P', b'N', b'G']
+            .iter()
+            .copied()
+            .chain([0x7; 24])
+            .collect();
         let mut body = vec![0u8; 4]; // picture type: cover front
         body.extend_from_slice(&(9u32.to_be_bytes())); // "image/png"
         body.extend_from_slice(b"image/png");
@@ -178,7 +197,11 @@ mod tests {
 
         let mut file = b"fLaC".to_vec();
         file.push(0x80 | 6); // last-block flag + PICTURE
-        file.extend_from_slice(&[(body.len() >> 16) as u8, (body.len() >> 8) as u8, body.len() as u8]);
+        file.extend_from_slice(&[
+            (body.len() >> 16) as u8,
+            (body.len() >> 8) as u8,
+            body.len() as u8,
+        ]);
         file.extend_from_slice(&body);
         assert_eq!(extract(&file).unwrap(), png);
     }

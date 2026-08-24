@@ -20,6 +20,9 @@ impl ApiError {
     pub fn too_large(msg: impl Into<String>) -> Self {
         ApiError(StatusCode::PAYLOAD_TOO_LARGE, msg.into())
     }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        ApiError(StatusCode::CONFLICT, msg.into())
+    }
     pub fn unavailable(msg: impl Into<String>) -> Self {
         ApiError(StatusCode::SERVICE_UNAVAILABLE, msg.into())
     }
@@ -47,4 +50,3 @@ impl From<std::io::Error> for ApiError {
         ApiError::internal(format!("io error: {e}"))
     }
 }
-

@@ -34,7 +34,9 @@ const MOVE_ATTEMPTS: u32 = 10;
 pub enum LoginStep {
     /// Signed in as this account; its manager is registered and ready.
     Done(i64),
-    PasswordRequired { hint: Option<String> },
+    PasswordRequired {
+        hint: Option<String>,
+    },
 }
 
 /// Brute-force gate and code-resend state for one phone number. Keyed by
@@ -140,7 +142,9 @@ impl TgHub {
 
         let known: Vec<i64> = {
             let users = self.users.lock().await;
-            uids.into_iter().filter(|u| !users.contains_key(u)).collect()
+            uids.into_iter()
+                .filter(|u| !users.contains_key(u))
+                .collect()
         };
         // Each check is a network round trip; run them together so boot time
         // does not grow with the number of accounts.
@@ -219,7 +223,10 @@ impl TgHub {
             // Already migrated on an earlier boot and restored from the new
             // layout; the legacy copy is a duplicate key for the same
             // account, so dropping it loses nothing.
-            tracing::info!(user_id = uid, "legacy session already migrated; removing it");
+            tracing::info!(
+                user_id = uid,
+                "legacy session already migrated; removing it"
+            );
             let _ = remove_session(&legacy).await;
             return Some(uid);
         }
@@ -277,7 +284,8 @@ impl TgHub {
         let mut pending = login.pending.lock().await;
         match pending.sign_in(code).await {
             Ok(CodeStep::Done(user_id)) => {
-                self.claim(login_id, &login.phone, &pending, user_id).await?;
+                self.claim(login_id, &login.phone, &pending, user_id)
+                    .await?;
                 Ok(LoginStep::Done(user_id))
             }
             Ok(CodeStep::PasswordRequired { hint }) => Ok(LoginStep::PasswordRequired { hint }),
@@ -296,7 +304,8 @@ impl TgHub {
         let mut pending = login.pending.lock().await;
         match pending.check_password(password).await {
             Ok(user_id) => {
-                self.claim(login_id, &login.phone, &pending, user_id).await?;
+                self.claim(login_id, &login.phone, &pending, user_id)
+                    .await?;
                 Ok(user_id)
             }
             Err(e) => {
@@ -692,7 +701,9 @@ mod tests {
         let to = dir.path().join("sessions").join("42.db");
         tokio::fs::write(&from, b"legacy").await.unwrap();
 
-        move_session(&from, &to).await.expect("move creates the dir");
+        move_session(&from, &to)
+            .await
+            .expect("move creates the dir");
 
         assert_eq!(tokio::fs::read(&to).await.unwrap(), b"legacy");
         assert!(!from.exists());
@@ -847,7 +858,10 @@ mod tests {
             .await
             .expect("with its write-ahead log");
         assert_eq!(filed, log, "the session and its log come from one login");
-        assert!(hub.get(uid).await.is_some(), "and a manager is in front of it");
+        assert!(
+            hub.get(uid).await.is_some(),
+            "and a manager is in front of it"
+        );
         for tag in ["a", "b", "c", "d", "e", "f", "g", "h"] {
             assert!(
                 !hub.dir.join(format!("pending-{tag}.db")).exists(),
@@ -878,7 +892,9 @@ mod tests {
             .await
             .expect_err("the number that failed is blocked");
         assert!(err.contains("too many failed login attempts"), "{err}");
-        hub.gate(victim).await.expect("another number is unaffected");
+        hub.gate(victim)
+            .await
+            .expect("another number is unaffected");
         hub.reserve_code_send(victim)
             .await
             .expect("and can still ask for a code");

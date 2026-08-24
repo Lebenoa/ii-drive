@@ -4,20 +4,20 @@ mod folders;
 mod schema;
 mod settings;
 
-pub use bots::{get_bots, remove_bot, set_bots, BotInfo};
+pub use bots::{BotInfo, get_bots, remove_bot, set_bots};
 pub use files::{
-    counts, delete, get, insert, list, set_folder, set_public, set_thumb, FilePart, FileRow,
+    FilePart, FileRow, counts, delete, get, insert, list, set_folder, set_public, set_thumb,
 };
 pub use folders::{
-    create_folder, delete_folder, folder_is_empty, get_folder, list_folders, FolderRow,
+    FolderRow, create_folder, delete_folder, folder_is_empty, get_folder, list_folders,
 };
 // Glob so the version plumbing (`pub(super)`) stays reachable from the
 // tests below without a second, test-only import list.
 pub use schema::*;
 pub use settings::{
-    bump_token_epoch, clear_bot_draft, get_bot_draft, get_channels, get_rules, get_split,
-    get_token_epoch, set_bot_draft, set_channels, set_rules, set_split, BotDraft, ChannelSel,
-    DraftMsg, RouteRule,
+    BotDraft, ChannelSel, DraftMsg, RouteRule, bump_token_epoch, clear_bot_draft, get_bot_draft,
+    get_channels, get_rules, get_split, get_token_epoch, set_bot_draft, set_channels, set_rules,
+    set_split,
 };
 
 type Conn = surrealdb::engine::local::Db;
@@ -37,7 +37,10 @@ pub enum DbError {
     Shape(String),
 }
 pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
-    if let Some(parent) = std::path::Path::new(path).parent().filter(|p| !p.is_empty()) {
+    if let Some(parent) = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.is_empty())
+    {
         tokio::fs::create_dir_all(parent).await?;
     }
     let db = surrealdb::Surreal::new::<surrealdb::engine::local::SurrealKv>(path).await?;
@@ -64,8 +67,10 @@ async fn bootstrap(db: &surrealdb::Surreal<Conn>) -> Result<(), DbError> {
     // SELECTs against a not-yet-created table error out; define up front so
     // a fresh install serves an empty list instead of a 500.
     let mut res = db
-        .query("DEFINE TABLE IF NOT EXISTS file; DEFINE TABLE IF NOT EXISTS folder; \
-                DEFINE TABLE IF NOT EXISTS setting")
+        .query(
+            "DEFINE TABLE IF NOT EXISTS file; DEFINE TABLE IF NOT EXISTS folder; \
+                DEFINE TABLE IF NOT EXISTS setting",
+        )
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     let _ = res.take::<surrealdb::types::Value>(1usize)?;
@@ -171,8 +176,14 @@ mod tests {
         assert!(get_channels(&db, "12345").await.unwrap().is_empty());
 
         let sel = vec![
-            ChannelSel { chat: "@mychannel".into(), title: "My Channel".into() },
-            ChannelSel { chat: "-1001234567890".into(), title: "Archive".into() },
+            ChannelSel {
+                chat: "@mychannel".into(),
+                title: "My Channel".into(),
+            },
+            ChannelSel {
+                chat: "-1001234567890".into(),
+                title: "Archive".into(),
+            },
         ];
         set_channels(&db, "12345", sel.clone()).await.unwrap();
         let got = get_channels(&db, "12345").await.unwrap();
@@ -195,15 +206,24 @@ mod tests {
 
         let draft = BotDraft {
             log: vec![
-                DraftMsg { who: "me".into(), text: "/newbot".into() },
-                DraftMsg { who: "bf".into(), text: "Alright, a new bot. How are we going to call it?".into() },
+                DraftMsg {
+                    who: "me".into(),
+                    text: "/newbot".into(),
+                },
+                DraftMsg {
+                    who: "bf".into(),
+                    text: "Alright, a new bot. How are we going to call it?".into(),
+                },
             ],
             token: String::new(),
             updated_at: 1_700_000_000,
         };
         set_bot_draft(&db, "12345", &draft).await.unwrap();
 
-        let got = get_bot_draft(&db, "12345").await.unwrap().expect("draft exists");
+        let got = get_bot_draft(&db, "12345")
+            .await
+            .unwrap()
+            .expect("draft exists");
         assert_eq!(got.log.len(), 2);
         assert_eq!(got.log[1].who, "bf");
         assert!(got.token.is_empty(), "no token issued yet");
@@ -220,7 +240,11 @@ mod tests {
         };
         set_bot_draft(&db, "12345", &issued).await.unwrap();
         assert_eq!(
-            get_bot_draft(&db, "12345").await.unwrap().expect("draft").token,
+            get_bot_draft(&db, "12345")
+                .await
+                .unwrap()
+                .expect("draft")
+                .token,
             "123456:AAtoken"
         );
 
@@ -237,8 +261,14 @@ mod tests {
             &db,
             "111",
             &[
-                RouteRule { mime: "image/".into(), folder: "F1".into() },
-                RouteRule { mime: "application/pdf".into(), folder: "F2".into() },
+                RouteRule {
+                    mime: "image/".into(),
+                    folder: "F1".into(),
+                },
+                RouteRule {
+                    mime: "application/pdf".into(),
+                    folder: "F2".into(),
+                },
             ],
         )
         .await
@@ -280,8 +310,16 @@ mod tests {
         row.message_id = 11;
         row.chat = "-1001".into();
         row.parts = vec![
-            FilePart { message_id: 11, chat: "-1001".into(), size: 150 },
-            FilePart { message_id: 12, chat: "-1002".into(), size: 150 },
+            FilePart {
+                message_id: 11,
+                chat: "-1001".into(),
+                size: 150,
+            },
+            FilePart {
+                message_id: 12,
+                chat: "-1002".into(),
+                size: 150,
+            },
         ];
         insert(&db, &row).await.unwrap();
         let got = get(&db, "01S").await.unwrap().unwrap();
@@ -309,7 +347,9 @@ mod tests {
         let (db, _dir) = temp_db().await;
 
         create_folder(&db, OWNER, "F1", "Docs", "").await.unwrap();
-        create_folder(&db, OWNER, "F2", "Invoices", "F1").await.unwrap();
+        create_folder(&db, OWNER, "F2", "Invoices", "F1")
+            .await
+            .unwrap();
         assert!(get_folder(&db, "F2").await.unwrap().unwrap().parent == "F1");
 
         let mut r = row("01F", "tax.pdf", 10);
@@ -543,7 +583,9 @@ mod persist_tests {
 
         {
             let db = open(&path_str).await.expect("open");
-            insert(&db, &row("01P", "persist.bin", 5)).await.expect("insert");
+            insert(&db, &row("01P", "persist.bin", 5))
+                .await
+                .expect("insert");
         }
         // Dropping Surreal closes the store asynchronously; give the
         // background tasks time to release the file lock.
@@ -554,4 +596,3 @@ mod persist_tests {
         assert!(got.is_some(), "row must survive reopen");
     }
 }
-

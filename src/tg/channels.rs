@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use grammers_client::tl;
 use grammers_client::Client;
+use grammers_client::tl;
 
 use super::{ChannelInfo, PeerAuth, PeerId, PeerRef, TgManager, friendly};
 
@@ -20,51 +20,46 @@ impl TgManager {
         }
 
         let client = self.ensure().await?;
-        let peer_ref = if key.is_empty()
-            || key.eq_ignore_ascii_case("me")
-            || key.eq_ignore_ascii_case("self")
-        {
-            client
-                .get_me()
-                .await
-                .map_err(|e| friendly(format!("cannot resolve own peer: {e}")))?
-                .to_ref()
-                .await
-                .map_err(|e| friendly(format!("cannot resolve own peer: {e}")))?
-                .ok_or("cannot resolve own peer")?
-        } else if let Ok(n) = key.parse::<i64>() {
-            let pid = PeerId::from_bot_api_dialog_id(n)
-                .ok_or_else(|| format!("chat id `{key}` is not a valid chat"))?;
-            let pref = PeerRef {
-                id: pid,
-                auth: PeerAuth::default(),
+        let peer_ref =
+            if key.is_empty() || key.eq_ignore_ascii_case("me") || key.eq_ignore_ascii_case("self")
+            {
+                client
+                    .get_me()
+                    .await
+                    .map_err(|e| friendly(format!("cannot resolve own peer: {e}")))?
+                    .to_ref()
+                    .await
+                    .map_err(|e| friendly(format!("cannot resolve own peer: {e}")))?
+                    .ok_or("cannot resolve own peer")?
+            } else if let Ok(n) = key.parse::<i64>() {
+                let pid = PeerId::from_bot_api_dialog_id(n)
+                    .ok_or_else(|| format!("chat id `{key}` is not a valid chat"))?;
+                let pref = PeerRef {
+                    id: pid,
+                    auth: PeerAuth::default(),
+                };
+                let peer = client
+                    .resolve_peer(pref)
+                    .await
+                    .map_err(|e| friendly(format!("cannot resolve chat {key}: {e}")))?;
+                peer.to_ref()
+                    .await
+                    .map_err(|e| friendly(format!("cannot resolve chat {key}: {e}")))?
+                    .ok_or_else(|| format!("chat `{key}` has no usable peer reference"))?
+            } else {
+                let name = key.trim_start_matches('@');
+                let peer = client
+                    .resolve_username(name)
+                    .await
+                    .map_err(|e| friendly(format!("resolve failed: {e}")))?
+                    .ok_or_else(|| format!("storage chat `{key}` not found or not accessible"))?;
+                peer.to_ref()
+                    .await
+                    .map_err(|e| format!("storage chat `{key}` peer lookup failed: {e}"))?
+                    .ok_or_else(|| format!("storage chat `{key}` has no usable peer reference"))?
             };
-            let peer = client
-                .resolve_peer(pref)
-                .await
-                .map_err(|e| friendly(format!("cannot resolve chat {key}: {e}")))?;
-            peer.to_ref()
-                .await
-                .map_err(|e| friendly(format!("cannot resolve chat {key}: {e}")))?
-                .ok_or_else(|| format!("chat `{key}` has no usable peer reference"))?
-        } else {
-            let name = key.trim_start_matches('@');
-            let peer = client
-                .resolve_username(name)
-                .await
-                .map_err(|e| friendly(format!("resolve failed: {e}")))?
-                .ok_or_else(|| format!("storage chat `{key}` not found or not accessible"))?;
-            peer.to_ref()
-                .await
-                .map_err(|e| format!("storage chat `{key}` peer lookup failed: {e}"))?
-                .ok_or_else(|| format!("storage chat `{key}` has no usable peer reference"))?
-        };
 
-        self.st
-            .lock()
-            .await
-            .peers
-            .insert(cache_key, peer_ref);
+        self.st.lock().await.peers.insert(cache_key, peer_ref);
         Ok(peer_ref)
     }
 

@@ -1,5 +1,5 @@
 <svelte:head>
-  <title>ii-drive — Telegram settings</title>
+  <title>ii-drive — {t('settings.cat.telegram')}</title>
 </svelte:head>
 
 <script lang="ts">
@@ -16,6 +16,7 @@
   import BotFatherChat from '$lib/components/BotFatherChat.svelte';
   import Channels from '$lib/components/ChannelPicker.svelte';
   import { collapse, fadeUp, stagger } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   let chat: BotFatherChat | null = $state(null);
 
@@ -52,8 +53,9 @@
     botError = '';
     results = [];
     try {
-      const { token: t } = await botfatherToken(name);
-      const res = await addBot(t);
+      // `tok`, not `t`: the translator is imported as t().
+      const { token: tok } = await botfatherToken(name);
+      const res = await addBot(tok);
       bots = await getBots();
       results = res.results;
     } catch (err) {
@@ -81,13 +83,13 @@
   });
 
   async function add(): Promise<void> {
-    const t = token.trim();
-    if (adding || t.length === 0) return;
+    const tok = token.trim();
+    if (adding || tok.length === 0) return;
     adding = true;
     botError = '';
     results = [];
     try {
-      const res = await addBot(t);
+      const res = await addBot(tok);
       bots = await getBots();
       results = res.results;
       token = '';
@@ -127,23 +129,17 @@
 
 <main class="content">
   <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
-    <h2>Storage channels</h2>
-    <p class="muted hint">
-      Uploaded files are stored as documents inside your storage channels.
-    </p>
+    <h2>{t('telegram.storageChannels')}</h2>
+    <p class="muted hint">{t('telegram.storageHint')}</p>
     <Channels onDone={null} redirectOnSave={false} embedded />
   </section>
 
   <section class="card section" in:fadeUp={{ delay: stagger(1) }}>
     <div class="head-row">
-      <h2>Download bots</h2>
+      <h2>{t('telegram.downloadBots')}</h2>
       {#if bots.length > 0}<span class="pill">{bots.length}</span>{/if}
     </div>
-    <p class="muted hint">
-      Bots download through their own rate limits, so several spread the
-      load. Adding a bot invites it into every selected storage channel as
-      an admin.
-    </p>
+    <p class="muted hint">{t('telegram.botsHint')}</p>
     <BotFatherChat
       bind:this={chat}
       onCreated={(t) => addFromBotFather(t)}
@@ -152,8 +148,8 @@
     <div class="sub">
       <div class="sub-head">
         <div class="sub-title">
-          <strong>Import existing bot</strong>
-          <span class="muted sub-note">token fetched from @BotFather automatically</span>
+          <strong>{t('telegram.importExisting')}</strong>
+          <span class="muted sub-note">{t('telegram.importNote')}</span>
         </div>
         <button
           class="btn ghost busy-btn"
@@ -162,7 +158,7 @@
           onclick={() => void loadOwned()}
         >
           {#if loadingOwned}<span class="spinner btn-spin"></span>{/if}
-          {loadingOwned ? 'Asking @BotFather…' : 'List my bots'}
+          {loadingOwned ? t('telegram.asking') : t('telegram.listMyBots')}
         </button>
       </div>
       {#if ownedError}<p class="error-text">{ownedError}</p>{/if}
@@ -181,24 +177,22 @@
                 onclick={() => void importBot(name)}
               >
                 {#if importing === name}<span class="spinner btn-spin"></span>{/if}
-                {importing === name ? 'Importing…' : 'Import'}
+                {importing === name ? t('telegram.importing') : t('telegram.import')}
               </button>
             </li>
           {/each}
         </ul>
       {:else if !loadingOwned && !ownedError}
-        <p class="muted hint">Nothing listed yet — press "List my bots".</p>
+        <p class="muted hint">{t('telegram.nothingListed', { button: t('telegram.listMyBots') })}</p>
       {/if}
     </div>
 
     <div class="sub">
       <div class="sub-head">
         <div class="sub-title">
-          <strong>New bot</strong>
+          <strong>{t('telegram.newBot')}</strong>
           <span class="muted sub-note">
-            {draftPending
-              ? 'a bot setup is still open with @BotFather'
-              : 'walks @BotFather, or paste any token below'}
+            {draftPending ? t('telegram.draftOpen') : t('telegram.newBotNote')}
           </span>
         </div>
         <button
@@ -207,7 +201,7 @@
           type="button"
           onclick={() => void chat?.openChat()}
         >
-          {draftPending ? 'Resume bot setup' : 'Open @BotFather'}
+          {draftPending ? t('telegram.resumeSetup') : t('telegram.openBotfather')}
         </button>
       </div>
       <form
@@ -231,7 +225,7 @@
           disabled={adding || token.trim().length === 0}
         >
           {#if adding}<span class="spinner btn-spin"></span>{/if}
-          {adding ? 'Adding…' : 'Add bot'}
+          {adding ? t('telegram.adding') : t('telegram.addBot')}
         </button>
       </form>
 
@@ -260,12 +254,12 @@
         {/each}
       </ul>
     {:else}
-      <p class="muted">No bots configured — downloads use your own account.</p>
+      <p class="muted">{t('telegram.noBots')}</p>
     {/if}
 
     {#if results.length > 0}
       <div class="results">
-        <p class="muted">Channel access:</p>
+        <p class="muted">{t('telegram.channelAccess')}</p>
         <ul>
           {#each results as r, i (i)}
             <li in:fadeUp={{ delay: stagger(i) }}>

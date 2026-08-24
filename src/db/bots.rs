@@ -21,27 +21,20 @@ fn bots_id(owner: i64) -> String {
 }
 
 /// Reads a pool out of one `setting` row; empty when the row is absent.
-async fn read_pool(
-    db: &surrealdb::Surreal<Conn>,
-    id: &str,
-) -> Result<Vec<BotInfo>, DbError> {
+async fn read_pool(db: &surrealdb::Surreal<Conn>, id: &str) -> Result<Vec<BotInfo>, DbError> {
     let mut res = db.query(format!("SELECT bots_json FROM {id}")).await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
     let Some(row) = rows.into_iter().next() else {
         return Ok(Vec::new());
     };
     match row.get("bots_json").and_then(|v| v.as_str()) {
-        Some(s) => serde_json::from_str(s)
-            .map_err(|e| DbError::Shape(format!("bots shape: {e}"))),
+        Some(s) => serde_json::from_str(s).map_err(|e| DbError::Shape(format!("bots shape: {e}"))),
         None => Ok(Vec::new()),
     }
 }
 
 /// All bots configured by `owner`; empty when none.
-pub async fn get_bots(
-    db: &surrealdb::Surreal<Conn>,
-    owner: i64,
-) -> Result<Vec<BotInfo>, DbError> {
+pub async fn get_bots(db: &surrealdb::Surreal<Conn>, owner: i64) -> Result<Vec<BotInfo>, DbError> {
     read_pool(db, &bots_id(owner)).await
 }
 
@@ -62,11 +55,7 @@ pub async fn set_bots(
 }
 
 /// Drops a single bot from a user's pool.
-pub async fn remove_bot(
-    db: &surrealdb::Surreal<Conn>,
-    owner: i64,
-    id: i64,
-) -> Result<(), DbError> {
+pub async fn remove_bot(db: &surrealdb::Surreal<Conn>, owner: i64, id: i64) -> Result<(), DbError> {
     let mut bots = get_bots(db, owner).await?;
     bots.retain(|b| b.id != id);
     set_bots(db, owner, &bots).await

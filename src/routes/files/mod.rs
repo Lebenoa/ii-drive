@@ -2,6 +2,7 @@ mod dto;
 mod folders;
 mod listing;
 mod meta;
+mod resume;
 mod serve;
 mod thumbs;
 mod upload;
@@ -13,6 +14,10 @@ pub use dto::*;
 pub use folders::*;
 pub use listing::*;
 pub use meta::*;
+pub use resume::{
+    abort as upload_abort, chunk as upload_chunk, complete as upload_complete, init as upload_init,
+    status as upload_status,
+};
 pub use serve::*;
 pub use thumbs::*;
 pub use upload::*;
@@ -223,7 +228,10 @@ mod tests {
 
         let foreign = probe("01FILE").await;
         let missing = probe("01NOSUCHFILE").await;
-        assert_eq!(foreign, missing, "status and body must not disclose existence");
+        assert_eq!(
+            foreign, missing,
+            "status and body must not disclose existence"
+        );
         assert_eq!(foreign.0, axum::http::StatusCode::NOT_FOUND);
     }
 }

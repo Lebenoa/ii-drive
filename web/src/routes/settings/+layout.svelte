@@ -25,14 +25,15 @@
   import { getMe, getToken } from '$lib/api';
   import ReloadConfigButton from '$lib/components/ReloadConfigButton.svelte';
   import { fadeUp, stagger } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
   import './settings.css';
 
   let { children } = $props();
 
   const CATEGORIES = [
-    { path: '/settings/telegram', label: 'Telegram' },
-    { path: '/settings/upload', label: 'Uploads' },
-    { path: '/settings/other', label: 'Other' },
+    { path: '/settings/telegram', key: 'settings.cat.telegram' },
+    { path: '/settings/upload', key: 'settings.cat.uploads' },
+    { path: '/settings/other', key: 'settings.cat.other' },
   ];
 
   let checking = $state(true);
@@ -64,8 +65,8 @@
 
 <div class="settings-shell">
   <header class="topbar">
-    <a class="back" href="/">← Back to files</a>
-    <span class="title">Settings</span>
+    <a class="back" href="/">← {t('nav.backToFiles')}</a>
+    <span class="title">{t('nav.settings')}</span>
     <!-- Always present so the sticky bar keeps three flex slots and the
          title does not jump when the operator button is absent. -->
     <div class="tools">
@@ -82,7 +83,7 @@
       <div class="spinner" aria-label="loading"></div>
     </div>
   {:else}
-    <nav class="cats" aria-label="Settings categories">
+    <nav class="cats" aria-label={t('settings.categories')}>
       {#each CATEGORIES as cat, i (cat.path)}
         <a
           class="cat"
@@ -90,7 +91,7 @@
           href={cat.path}
           in:fadeUp={{ delay: stagger(i) }}
         >
-          {cat.label}
+          {t(cat.key)}
         </a>
       {/each}
     </nav>

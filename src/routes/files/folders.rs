@@ -15,7 +15,9 @@ pub async fn create_folder(
 ) -> ApiResult<Json<serde_json::Value>> {
     let name = body.name.trim();
     if name.is_empty() || name.len() > 128 {
-        return Err(ApiError::bad_request("folder name must be 1-128 characters"));
+        return Err(ApiError::bad_request(
+            "folder name must be 1-128 characters",
+        ));
     }
     // A parent owned by somebody else reads as nonexistent, so a tree can
     // never be grafted onto another tenant's folder.

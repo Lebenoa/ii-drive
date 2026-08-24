@@ -21,6 +21,7 @@
         flipDur,
     } from "$lib/motion";
     import { flip } from "svelte/animate";
+    import { t } from "$lib/i18n.svelte";
 
     let folders = $state<Folder[]>([]);
     let current = $state(""); // folder uid, '' = root
@@ -89,7 +90,7 @@
       }
     }
     if (failed === 0) reloadTick++;
-    else sidebarError = `${failed} file(s) failed to move`;
+    else sidebarError = t('files.moveFailed', { n: failed });
   }
 
   function folderDragOver(e: DragEvent, folder: string): void {
@@ -121,7 +122,7 @@
       cutIds = new Set();
       reloadTick++;
     } else {
-      pasteError = `${failed} file(s) failed to move`;
+      pasteError = t('files.moveFailed', { n: failed });
     }
   }
     let dragging = $state(false);
@@ -151,15 +152,15 @@
 
     function folderName(uid: string): string {
         return uid === ""
-            ? "All files"
+            ? t("drive.allFiles")
             : (folders.find((f) => f.uid === uid)?.name ?? "");
     }
 
     // debounce the search box (300ms) into the value actually queried
     $effect(() => {
         const value = q;
-        const t = setTimeout(() => (debouncedQ = value), 300);
-        return () => clearTimeout(t);
+        const timer = setTimeout(() => (debouncedQ = value), 300);
+        return () => clearTimeout(timer);
     });
 
     $effect(() => {
@@ -263,7 +264,7 @@
                 item.state = "uploading";
                 if (!file) {
                     item.state = "error";
-                    item.error = "File handle lost";
+                    item.error = t("drive.handleLost");
                     continue;
                 }
                 try {
@@ -327,11 +328,11 @@
         {/if}
         <aside class="sidebar" class:open={sidebarOpen}>
             <div class="side-head">
-                <span class="side-title">Folders</span>
+                <span class="side-title">{t("drive.folders")}</span>
                 <button
                     class="icon-btn"
                     type="button"
-                    title="New folder in current location"
+                    title={t("drive.newFolderHere")}
                     disabled={creating}
                     onclick={openNewFolder}
                     >
@@ -353,7 +354,7 @@
                     ondrop={(e) => void dropOnFolder(e, "")}
                 >
                     <span class="f-ico">📁</span><span class="f-name"
-                        >All files</span
+                        >{t("drive.allFiles")}</span
                     >
                 </button>
                 {#each tree as { node, depth }, i (node.uid)}
@@ -383,8 +384,8 @@
                             role="button"
                             tabindex="-1"
                             title={deletingFolder === node.uid
-                                ? "Deleting…"
-                                : "Delete folder"}
+                                ? t("common.deleting")
+                                : t("drive.deleteFolderTitle")}
                             onclick={(e) => {
                                 e.stopPropagation();
                                 pendingFolder = node;
@@ -405,7 +406,7 @@
         <section
             class="file-area"
             class:dragging
-            aria-label="Files — drop here to upload into the current folder"
+            aria-label={t("drive.dropZone")}
             ondragover={onDragOver}
             ondragleave={() => (dragging = false)}
             ondrop={onDrop}
@@ -414,7 +415,7 @@
                 <button
                     class="icon-btn sidebar-toggle"
                     type="button"
-                    aria-label="Folders"
+                    aria-label={t("drive.folders")}
                     aria-expanded={sidebarOpen}
                     onclick={() => (sidebarOpen = !sidebarOpen)}
                 >
@@ -429,9 +430,9 @@
                     <input
                         class="field search"
                         type="search"
-                        placeholder="Search in this folder…"
+                        placeholder={t("drive.searchHere")}
                         bind:value={q}
-                        aria-label="Search files"
+                        aria-label={t("drive.searchFiles")}
                     />
                     {#if loading}<div
                             class="spinner small"
@@ -441,7 +442,7 @@
                     <button
                         class="btn"
                         type="button"
-                        onclick={() => input?.click()}>Upload</button
+                        onclick={() => input?.click()}>{t("common.upload")}</button
                     >
                 </div>
             </div>
@@ -449,20 +450,20 @@
                 <div
                     class="paste-bar"
                     role="toolbar"
-                    aria-label="Paste"
+                    aria-label={t("drive.paste")}
                     transition:collapse
                 >
-                    <span class="bulk-count">{cutIds.size} cut</span>
+                    <span class="bulk-count">{t("drive.nCut", { n: cutIds.size })}</span>
                     <button
                         class="btn btn-primary"
                         type="button"
                         disabled={pasting}
                         onclick={() => void pasteHere()}
                     >
-                        {pasting ? 'Moving…' : `Paste into "${folderName(current)}"`}
+                        {pasting ? t('common.moving') : t("drive.pasteInto", { folder: folderName(current) })}
                     </button>
                     <button class="btn ghost" type="button" onclick={() => (cutIds = new Set())}>
-                        Cancel
+                        {t("common.cancel")}
                     </button>
                     {#if pasteError}<span class="error-text">{pasteError}</span>{/if}
                 </div>
@@ -488,7 +489,7 @@
             {/if}
 
             <div class="drop-hint muted" aria-hidden="true">
-                Drop files to upload here
+                {t("drive.dropHint")}
             </div>
         </section>
 
@@ -502,9 +503,12 @@
                 >
                     <span class="up-title">
                         {#if queue.filter((i) => i.state === "uploading" || i.state === "pending").length > 0}
-                            Uploading {queue.filter((i) => i.state === "uploading" || i.state === "pending").length} of {queue.length}
+                            {t("drive.uploadingN", {
+                                n: queue.filter((i) => i.state === "uploading" || i.state === "pending").length,
+                                total: queue.length,
+                            })}
                         {:else}
-                            Uploads ({queue.length})
+                            {t("drive.uploads", { n: queue.length })}
                         {/if}
                     </span>
                     {#if queue.every((i) => i.state === "done" || i.state === "error")}
@@ -512,7 +516,7 @@
                             class="up-clear"
                             role="button"
                             tabindex="-1"
-                            title="Clear finished"
+                            title={t("drive.clearFinished")}
                             onclick={(e) => {
                                 e.stopPropagation();
                                 clearFinished();
@@ -541,7 +545,7 @@
                                         class:ok={item.state === "done"}
                                     >
                                         {#if item.state === "pending"}
-                                            queued
+                                            {t("drive.queued")}
                                         {:else if item.state === "uploading"}
                                             {item.progress}%
                                         {:else if item.state === "done"}
@@ -573,8 +577,8 @@
         <button
             class="upload-fab"
             type="button"
-            aria-label="Upload files"
-            title="Upload to {folderName(current)}"
+            aria-label={t("drive.uploadFiles")}
+            title={t("drive.uploadTo", { folder: folderName(current) })}
             onclick={() => input?.click()}
         >
             +
@@ -583,25 +587,25 @@
 
     <Modal
         id={NEW_FOLDER_DIALOG}
-        title="New folder"
+        title={t("drive.newFolder")}
         onclose={(rv) => {
             if (rv === "create") void addFolder(newName);
         }}
     >
         <p class="muted modal-hint">
-            Create a folder inside "{folderName(current)}".
+            {t("drive.newFolderIn", { folder: folderName(current) })}
         </p>
         <input
             class="field"
             type="text"
-            placeholder="Folder name"
+            placeholder={t("drive.folderName")}
             maxlength="128"
             bind:value={newName}
             bind:this={newFolderInput}
         />
         {#snippet actions()}
             <button class="btn" type="submit" {...closeAttrs(NEW_FOLDER_DIALOG)}>
-                Cancel
+                {t("common.cancel")}
             </button>
             <button
                 class="btn btn-primary"
@@ -609,14 +613,14 @@
                 value="create"
                 disabled={!newName.trim()}
             >
-                Create
+                {t("common.create")}
             </button>
         {/snippet}
     </Modal>
 
     <Modal
         id={DEL_FOLDER_DIALOG}
-        title="Delete folder"
+        title={t("drive.deleteFolderTitle")}
         onclose={(rv) => {
             if (rv === "delete" && pendingFolder)
                 void dropFolder(pendingFolder.uid);
@@ -625,17 +629,15 @@
     >
         {#if pendingFolder}
             <p>
-                Delete <strong>{pendingFolder.name}</strong>? The folder must be
-                empty — files and subfolders inside it are kept and must be
-                removed first.
+                {t("drive.deleteFolderBody", { name: pendingFolder.name })}
             </p>
         {/if}
         {#snippet actions()}
             <button class="btn" type="submit" {...closeAttrs(DEL_FOLDER_DIALOG)}>
-                Cancel
+                {t("common.cancel")}
             </button>
             <button class="btn btn-danger" type="submit" value="delete"
-                >Delete</button
+                >{t("common.delete")}</button
             >
         {/snippet}
     </Modal>

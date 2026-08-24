@@ -25,7 +25,9 @@ enum Flow {
 pub(super) enum CodeStep {
     /// Signed in; the account behind the throwaway session is now known.
     Done(i64),
-    PasswordRequired { hint: Option<String> },
+    PasswordRequired {
+        hint: Option<String>,
+    },
 }
 
 /// A rejected login step.
@@ -94,11 +96,7 @@ impl Pending {
     }
 
     pub(super) async fn sign_in(&mut self, code: &str) -> Result<CodeStep, LoginFailure> {
-        let client = self
-            .manager
-            .ensure()
-            .await
-            .map_err(LoginFailure::misuse)?;
+        let client = self.manager.ensure().await.map_err(LoginFailure::misuse)?;
         let (phone, token) = match std::mem::replace(&mut self.flow, Flow::Idle) {
             Flow::CodeSent { phone, token } => (phone, *token),
             other => {
@@ -146,11 +144,7 @@ impl Pending {
     }
 
     pub(super) async fn check_password(&mut self, password: &str) -> Result<i64, LoginFailure> {
-        let client = self
-            .manager
-            .ensure()
-            .await
-            .map_err(LoginFailure::misuse)?;
+        let client = self.manager.ensure().await.map_err(LoginFailure::misuse)?;
         let pt = match std::mem::replace(&mut self.flow, Flow::Idle) {
             Flow::PasswordNeeded { token } => *token,
             other => {
@@ -171,7 +165,9 @@ impl Pending {
                 };
                 Err(LoginFailure::wrong("invalid password"))
             }
-            Err(other) => Err(LoginFailure::wrong(format!("password check failed: {other:?}"))),
+            Err(other) => Err(LoginFailure::wrong(format!(
+                "password check failed: {other:?}"
+            ))),
         }
     }
 }

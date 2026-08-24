@@ -8,6 +8,7 @@
   } from '$lib/api';
   import { closeDialog, openDialog } from '$lib/invoker';
   import { fadeUp, stagger } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
   import Modal from './Modal.svelte';
 
   let {
@@ -33,12 +34,6 @@
   // True when the transcript was restored rather than started fresh.
   let resumed = $state(false);
   let cancelling = $state(false);
-
-  const STAGE_HINT: Record<string, string> = {
-    name: 'BotFather is waiting for the bot’s display name.',
-    username: 'BotFather is waiting for a username ending in “bot”.',
-    token: 'BotFather issued the token — add it to the pool.',
-  };
 
   /**
    * Opens the wizard. A previous run that was closed mid-question left
@@ -143,11 +138,10 @@
   }
 </script>
 
-<Modal id={DIALOG} title="Create a bot with @BotFather" onclose={onDialogClose}>
+<Modal id={DIALOG} title={t('botfather.title')} onclose={onDialogClose}>
   {#if resumed}
     <p class="resumed" transition:fadeUp>
-      Picked up where you left off — this conversation is still open with
-      @BotFather.
+      {t('botfather.resumed')}
     </p>
   {/if}
 
@@ -159,7 +153,7 @@
   </div>
 
   {#if stage && STAGE_HINT[stage]}
-    <p class="muted stage-hint">{STAGE_HINT[stage]}</p>
+    <p class="muted stage-hint">{t(`botfather.stage.${stage}`)}</p>
   {/if}
 
   <!-- Not a <form>: Modal already wraps children in a method="dialog"
@@ -167,7 +161,7 @@
   <div class="composer">
     <input
       class="field"
-      placeholder="Message @BotFather…"
+      placeholder={t('botfather.placeholder')}
       bind:value={input}
       disabled={busy}
       onkeydown={(e) => {
@@ -183,14 +177,14 @@
       disabled={busy || input.trim().length === 0}
       onclick={() => void sendRaw(input)}
     >
-      Send
+      {t('botfather.send')}
     </button>
   </div>
 
   <div class="actions">
     {#if foundToken}
       <button class="btn btn-primary" type="button" onclick={() => void addCreated()}>
-        Add @{foundToken.split(':')[0]} to the pool
+        {t('botfather.addToPool', { bot: foundToken.split(':')[0] })}
       </button>
     {/if}
     {#if log.length > 0 && !foundToken}
@@ -199,10 +193,10 @@
         type="button"
         disabled={cancelling}
         onclick={() => void cancelDraft()}
-        title="Tell @BotFather to drop the half-finished bot"
+        title={t('botfather.cancelHint')}
       >
         {#if cancelling}<span class="spinner btn-spin"></span>{/if}
-        {cancelling ? 'Cancelling…' : 'Cancel with @BotFather'}
+        {cancelling ? t('botfather.cancelling') : t('botfather.cancel')}
       </button>
     {/if}
   </div>

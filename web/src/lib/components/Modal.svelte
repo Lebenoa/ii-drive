@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { t } from '$lib/i18n.svelte';
 
   let {
     id,
@@ -42,7 +43,7 @@
       {#if actions}
         {@render actions()}
       {:else}
-        <button class="btn" type="submit">Close</button>
+        <button class="btn" type="submit">{t('common.close')}</button>
       {/if}
     </div>
   </form>

@@ -2,6 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { clearToken, fetchAvatar, getMe, getToken, type TgUser } from '$lib/api';
+  import { t } from '$lib/i18n.svelte';
 
   // The navbar is owned by the layout, so it fetches its own user info.
   let user = $state<TgUser | null>(null);
@@ -101,7 +102,7 @@
       popovertarget={popoverSupported ? ACCOUNT_POPOVER : undefined}
       popovertargetaction="toggle"
       aria-expanded={popoverSupported ? undefined : menuOpen}
-      aria-label="Account menu"
+      aria-label={t('nav.accountMenu')}
       onclick={toggleMenu}
       title={user.name}
     >
@@ -132,8 +133,8 @@
       bind:this={menuEl}
     >
       <p class="who" title={user.name}>{user.name}</p>
-      <a class="menu-item" href="/settings" onclick={closeMenu}>⚙ Settings</a>
-      <button class="menu-item danger" type="button" onclick={logout}>⎋ Log out</button>
+      <a class="menu-item" href="/settings" onclick={closeMenu}>⚙ {t('nav.settings')}</a>
+      <button class="menu-item danger" type="button" onclick={logout}>⎋ {t('nav.logout')}</button>
     </div>
   {/if}
 </header>

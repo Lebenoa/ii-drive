@@ -123,7 +123,9 @@ mod tests {
     #[tokio::test]
     async fn bumping_the_epoch_revokes_outstanding_tokens() {
         let state = temp_state().await;
-        let stale = state.tokens.issue(11, state.epoch(11).await.expect("epoch"));
+        let stale = state
+            .tokens
+            .issue(11, state.epoch(11).await.expect("epoch"));
         assert_eq!(state.session_user(&stale).await, Some(11));
 
         state.bump_epoch(11).await.expect("bump");
@@ -135,7 +137,9 @@ mod tests {
 
         // Signing back in mints under the new epoch and works again — the old
         // token stays dead, which is what the pre-epoch design got wrong.
-        let fresh = state.tokens.issue(11, state.epoch(11).await.expect("epoch"));
+        let fresh = state
+            .tokens
+            .issue(11, state.epoch(11).await.expect("epoch"));
         assert_eq!(state.session_user(&fresh).await, Some(11));
         assert_eq!(state.session_user(&stale).await, None);
     }
@@ -144,7 +148,9 @@ mod tests {
     #[tokio::test]
     async fn revocation_is_per_account() {
         let state = temp_state().await;
-        let theirs = state.tokens.issue(22, state.epoch(22).await.expect("epoch"));
+        let theirs = state
+            .tokens
+            .issue(22, state.epoch(22).await.expect("epoch"));
 
         state.bump_epoch(11).await.expect("bump");
         assert_eq!(state.session_user(&theirs).await, Some(22));
@@ -155,7 +161,9 @@ mod tests {
     #[tokio::test]
     async fn a_bump_survives_a_restart() {
         let state = temp_state().await;
-        let stale = state.tokens.issue(11, state.epoch(11).await.expect("epoch"));
+        let stale = state
+            .tokens
+            .issue(11, state.epoch(11).await.expect("epoch"));
         state.bump_epoch(11).await.expect("bump");
 
         // Same store, empty cache — as after a restart.

@@ -1,5 +1,5 @@
 <svelte:head>
-  <title>ii-drive — Internal DB</title>
+  <title>ii-drive — {t('db.title')}</title>
 </svelte:head>
 
 <script lang="ts">
@@ -12,6 +12,7 @@
     type DbQueryResult,
   } from '$lib/api';
   import { fadeUp, stagger } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   const PAGE = 50;
   let checking = $state(true);
@@ -76,7 +77,7 @@
   }
 
   async function deleteRow(id: string): Promise<void> {
-    if (!confirm(`Delete record ${id}?`)) return;
+    if (!confirm(t('db.deleteRecord', { id }))) return;
     await run(`DELETE ${id}`);
     if (active) await openTable(active, page);
   }
@@ -106,26 +107,23 @@
 
 <div class="db-shell">
   <header class="topbar">
-    <a class="back" href="/">← Back to files</a>
-    <span class="title">Internal DB <span class="muted">· drive.surrealkv</span></span>
+    <a class="back" href="/">← {t('nav.backToFiles')}</a>
+    <span class="title">{t('db.title')} <span class="muted">· drive.surrealkv</span></span>
     <span></span>
   </header>
 
   {#if checking}
     <div class="center-screen">
-      <div class="spinner" aria-label="loading"></div>
+      <div class="spinner" aria-label={t('common.loading')}></div>
     </div>
   {:else if !allowed}
     <div class="center-screen">
-      <p class="muted">
-        The internal database browser is reserved for the server operator.
-        This account cannot open it.
-      </p>
+      <p class="muted">{t('db.reserved')}</p>
     </div>
   {:else}
     <div class="cols">
-      <nav class="side card" aria-label="Tables">
-        <p class="side-head muted">Tables</p>
+      <nav class="side card" aria-label={t('db.tables')}>
+        <p class="side-head muted">{t('db.tables')}</p>
         <button
           class="tbl-btn"
           class:active={sql === 'INFO FOR DB'}
@@ -134,15 +132,15 @@
         >
           schema
         </button>
-        {#each tables as t, i (t)}
+        {#each tables as tbl, i (tbl)}
           <button
             class="tbl-btn"
-            class:active={active === t}
+            class:active={active === tbl}
             type="button"
-            onclick={() => void openTable(t)}
+            onclick={() => void openTable(tbl)}
             in:fadeUp={{ delay: stagger(i) }}
           >
-            {t}
+            {tbl}
           </button>
         {/each}
       </nav>
@@ -170,7 +168,7 @@
           ></textarea>
           <button class="btn btn-primary" type="submit" disabled={running}>
             {#if running}<span class="spinner btn-spin"></span>{/if}
-            {running ? 'Running…' : 'Run'}
+            {running ? t('db.running') : t('db.run')}
           </button>
         </form>
 
@@ -202,7 +200,7 @@
                           <button
                             class="icon-btn danger"
                             type="button"
-                            title="Delete record"
+                            title={t('db.deleteRecordTitle')}
                             onclick={() => void deleteRow(String(rec.id))}
                           >
                             ✕
@@ -231,16 +229,16 @@
               disabled={!canPrev || running}
               onclick={() => void openTable(active, page - 1)}
             >
-              ← Prev
+              ← {t('db.prev')}
             </button>
-            <span class="muted">page {page + 1}</span>
+            <span class="muted">{t('db.pageNum', { n: page + 1 })}</span>
             <button
               class="btn ghost"
               type="button"
               disabled={!canNext || running}
               onclick={() => void openTable(active, page + 1)}
             >
-              Next →
+              {t('db.next')} →
             </button>
           </div>
         {/if}

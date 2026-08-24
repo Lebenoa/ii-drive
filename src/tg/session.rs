@@ -79,8 +79,8 @@ impl TgManager {
             return Ok(conn.client.clone());
         }
         if !self.cfg.tg_configured() {
-            let msg = "Telegram is not configured: set api_id and api_hash in config.toml"
-                .to_string();
+            let msg =
+                "Telegram is not configured: set api_id and api_hash in config.toml".to_string();
             st.config_error = Some(msg.clone());
             return Err(msg);
         }
@@ -152,7 +152,7 @@ impl TgManager {
                                 // required.
                                 relogin: true,
                                 error: None,
-                            }
+                            };
                         }
                         Err(e) => {
                             let msg = e.to_string();

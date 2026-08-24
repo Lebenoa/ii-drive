@@ -1,5 +1,5 @@
 <svelte:head>
-  <title>ii-drive — Upload settings</title>
+  <title>ii-drive — {t('settings.cat.uploads')}</title>
 </svelte:head>
 
 <script lang="ts">
@@ -13,6 +13,7 @@
     type RouteRule,
   } from '$lib/api';
   import { collapse, fadeUp, stagger } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   // --- Split uploads ---
   let splitMb = $state(0);
@@ -24,7 +25,7 @@
   const SPLIT_PRESETS = [0, 250, 500, 1024];
 
   function splitLabel(mb: number): string {
-    return mb === 0 ? 'Off' : mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
+    return mb === 0 ? t('upload.off') : mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
   }
 
   async function loadSplit(): Promise<void> {
@@ -45,7 +46,7 @@
       const mb = Math.max(0, Math.min(2047, Math.floor(Number(splitMb) || 0)));
       await saveSettings({ split_mb: mb });
       splitMb = mb;
-      splitMsg = 'Saved.';
+      splitMsg = t('common.saved');
     } catch (err) {
       splitError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -97,7 +98,7 @@
         .filter((r) => r.mime !== '' && r.folder !== '');
       await saveRules(kept.map(({ mime, folder }) => ({ mime, folder })));
       rules = kept;
-      rulesMsg = 'Saved.';
+      rulesMsg = t('common.saved');
     } catch (err) {
       rulesError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -114,13 +115,8 @@
 
 <main class="content">
   <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
-    <h2>Split uploads</h2>
-    <p class="muted hint">
-      Files larger than this threshold are cut into parts of that size and
-      uploaded in parallel — each part on a different bot's connection when
-      you have a pool, so big files finish much faster. 0 disables
-      splitting.
-    </p>
+    <h2>{t('upload.splitTitle')}</h2>
+    <p class="muted hint">{t('upload.splitHint')}</p>
     {#if splitLoaded}
       <div class="split-row">
         {#each SPLIT_PRESETS as p (p)}
@@ -147,27 +143,20 @@
           onclick={() => void saveSplit()}
         >
           {#if splitSaving}<span class="spinner btn-spin"></span>{/if}
-          {splitSaving ? 'Saving…' : 'Save'}
+          {splitSaving ? t('common.saving') : t('common.save')}
         </button>
       </div>
-      <p class="muted hint">
-        Current threshold: {splitLabel(splitMb)} — parts upload in parallel,
-        so more bots means faster large uploads.
-      </p>
+      <p class="muted hint">{t('upload.currentThreshold', { size: splitLabel(splitMb) })}</p>
       {#if splitMsg}<p class="ok-text" transition:fadeUp>{splitMsg}</p>{/if}
       {#if splitError}<p class="error-text">{splitError}</p>{/if}
     {:else}
-      <p class="muted">Loading…</p>
+      <p class="muted">{t('common.loading')}</p>
     {/if}
   </section>
 
   <section class="card section" in:fadeUp={{ delay: stagger(1) }}>
-    <h2>Auto-upload routing</h2>
-    <p class="muted hint">
-      Files uploaded to the root folder are sorted automatically: the
-      first rule whose type prefix matches claims the file. Explicit
-      folder picks in the drive always win over rules.
-    </p>
+    <h2>{t('upload.routingTitle')}</h2>
+    <p class="muted hint">{t('upload.routingHint')}</p>
     {#if rulesLoaded}
       {#if rules.length > 0}
         <ul class="rule-list">
@@ -185,7 +174,7 @@
                   <option value={f.uid}>{f.name}</option>
                 {/each}
               </select>
-              <button class="icon-btn danger" type="button" title="Remove rule" onclick={() => removeRule(i)}>
+              <button class="icon-btn danger" type="button" title={t('upload.removeRule')} onclick={() => removeRule(i)}>
                 ✕
               </button>
             </li>
@@ -197,11 +186,11 @@
           {/each}
         </datalist>
       {:else}
-        <p class="muted">No rules — uploads to the root stay in the root.</p>
+        <p class="muted">{t('upload.noRules')}</p>
       {/if}
       <div class="rule-actions">
         <button class="btn ghost" type="button" onclick={addRule} disabled={folders.length === 0}>
-          + Add rule
+          + {t('upload.addRule')}
         </button>
         <button
           class="btn btn-primary busy-btn"
@@ -210,16 +199,16 @@
           onclick={() => void saveRouting()}
         >
           {#if rulesSaving}<span class="spinner btn-spin"></span>{/if}
-          {rulesSaving ? 'Saving…' : 'Save'}
+          {rulesSaving ? t('common.saving') : t('common.save')}
         </button>
       </div>
       {#if folders.length === 0}
-        <p class="muted hint">Create a folder in the drive first.</p>
+        <p class="muted hint">{t('upload.createFolderFirst')}</p>
       {/if}
       {#if rulesMsg}<p class="ok-text" transition:fadeUp>{rulesMsg}</p>{/if}
       {#if rulesError}<p class="error-text">{rulesError}</p>{/if}
     {:else}
-      <p class="muted">Loading…</p>
+      <p class="muted">{t('common.loading')}</p>
     {/if}
   </section>
 </main>

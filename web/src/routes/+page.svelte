@@ -1,5 +1,5 @@
 <svelte:head>
-  <title>ii-drive — Files</title>
+  <title>ii-drive — {t('nav.files')}</title>
 </svelte:head>
 
 <script lang="ts">
@@ -7,6 +7,7 @@
   import { ApiError, clearToken, getMe, getToken, type Me } from '$lib/api';
   import Drive from '$lib/screens/DriveScreen.svelte';
   import { fadeOnly, fadeUp } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   let me = $state<Me | null>(null);
   let booting = $state(true);
@@ -36,7 +37,7 @@
         if (!m.authorized) {
           // Telegram not connected yet (e.g. right after a server restart)
           // — keep the token and let the user retry.
-          bootError = m.error ?? 'Telegram is not connected yet.';
+          bootError = m.error ?? t('boot.notConnected');
           return;
         }
         if (!m.channel_selected) {
@@ -67,7 +68,7 @@
 {:else if bootError}
   <div class="center-screen boot-retry" in:fadeUp>
     <p class="error-text">{bootError}</p>
-    <button class="btn btn-primary" type="button" onclick={() => retryTick++}>Retry</button>
+    <button class="btn btn-primary" type="button" onclick={() => retryTick++}>{t('common.retry')}</button>
   </div>
 {:else if me}
   <!-- Opacity only: a transform here would become the containing block for

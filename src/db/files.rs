@@ -152,7 +152,9 @@ pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), 
 
 pub async fn get(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<Option<FileRow>, DbError> {
     let mut res = db
-        .query(format!("SELECT {ROW_COLS} FROM file WHERE uid = $uid LIMIT 1"))
+        .query(format!(
+            "SELECT {ROW_COLS} FROM file WHERE uid = $uid LIMIT 1"
+        ))
         .bind(("uid", uid.to_string()))
         .await?;
     let mut rows: Vec<serde_json::Value> = res.take(0)?;

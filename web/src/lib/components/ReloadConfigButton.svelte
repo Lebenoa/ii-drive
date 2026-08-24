@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
   import { reloadConfig } from '$lib/api';
+  import { t } from '$lib/i18n.svelte';
 
   let reloading = $state(false);
   let reloadOk = $state(false);
@@ -9,7 +10,7 @@
 
   // The label is derived, so the {#key} block below only replays its fade
   // when the text genuinely changes — no redundant remounts, no blinking.
-  const label = $derived(reloading ? 'Reloading…' : (reloadMsg || '↻ Reload config'));
+  const label = $derived(reloading ? t('settings.reloading') : (reloadMsg || `↻ ${t('settings.reloadConfig')}`));
 
   async function doReload(): Promise<void> {
     if (reloading) return;
@@ -18,7 +19,7 @@
     try {
       await reloadConfig();
       reloadOk = true;
-      reloadMsg = '✓ Config reloaded.';
+      reloadMsg = `✓ ${t('settings.reloaded')}`;
     } catch (err) {
       reloadOk = false;
       reloadMsg = `⚠ ${err instanceof Error ? err.message : String(err)}`;
@@ -38,7 +39,7 @@
   class="btn ghost busy-btn"
   class:success={reloadOk && !reloading}
   type="button"
-  title="Re-read config.toml — paths and credentials need a restart"
+  title={t('settings.reloadConfigHint')}
   disabled={reloading || reloadOk}
   onclick={() => void doReload()}
 >

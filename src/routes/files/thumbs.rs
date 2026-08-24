@@ -88,8 +88,7 @@ pub async fn extract_media_thumb(
     };
     {
         use futures::StreamExt;
-        let mut stream = match crate::stream::file_stream(&tg, part0.message_id, &part0.chat)
-            .await
+        let mut stream = match crate::stream::file_stream(&tg, part0.message_id, &part0.chat).await
         {
             Ok(s) => Box::pin(s),
             Err(e) => {
@@ -240,7 +239,9 @@ pub async fn file_thumb(
         "image/png"
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         "image/webp"
-    } else if bytes.get(4..8) == Some(b"ftyp") && bytes.get(8..12).is_some_and(|b| b.starts_with(b"avi")) {
+    } else if bytes.get(4..8) == Some(b"ftyp")
+        && bytes.get(8..12).is_some_and(|b| b.starts_with(b"avi"))
+    {
         "image/avif"
     } else {
         "image/jpeg"

@@ -1,4 +1,4 @@
-use anyhow::{Result};
+use anyhow::Result;
 use std::sync::{LazyLock, OnceLock, RwLock};
 
 use serde::Deserialize;
@@ -7,8 +7,7 @@ use serde::Deserialize;
 /// through [`get`] (cheap snapshot clone), and refreshed from disk with
 /// [`reload`]. `LazyLock` makes the static self-initializing without
 /// needing a `once_cell`-style dance in `main`.
-static CONFIG: LazyLock<RwLock<Config>> =
-    LazyLock::new(|| RwLock::new(Config::default()));
+static CONFIG: LazyLock<RwLock<Config>> = LazyLock::new(|| RwLock::new(Config::default()));
 
 /// Where the config was loaded from, kept so [`reload`] re-reads the same
 /// file even when the server was started with an explicit path argument.
@@ -26,6 +25,9 @@ pub struct Config {
     pub session_path: String,
     pub max_file_size: u64,
     pub web_dist: String,
+    /// Folder of translation files (`{lang}.json`) served to the web UI,
+    /// which downloads a language only after the user picks it.
+    pub locales_dir: String,
     pub allowed_phones: Vec<String>,
     /// Phone numbers allowed to reach operator-only endpoints (raw-SQL
     /// browser, config reload). Phone rather than Telegram user id because
@@ -34,6 +36,31 @@ pub struct Config {
     pub admin_phones: Vec<String>,
     /// Generate thumbnails for videos/images with ffmpeg when available.
     pub media_thumbs: bool,
+    /// How an accepted upload reaches Telegram. `Stream` relays the client
+    /// body straight into per-part uploaders (no disk usage, but each part
+    /// only starts draining once the sequential body feed reaches it).
+    /// `Spill` buffers the whole body to `spill_dir` first, then drains all
+    /// parts at full aggregate rate — faster tail on fast pipes, costs the
+    /// file size in temporary disk space.
+    pub upload_strategy: UploadStrategy,
+    /// Directory for in-flight upload buffers (strategy `spill`, and the
+    /// resumable-upload sessions, which always spill by design).
+    pub spill_dir: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadStrategy {
+    Stream,
+    Spill,
+}
+
+impl std::fmt::Display for UploadStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            UploadStrategy::Stream => "stream",
+            UploadStrategy::Spill => "spill",
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,9 +75,12 @@ struct RawConfig {
     session_path: Option<String>,
     max_file_size: Option<SizeRepr>,
     web_dist: Option<String>,
+    locales_dir: Option<String>,
     allowed_phones: Option<Vec<String>>,
     admin_phones: Option<Vec<String>>,
     media_thumbs: Option<bool>,
+    upload_strategy: Option<String>,
+    spill_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -66,9 +96,12 @@ impl Default for Config {
             session_path: "data/session.db".into(),
             max_file_size: 2 * 1024 * 1024 * 1024,
             web_dist: "web/dist".into(),
+            locales_dir: "locales".into(),
             allowed_phones: Vec::new(),
             admin_phones: Vec::new(),
             media_thumbs: true,
+            upload_strategy: UploadStrategy::Stream,
+            spill_dir: "data/spill".into(),
         }
     }
 }
@@ -91,7 +124,10 @@ pub fn get() -> Config {
 /// (`db_path`, `session_path`, credentials/secret already baked into open
 /// sessions and issued tokens) are re-read but have no effect until restart.
 pub fn reload() -> anyhow::Result<Config> {
-    let path = CONFIG_PATH.get().map(String::as_str).unwrap_or("config.toml");
+    let path = CONFIG_PATH
+        .get()
+        .map(String::as_str)
+        .unwrap_or("config.toml");
     init(path)
 }
 
@@ -112,6 +148,8 @@ fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
     };
     cfg.session_path = anchor(cfg.session_path);
     cfg.web_dist = anchor(cfg.web_dist);
+    cfg.locales_dir = anchor(cfg.locales_dir);
+    cfg.spill_dir = anchor(cfg.spill_dir);
     cfg
 }
 
@@ -122,8 +160,7 @@ enum SizeRepr {
     Str(String),
 }
 
-pub const DEFAULT_SECRET_WARNING: &str =
-    "config secret is the default placeholder — anyone can log in; set a real `secret` in config.toml";
+pub const DEFAULT_SECRET_WARNING: &str = "config secret is the default placeholder — anyone can log in; set a real `secret` in config.toml";
 
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
@@ -155,11 +192,10 @@ impl Config {
             secret,
             token_ttl_secs: raw.token_ttl_secs.unwrap_or(30 * 24 * 3600),
             db_path: raw.db_path.unwrap_or_else(|| "data/drive.surrealkv".into()),
-            session_path: raw
-                .session_path
-                .unwrap_or_else(|| "data/session.db".into()),
+            session_path: raw.session_path.unwrap_or_else(|| "data/session.db".into()),
             max_file_size,
             web_dist: raw.web_dist.unwrap_or_else(|| "web/dist".into()),
+            locales_dir: raw.locales_dir.unwrap_or_else(|| "locales".into()),
             allowed_phones: raw
                 .allowed_phones
                 .unwrap_or_default()
@@ -175,6 +211,16 @@ impl Config {
                 .filter(|p| !p.is_empty())
                 .collect(),
             media_thumbs: raw.media_thumbs.unwrap_or(true),
+            upload_strategy: match raw.upload_strategy.as_deref() {
+                None | Some("stream") => UploadStrategy::Stream,
+                Some("spill") => UploadStrategy::Spill,
+                Some(other) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid upload_strategy `{other}` (expected \"stream\" or \"spill\")"
+                    ));
+                }
+            },
+            spill_dir: raw.spill_dir.unwrap_or_else(|| "data/spill".into()),
         })
     }
 
@@ -297,6 +343,7 @@ mod tests {
             allowed_phones: vec!["+15550102030".into(), "447700900123".into()],
             ..Config::load("definitely-missing-config.toml").unwrap()
         };
+
         // Formatting differences normalize to the same digits.
         assert!(cfg.phone_allowed("+1 555 010 2030"));
         assert!(cfg.phone_allowed("15550102030"));
@@ -330,5 +377,37 @@ mod tests {
         let none = Config::load("definitely-missing-config.toml").unwrap();
         assert!(none.admin_phones.is_empty());
         assert!(!none.is_admin_phone("+15550102030"));
+    }
+}
+#[cfg(test)]
+mod strategy_tests {
+    use super::*;
+
+    #[test]
+    fn strategy_defaults_to_stream() {
+        let cfg = Config::load("nonexistent-config.toml").unwrap();
+        assert_eq!(cfg.upload_strategy, UploadStrategy::Stream);
+        assert!(!cfg.spill_dir.is_empty());
+    }
+
+    #[test]
+    fn strategy_accepts_both_values_and_rejects_others() {
+        let dir = std::env::temp_dir().join("iidrive-strategy-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (text, want) in [
+            ("upload_strategy = \"stream\"", UploadStrategy::Stream),
+            ("upload_strategy = \"spill\"", UploadStrategy::Spill),
+        ] {
+            let p = dir.join("c.toml");
+            std::fs::write(&p, text).unwrap();
+            assert_eq!(
+                Config::load(p.to_str().unwrap()).unwrap().upload_strategy,
+                want
+            );
+        }
+        let p = dir.join("bad.toml");
+        std::fs::write(&p, "upload_strategy = \"turbo\"").unwrap();
+        assert!(Config::load(p.to_str().unwrap()).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

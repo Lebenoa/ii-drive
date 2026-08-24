@@ -1,6 +1,7 @@
 <script lang="ts">
   import { COUNTRIES, type Country } from '$lib/countries';
   import { pop } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   /**
    * The selected country flows down; picking one flows up through
@@ -146,7 +147,7 @@
     {disabled}
     aria-haspopup="listbox"
     aria-expanded={open}
-    aria-label={`Country code: ${country.name} +${country.dial}`}
+    aria-label={t('login.countryCode', { name: country.name, dial: country.dial })}
     onclick={() => (open ? hide() : show())}
     onkeydown={(e) => {
       // Closed-state keys: open on the arrows. Open-state keys are handled
@@ -167,12 +168,12 @@
       <input
         class="field search"
         type="text"
-        placeholder="Search country or code…"
+        placeholder={t('login.searchCountry')}
         autocomplete="off"
         spellcheck="false"
         bind:this={searchEl}
         bind:value={query}
-        aria-label="Search countries"
+        aria-label={t('login.searchCountry')}
         role="combobox"
         aria-expanded="true"
         aria-controls={open ? 'country-list' : undefined}
@@ -197,7 +198,7 @@
             <span class="muted code">+{c.dial}</span>
           </button>
         {:else}
-          <p class="muted empty">No country matches “{query}”.</p>
+          <p class="muted empty">{t('login.noCountry', { query })}</p>
         {/each}
       </div>
     </div>

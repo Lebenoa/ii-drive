@@ -1,16 +1,18 @@
-
-use axum::routing::{delete, get, post};
 use axum::Router;
+use axum::routing::{delete, get, post};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
-    // Multipart overhead beyond the raw file bytes: boundary, headers.
-    let upload_limit = crate::config::get().max_file_size as usize + 1024 * 1024;
     let public = Router::new()
         .route("/health", get(crate::routes::health))
         .route("/api/limits", get(crate::routes::limits))
+        .route(
+            "/locales/manifest.json",
+            get(crate::routes::locale_manifest),
+        )
+        .route("/locales/{file}", get(crate::routes::locale_file))
         .route("/api/auth/phone", post(crate::routes::auth_phone))
         .route("/api/auth/code", post(crate::routes::auth_code))
         .route("/api/auth/password", post(crate::routes::auth_password))
@@ -24,10 +26,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/avatar", get(crate::routes::avatar))
         .route("/api/media-token", get(crate::routes::media_token))
         .route("/api/botfather", post(crate::routes::botfather_send))
-        .route(
-            "/api/botfather/bots",
-            get(crate::routes::botfather_bots),
-        )
+        .route("/api/botfather/bots", get(crate::routes::botfather_bots))
         .route("/api/botfather/token", post(crate::routes::botfather_token))
         .route(
             "/api/botfather/draft",
@@ -40,8 +39,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/channels/create", post(crate::routes::create_channel))
         .route(
             "/api/bot",
-            get(crate::routes::list_bots)
-                .post(crate::routes::add_bot),
+            get(crate::routes::list_bots).post(crate::routes::add_bot),
         )
         .route("/api/bot/{id}", delete(crate::routes::remove_bot))
         .route(
@@ -49,22 +47,49 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::routes::get_settings).put(crate::routes::save_settings),
         )
         .route("/api/config/reload", post(crate::routes::reload_config))
-        .route("/api/internal-db/tables", get(crate::routes::internal_db_tables))
-        .route("/api/internal-db/query", post(crate::routes::internal_db_query))
+        .route(
+            "/api/internal-db/tables",
+            get(crate::routes::internal_db_tables),
+        )
+        .route(
+            "/api/internal-db/query",
+            post(crate::routes::internal_db_query),
+        )
         .route(
             "/api/rules",
             get(crate::routes::get_rules).put(crate::routes::save_rules),
         )
         .route(
             "/api/files",
-            get(crate::routes::list_files).post(crate::routes::upload_file),
+            get(crate::routes::list_files)
+                .post(crate::routes::upload_file)
+                // The upload cap is runtime-reloadable, so no static body
+                // limit here: the guard reads the live config per request,
+                // and axum's own default cap is disabled for this route
+                // (the handler still enforces the limit while streaming).
+                .layer(axum::extract::DefaultBodyLimit::disable())
+                .layer(axum::middleware::from_fn(crate::routes::upload_limit)),
+        )
+        .route("/api/files/upload/init", post(crate::routes::upload_init))
+        .route(
+            "/api/files/upload/{id}",
+            get(crate::routes::upload_status)
+                .delete(crate::routes::upload_abort)
+                .put(crate::routes::upload_chunk)
+                // Chunks are buffered whole in RAM, so the default-limit
+                // slot stays bounded even though the session's declared
+                // total can be gigabytes.
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/files/upload/{id}/complete",
+            post(crate::routes::upload_complete),
         )
         .route(
             "/api/folders",
             get(crate::routes::list_folders).post(crate::routes::create_folder),
         )
         .route("/api/folders/{id}", delete(crate::routes::delete_folder))
-        .layer(axum::extract::DefaultBodyLimit::max(upload_limit))
         .route("/api/files/{id}", delete(crate::routes::delete_file))
         .route(
             "/api/files/{id}/visibility",

@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::response::Response as AxumResponse;
 use axum::http::header;
+use axum::response::Response as AxumResponse;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
@@ -456,7 +456,9 @@ pub async fn reload_config(
     if !state.is_admin(uid).await {
         return Err(ApiError::not_found("not found"));
     }
-    let cfg = crate::config::reload().map_err(|e| e.to_string()).map_err(ApiError::bad_request)?;
+    let cfg = crate::config::reload()
+        .map_err(|e| e.to_string())
+        .map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "ok": true,
         "max_file_size": cfg.max_file_size,
@@ -518,7 +520,9 @@ mod tests {
         let accepted = save_rules(
             State(state.clone()),
             Extension(Caller(11)),
-            Json(RulesBody { rules: vec![rule.clone()] }),
+            Json(RulesBody {
+                rules: vec![rule.clone()],
+            }),
         )
         .await
         .expect("own folder is accepted");

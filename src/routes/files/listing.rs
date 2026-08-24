@@ -5,15 +5,11 @@ use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-use super::{is_message_gone, FileDto, ListQuery, MoveBody, VisibilityBody};
+use super::{FileDto, ListQuery, MoveBody, VisibilityBody, is_message_gone};
 
 /// A file the caller owns. Rows belonging to another account answer 404
 /// rather than 403: whether that uid exists is not the caller's business.
-async fn owned(
-    state: &AppState,
-    uid: i64,
-    id: &str,
-) -> ApiResult<crate::db::FileRow> {
+async fn owned(state: &AppState, uid: i64, id: &str) -> ApiResult<crate::db::FileRow> {
     crate::db::get(&state.db, id)
         .await?
         .filter(|row| row.owner == uid)
@@ -54,7 +50,9 @@ pub async fn set_visibility(
     if !crate::db::set_public(&state.db, &id, body.public).await? {
         return Err(ApiError::not_found("file not found"));
     }
-    Ok(Json(serde_json::json!({ "ok": true, "public": body.public })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "public": body.public }),
+    ))
 }
 
 pub async fn list_files(

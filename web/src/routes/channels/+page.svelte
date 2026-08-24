@@ -1,5 +1,5 @@
 <svelte:head>
-  <title>ii-drive — Channels</title>
+  <title>ii-drive — {t('channels.title')}</title>
 </svelte:head>
 
 <script lang="ts">
@@ -7,6 +7,7 @@
   import { getMe, getToken } from '$lib/api';
   import Channels from '$lib/components/ChannelPicker.svelte';
   import { fadeUp } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   let checking = $state(true);
 

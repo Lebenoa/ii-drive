@@ -1,4 +1,4 @@
-use super::{bots, settings, Conn, DbError, UNOWNED};
+use super::{Conn, DbError, UNOWNED, bots, settings};
 
 /// Latest schema version; a database without a recorded version is v1.
 pub(super) const SCHEMA_LATEST: u64 = 5;
@@ -21,9 +21,7 @@ pub(super) async fn set_schema_version(
 
 /// Some(version) when `setting:schema` exists, None on a database that has
 /// never been through migrate().
-async fn schema_version_recorded(
-    db: &surrealdb::Surreal<Conn>,
-) -> Result<Option<u64>, DbError> {
+async fn schema_version_recorded(db: &surrealdb::Surreal<Conn>) -> Result<Option<u64>, DbError> {
     let mut res = db.query("SELECT version FROM setting:schema").await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
     Ok(rows
@@ -84,10 +82,7 @@ pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
                     .await?;
                 let updated: Vec<serde_json::Value> = res.take(0)?;
                 if !updated.is_empty() {
-                    tracing::warn!(
-                        "migration v3: {} files defaulted to private",
-                        updated.len()
-                    );
+                    tracing::warn!("migration v3: {} files defaulted to private", updated.len());
                 }
             }
             4 => {

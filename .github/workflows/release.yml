@@ -1,0 +1,122 @@
+# Release build: web UI -> release server -> bundle -> GitHub release.
+#
+# One matrix job per platform; every job produces a self-contained bundle
+# laid out exactly like the repo defaults expect, so it runs after unpack +
+# `cp config.example.toml config.toml`:
+#
+#   ii-drive[.exe]          release server (web UI embedded path ready)
+#   config.example.toml     template; relative paths resolve beside the exe
+#   README.md
+#   web/dist/**             built SPA served at "/"
+#   locales/en.json         English dictionary (the only bundled language;
+#                           other languages are fetched from this repo)
+#
+# Translations are deliberately NOT part of the SPA build. English ships in
+# the bundle as the offline fallback; every other language is downloaded
+# from raw.githubusercontent.com when the user selects it, and the switcher
+# catalog is locales/manifest.json from the repo.
+#
+# Linux builds on ubuntu-22.04 on purpose: a glibc-linked binary needs the
+# builder's glibc version or newer, and 22.04's glibc 2.35 keeps the release
+# compatible with Debian 12 / Ubuntu 22.04 and later.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BUNDLE: bundle
+
+jobs:
+  release:
+    name: release (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+            exe: ii-drive.exe
+            pack: zip
+          - os: ubuntu-22.04
+            target: linux-x64
+            exe: ii-drive
+            pack: tgz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # npm rather than bun: the repo's bun.lock is for local dev, and npm
+      # sidesteps any bun-vs-old-glibc friction on the pinned 22.04 builder.
+      - name: Install web dependencies
+        working-directory: web
+        run: npm install
+
+      # The SPA is platform-independent; built per-job anyway because it is
+      # cheap and keeps each bundle self-produced.
+      - name: Build web UI
+        working-directory: web
+        run: npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Offline unit suite; gates the release before the slow link.
+      - name: Test
+        run: cargo test
+
+      - name: Build server (release)
+        run: cargo build --release
+
+      - name: Assemble bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "$env:BUNDLE/web/dist", "$env:BUNDLE/locales" | Out-Null
+          Copy-Item "target/release/${{ matrix.exe }}" $env:BUNDLE/
+          Copy-Item config.example.toml $env:BUNDLE/
+          Copy-Item README.md $env:BUNDLE/
+          Copy-Item -Recurse -Force web/dist/* "$env:BUNDLE/web/dist/"
+          Copy-Item locales/en.json $env:BUNDLE/locales/
+
+      - name: Compress bundle
+        shell: pwsh
+        run: |
+          $stem = "ii-drive-${{ github.ref_name }}-${{ matrix.target }}"
+          if ("${{ matrix.pack }}" -eq "zip") {
+            Compress-Archive -Path "$env:BUNDLE/*" -DestinationPath "$stem.zip"
+          } else {
+            # Copy-Item does not guarantee the exec bit survives the copy,
+            # and tar preserves modes — set it explicitly or the unpacked
+            # server refuses to start.
+            chmod +x "$env:BUNDLE/${{ matrix.exe }}"
+            tar -czf "$stem.tar.gz" -C $env:BUNDLE .
+          }
+          Get-Item "$stem.*" | Select-Object Name, Length
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ii-drive-${{ github.ref_name }}-${{ matrix.target }}
+          path: ii-drive-${{ github.ref_name }}-${{ matrix.target }}.*
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ii-drive-${{ github.ref_name }}-${{ matrix.target }}.*
+          generate_release_notes: true

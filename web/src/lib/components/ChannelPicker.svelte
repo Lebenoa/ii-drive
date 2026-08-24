@@ -8,6 +8,7 @@
     type ChannelInfo,
   } from '$lib/api';
   import { fadeUp, flipDur, pop, stagger } from '$lib/motion';
+  import { t } from '$lib/i18n.svelte';
 
   let {
     onDone = null,
@@ -94,17 +95,17 @@
   <div class="card picker-card" class:bare={embedded}>
     {#if !embedded}
       <h1 class="brand">ii-drive</h1>
-      <p class="muted tagline">Choose where your files are stored</p>
-      <p class="muted hint">Pick one or more channels. Uploads are spread across them.</p>
+      <p class="muted tagline">{t('channels.tagline')}</p>
+      <p class="muted hint">{t('channels.hint')}</p>
     {/if}
 
     {#if loading}
       <p class="muted loading-row">
         <span class="spinner btn-spin"></span>
-        Loading your chats…
+        {t('channels.loading')}
       </p>
     {:else}
-      <div class="list" role="listbox" aria-label="Storage channels">
+      <div class="list" role="listbox" aria-label={t('telegram.storageChannels')}>
         {#each available as c, i (c.chat)}
           <button
             type="button"
@@ -121,7 +122,7 @@
             <span class="muted key">{c.chat}</span>
           </button>
         {:else}
-          <p class="muted" in:fadeUp>No channels found — add this account to a channel first.</p>
+          <p class="muted" in:fadeUp>{t('channels.noneFound')}</p>
         {/each}
       </div>
 
@@ -136,7 +137,7 @@
         <input
           class="field"
           type="text"
-          placeholder="Or create a new channel…"
+          placeholder={t('channels.createPlaceholder')}
           bind:value={newTitle}
           maxlength={128}
           disabled={creating}
@@ -147,24 +148,24 @@
           disabled={creating || newTitle.trim().length === 0}
         >
           {#if creating}<span class="spinner btn-spin"></span>{/if}
-          {creating ? 'Creating…' : 'Create'}
+          {creating ? t('channels.creating') : t('channels.create')}
         </button>
       </form>
 
       {#if error}<p class="error-text">{error}</p>{/if}
       {#if wireFailures.length > 0}
         <div class="wire-warn">
-          <p class="muted">Saved, but some bots could not join:</p>
+          <p class="muted">{t('channels.wireWarn')}</p>
           <ul>
             {#each wireFailures as f (f.bot + f.chat)}
               <li><span class="error-text">{f.bot} → {f.title}: {f.error}</span></li>
             {/each}
           </ul>
           <button class="btn ghost" type="button" onclick={() => void save()}>
-            Retry
+            {t('common.retry')}
           </button>
         </div>
-      {:else if saved && !redirectOnSave}<p class="muted saved-note" transition:fadeUp>Saved.</p>{/if}
+      {:else if saved && !redirectOnSave}<p class="muted saved-note" transition:fadeUp>{t('common.saved')}</p>{/if}
 
       <button
         class="btn btn-primary busy-btn"
@@ -173,7 +174,7 @@
         onclick={save}
       >
         {#if saving}<span class="spinner btn-spin"></span>{/if}
-        {saving ? 'Saving…' : `Use ${selectedChats.length || ''} selected`}
+        {saving ? t('common.saving') : t('channels.useSelected', { n: selectedChats.length })}
       </button>
     {/if}
   </div>

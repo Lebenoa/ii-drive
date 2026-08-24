@@ -37,11 +37,7 @@ fn stage_of(draft: &BotDraft) -> &'static str {
         .iter()
         .filter(|m| m.who == "me" && m.text != "/newbot")
         .count();
-    if answered == 0 {
-        "name"
-    } else {
-        "username"
-    }
+    if answered == 0 { "name" } else { "username" }
 }
 
 fn draft_json(draft: &BotDraft) -> serde_json::Value {
@@ -84,10 +80,19 @@ pub async fn send(
         .await?
         .unwrap_or_default();
 
-    let reply = tg.botfather_send(text).await.map_err(ApiError::bad_request)?;
+    let reply = tg
+        .botfather_send(text)
+        .await
+        .map_err(ApiError::bad_request)?;
 
-    draft.log.push(DraftMsg { who: "me".into(), text: text.to_string() });
-    draft.log.push(DraftMsg { who: "bf".into(), text: reply.clone() });
+    draft.log.push(DraftMsg {
+        who: "me".into(),
+        text: text.to_string(),
+    });
+    draft.log.push(DraftMsg {
+        who: "bf".into(),
+        text: reply.clone(),
+    });
     if draft.log.len() > MAX_DRAFT_LOG {
         let cut = draft.log.len() - MAX_DRAFT_LOG;
         draft.log.drain(..cut);

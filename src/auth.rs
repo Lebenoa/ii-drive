@@ -93,9 +93,7 @@ impl Tokens {
     /// Verifies a `sign_file` signature for `uid`.
     pub fn verify_file(&self, uid: &str, sig: &str) -> bool {
         let mut parts = sig.split('.');
-        let (Some(exp_str), Some(mac), None) =
-            (parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(exp_str), Some(mac), None) = (parts.next(), parts.next(), parts.next()) else {
             return false;
         };
         let Ok(exp) = exp_str.parse::<u64>() else {
@@ -302,4 +300,3 @@ mod tests {
         assert_eq!(Tokens::new("k2", 3600).verify_media(&media), None);
     }
 }
-

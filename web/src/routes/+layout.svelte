@@ -4,8 +4,15 @@
 	import { onNavigate } from '$app/navigation';
 	import Navbar from '$lib/components/TopBar.svelte';
 	import { reducedMotion } from '$lib/motion';
+	import { initI18n, i18nReady } from '$lib/i18n.svelte';
 
 	let { children } = $props();
+
+	// Download the saved (or English) dictionary before first paint so the
+	// app never flashes raw message keys.
+	$effect(() => {
+		void initI18n();
+	});
 
 	// Cross-route crossfade via the View Transition API. Browsers without it
 	// (Firefox, Safari < 18.2) navigate instantly — no polyfill, no layout
@@ -21,8 +28,10 @@
 	});
 </script>
 
-{#if page.url.pathname !== '/login'}
-	<Navbar />
-{/if}
+{#if i18nReady()}
+	{#if page.url.pathname !== '/login'}
+		<Navbar />
+	{/if}
 
-{@render children()}
+	{@render children()}
+{/if}

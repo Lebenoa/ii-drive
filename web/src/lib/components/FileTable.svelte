@@ -5,6 +5,7 @@
   import { closeAttrs, closeDialog, openDialog } from '$lib/invoker';
   import { collapse, fadeOnly, fadeUp, flipDur, pop, stagger } from '$lib/motion';
   import { flip } from 'svelte/animate';
+  import { t } from '$lib/i18n.svelte';
 
   let {
     files,
@@ -113,7 +114,7 @@
     bulkBusy = false;
     selected = new Set();
     onDeleted();
-    if (failed > 0) bulkError = `${failed} file(s) failed to delete`;
+    if (failed > 0) bulkError = t('files.deleteFailed', { n: failed });
   }
 
   async function bulkVisibility(isPublic: boolean): Promise<void> {
@@ -133,7 +134,7 @@
     }
     bulkBusy = false;
     if (failed === 0) selected = new Set();
-    else bulkError = `${failed} file(s) failed to update`;
+    else bulkError = t('files.updateFailed', { n: failed });
   }
 
   const BULK_DIALOG = 'dlg-bulk-delete';
@@ -208,10 +209,10 @@
 </script>
 
 {#if selected.size > 0}
-  <div class="bulk-bar" role="toolbar" aria-label="Selection actions" transition:collapse>
-    <span class="bulk-count">{selected.size} selected</span>
+  <div class="bulk-bar" role="toolbar" aria-label={t('files.selectionActions')} transition:collapse>
+    <span class="bulk-count">{t('files.nSelected', { n: selected.size })}</span>
     <button class="btn ghost" type="button" onclick={selectAll}>
-      {allSelected ? 'Clear all' : 'Select all'}
+      {allSelected ? t('files.clearAll') : t('files.selectAll')}
     </button>
     <button
       class="btn ghost"
@@ -219,7 +220,7 @@
       disabled={bulkBusy}
       onclick={() => void bulkVisibility(true)}
     >
-      Make public
+      {t('files.makePublic')}
     </button>
     <button
       class="btn ghost"
@@ -227,7 +228,7 @@
       disabled={bulkBusy}
       onclick={() => void bulkVisibility(false)}
     >
-      Make private
+      {t('files.makePrivate')}
     </button>
     <button
       class="btn ghost"
@@ -238,7 +239,7 @@
         selected = new Set();
       }}
     >
-      ✂ Cut
+      ✂ {t('common.cut')}
     </button>
     <button
       class="btn btn-danger"
@@ -246,7 +247,7 @@
       disabled={bulkBusy}
       onclick={() => openDialog(BULK_DIALOG)}
     >
-      Delete
+      {t('common.delete')}
     </button>
     <button class="btn ghost" type="button" onclick={() => (selected = new Set())}>
       ✕
@@ -256,12 +257,12 @@
 {:else}
 <!-- Both bars share one slot, so both collapse: otherwise whichever leaves
      drops its height instantly and the table jumps up under the cursor. -->
-<div class="view-toggle" role="group" aria-label="Display mode" transition:collapse>
+<div class="view-toggle" role="group" aria-label={t('files.displayMode')} transition:collapse>
   <button
     class="icon-btn"
     class:active={view === 'list'}
     type="button"
-    title="List view"
+    title={t('files.listView')}
     aria-pressed={view === 'list'}
     onclick={() => setView('list')}
   >
@@ -271,7 +272,7 @@
     class="icon-btn"
     class:active={view === 'grid'}
     type="button"
-    title="Grid view"
+    title={t('files.gridView')}
     aria-pressed={view === 'grid'}
     onclick={() => setView('grid')}
   >
@@ -290,7 +291,7 @@
           class:busy={deletingId === file.id || togglingId === file.id}
           role="button"
           tabindex="0"
-          aria-label="{file.name} — open preview"
+          aria-label={t('files.openPreview', { name: file.name })}
           draggable="true"
           ondragstart={(e) => onDragStart(e, file)}
           in:fadeUp={{ delay: stagger(i) }}
@@ -300,7 +301,7 @@
         <label class="g-check">
           <input
             type="checkbox"
-            aria-label="Select {file.name}"
+            aria-label={t('files.select', { name: file.name })}
             checked={selected.has(file.id)}
             onchange={() => toggleSelect(file.id)}
           />
@@ -352,7 +353,7 @@
             <button
               class="icon-btn act-copy"
               type="button"
-              title="Copy public link"
+              title={t('files.copyLink')}
               onclick={() => void copyLink(file)}
             >
               <span class="act-ico">
@@ -364,13 +365,13 @@
               </span>
             </button>
           {/if}
-          <a class="icon-btn" href={murl(file, "raw", true)} title="Download">⬇</a>
+          <a class="icon-btn" href={murl(file, "raw", true)} title={t('common.download')}>⬇</a>
           <button
             class="icon-btn"
             type="button"
             title={file.public
-              ? 'Public — anyone with the link can download'
-              : 'Private — only you can download'}
+              ? t('files.publicTitle')
+              : t('files.privateTitle')}
             disabled={togglingId === file.id}
             onclick={() => void toggleVisibility(file)}
           >
@@ -379,7 +380,7 @@
           <button
             class="icon-btn danger"
             type="button"
-            title="Delete"
+            title={t('common.delete')}
             disabled={deletingId === file.id}
             onclick={() => askRemove(file)}
           >
@@ -388,7 +389,7 @@
         </div>
       </div>
     {:else}
-      <p class="empty muted">No files found — upload something to get started.</p>
+      <p class="empty muted">{t('files.empty')}</p>
     {/each}
   </div>
 {:else}
@@ -398,17 +399,17 @@
         <th class="c-sel">
           <input
             type="checkbox"
-            aria-label="Select all"
+            aria-label={t('files.selectAll')}
             checked={allSelected}
             indeterminate={!allSelected && selected.size > 0}
             onchange={selectAll}
           />
         </th>
         <th class="c-icon"></th>
-        <th>Name</th>
-        <th class="c-size">Size</th>
-        <th class="c-date">Uploaded</th>
-        <th class="c-actions">Actions</th>
+        <th>{t('files.name')}</th>
+        <th class="c-size">{t('files.size')}</th>
+        <th class="c-date">{t('files.uploaded')}</th>
+        <th class="c-actions">{t('files.actions')}</th>
       </tr>
     </thead>
     <tbody>
@@ -426,7 +427,7 @@
           <td class="c-sel">
             <input
               type="checkbox"
-              aria-label="Select {file.name}"
+              aria-label={t('files.select', { name: file.name })}
               checked={selected.has(file.id)}
               onchange={() => toggleSelect(file.id)}
             />
@@ -477,7 +478,7 @@
               <button
                 class="icon-btn act-copy"
                 type="button"
-                title="Copy public link"
+                title={t('files.copyLink')}
                 onclick={() => void copyLink(file)}
               >
                 <span class="act-ico">
@@ -486,16 +487,16 @@
                   {:else}
                     🔗
                   {/if}
-                </span><span class="act-lbl">{copiedId === file.id ? 'copied' : ''}</span>
+                </span><span class="act-lbl">{copiedId === file.id ? t('files.copied') : ''}</span>
               </button>
             {/if}
-            <a class="icon-btn" href={murl(file, "raw", true)} title="Download">⬇</a>
+            <a class="icon-btn" href={murl(file, "raw", true)} title={t('common.download')}>⬇</a>
             <button
               class="icon-btn"
               type="button"
               title={file.public
-                ? 'Public — anyone with the link can download'
-                : 'Private — only you can download'}
+                ? t('files.publicTitle')
+                : t('files.privateTitle')}
               disabled={togglingId === file.id}
               onclick={() => void toggleVisibility(file)}
             >
@@ -504,7 +505,7 @@
             <button
               class="icon-btn danger"
               type="button"
-              title="Delete"
+              title={t('common.delete')}
               disabled={deletingId === file.id}
               onclick={() => askRemove(file)}
             >
@@ -514,7 +515,7 @@
         </tr>
       {:else}
         <tr>
-          <td colspan="5" class="empty muted">No files found — upload something to get started.</td>
+          <td colspan="5" class="empty muted">{t('files.empty')}</td>
         </tr>
       {/each}
     </tbody>
@@ -529,10 +530,10 @@
   onclose={() => (previewFile = null)}
   onclick={(e: MouseEvent) => {
     const dlg = e.currentTarget as HTMLDialogElement | null;
-    const t = e.target as HTMLElement | null;
+    const tgt = e.target as HTMLElement | null;
     // Light dismiss: the dialog itself (::backdrop) or the empty area of
     // .pv-media around the media element — but not the media/controls.
-    if (dlg && (t === dlg || t?.classList.contains('pv-media'))) dlg.close();
+    if (dlg && (tgt === dlg || tgt?.classList.contains('pv-media'))) dlg.close();
   }}
 >
   {#if previewFile}
@@ -557,11 +558,11 @@
     <div class="pv-bar">
       <span class="pv-name" title={previewFile.name}>{previewFile.name}</span>
       <span class="pv-meta muted">{humanSize(previewFile.size)}</span>
-      <a class="icon-btn" href={murl(previewFile, "raw", true)} title="Download">⬇</a>
+      <a class="icon-btn" href={murl(previewFile, "raw", true)} title={t('common.download')}>⬇</a>
       <button
         class="icon-btn"
         type="button"
-        title="Close"
+        title={t('common.close')}
         onclick={() => closeDialog(PREVIEW_DIALOG)}
       >
         ✕
@@ -572,27 +573,24 @@
 
 <Modal
   id={DELETE_DIALOG}
-  title="Delete file"
+  title={t('files.deleteTitle')}
   onclose={(rv) => {
     if (rv === 'delete' && pendingFile) void remove(pendingFile);
     pendingFile = null;
   }}
 >
   {#if pendingFile}
-    <p>
-      Delete <strong>{pendingFile.name}</strong> ({humanSize(pendingFile.size)})? This removes it
-      from Telegram storage as well — there is no undo.
-    </p>
+    <p>{t('files.deleteBody', { name: pendingFile.name, size: humanSize(pendingFile.size) })}</p>
   {/if}
   {#snippet actions()}
-    <button class="btn" type="submit" {...closeAttrs(DELETE_DIALOG)}>Cancel</button>
+    <button class="btn" type="submit" {...closeAttrs(DELETE_DIALOG)}>{t('common.cancel')}</button>
     <button
       class="btn btn-danger"
       type="submit"
       value="delete"
       disabled={pendingFile !== null && deletingId === pendingFile.id}
     >
-      {pendingFile !== null && deletingId === pendingFile.id ? 'Deleting…' : 'Delete'}
+      {pendingFile !== null && deletingId === pendingFile.id ? t('common.deleting') : t('common.delete')}
     </button>
   {/snippet}
 </Modal>
@@ -1047,17 +1045,16 @@
 
 <Modal
   id={BULK_DIALOG}
-  title="Delete files"
+  title={t('files.deleteBulkTitle')}
   onclose={(rv) => {
     if (rv === 'delete') void bulkDelete();
   }}
 >
-  <p>Delete <strong>{selected.size}</strong> file(s)? This removes them from Telegram storage as
-    well — there is no undo.</p>
+  <p>{t('files.deleteBulkBody', { n: selected.size })}</p>
   {#snippet actions()}
-    <button class="btn" type="submit" {...closeAttrs(BULK_DIALOG)}>Cancel</button>
+    <button class="btn" type="submit" {...closeAttrs(BULK_DIALOG)}>{t('common.cancel')}</button>
     <button class="btn btn-danger" type="submit" value="delete" disabled={bulkBusy}>
-      {bulkBusy ? 'Deleting…' : 'Delete'}
+      {bulkBusy ? t('common.deleting') : t('common.delete')}
     </button>
   {/snippet}
 </Modal>

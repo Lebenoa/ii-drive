@@ -474,21 +474,22 @@ export async function thumbUrl(id: string): Promise<string> {
   return fileUrl(id, 'thumb', {}, mt);
 }
 
-let cachedMax: number | null = null;
-
-/** GET /api/limits — server upload cap, fetched once per page load */
+/** GET /api/limits — server upload cap. Fetched per upload rather than
+ * cached: the cap is a runtime-reloadable config field, and a stale value
+ * here would make the UI reject uploads the server now allows. The request
+ * is tiny next to any upload. */
 export async function maxFileSize(): Promise<number> {
-  if (cachedMax === null) {
-    const res = await request<{ max_file_size: number }>('/api/limits', { auth: false });
-    cachedMax = typeof res.max_file_size === 'number' ? res.max_file_size : Number.POSITIVE_INFINITY;
-  }
-  return cachedMax;
+  const res = await request<{ max_file_size: number }>('/api/limits', { auth: false });
+  return typeof res.max_file_size === 'number' ? res.max_file_size : Number.POSITIVE_INFINITY;
 }
 
+const UPLOAD_CHUNK = 8 * 1024 * 1024;
+
 /**
- * Upload via XHR so we get progress events.
- * Requires X-File-Size header + multipart field "file".
- * `folder` is the target folder id ('' = root), sent as X-Folder.
+ * Chunked resumable upload: init -> PUT chunks at X-Offset -> complete.
+ * Chunks retry with backoff; the server-acknowledged offset survives page
+ * reloads in localStorage so a dropped connection resumes instead of
+ * restarting a multi-gigabyte transfer.
  */
 export async function uploadFile(
   file: File,
@@ -500,49 +501,104 @@ export async function uploadFile(
     throw new ApiError(413, `File is larger than the server limit (${max} bytes)`);
   }
 
-  const { promise, resolve, reject } = Promise.withResolvers<DriveFile>();
+  const resumeKey = `${folder}|${file.name}|${file.size}|${file.lastModified}`;
+  let resumeMap: Record<string, { id: string }> = {};
+  try {
+    resumeMap = JSON.parse(localStorage.getItem('ii_uploads') ?? '{}');
+  } catch {
+    resumeMap = {};
+  }
 
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/api/files');
-  xhr.setRequestHeader('Authorization', `Bearer ${getToken() ?? ''}`);
-  xhr.setRequestHeader('X-File-Size', String(file.size));
-  if (folder) xhr.setRequestHeader('X-Folder', folder);
-  xhr.responseType = 'json';
-
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) onProgress(Math.min(100, Math.round((e.loaded / e.total) * 100)));
-  };
-  xhr.onerror = () =>
-    reject(new ApiError(0, 'Connection lost during upload — check the file size and try again'));
-  xhr.onabort = () => reject(new ApiError(0, 'Upload aborted'));
-  xhr.onload = () => {
-    const body: unknown = xhr.response;
-    if (xhr.status < 200 || xhr.status >= 300) {
-      const msg = errMessage(body, `Upload failed (${xhr.status})`);
-      const apiErr = new ApiError(xhr.status, msg);
-      handleSessionInvalid(apiErr);
-      reject(apiErr);
-      return;
+  let id: string | null = null;
+  let received = 0;
+  const remembered = resumeMap[resumeKey]?.id;
+  if (remembered) {
+    try {
+      const st = await request<{ received: number }>(`/api/files/upload/${remembered}`);
+      id = remembered;
+      received = Math.min(st.received, file.size);
+    } catch {
+      // Session expired or purged — start over.
     }
-    const ok = body !== null && typeof body === 'object' && 'file' in body;
-    resolve(
-      ok
-        ? // Backend contract: {file: DriveFile}; no client-side validator worth its cost here.
-          (body.file as DriveFile)
-        : {
-            id: '',
-            name: file.name,
-            mime: file.type || 'application/octet-stream',
-            size: file.size,
-            created_at: Math.floor(Date.now() / 1000),
-            public: false,
-            has_thumb: false,
-          },
-    );
+  }
+  if (!id) {
+    const r = await request<{ id: string }>('/api/files/upload/init', {
+      method: 'POST',
+      body: { size: file.size, name: file.name, mime: file.type, folder },
+    });
+    id = r.id;
+  }
+  resumeMap[resumeKey] = { id };
+  localStorage.setItem('ii_uploads', JSON.stringify(resumeMap));
+
+  const rawPut = (blob: Blob, offset: number) => {
+    const { promise, resolve } = Promise.withResolvers<{
+      status: number;
+      body: unknown;
+      loaded: number;
+    }>();
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `/api/files/upload/${id}`);
+    xhr.setRequestHeader('Authorization', `Bearer ${getToken() ?? ''}`);
+    xhr.setRequestHeader('X-Offset', String(offset));
+    let loaded = 0;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        loaded = e.loaded;
+        onProgress(Math.min(99, Math.round(((offset + loaded) / file.size) * 100)));
+      }
+    };
+    xhr.onerror = () => resolve({ status: 0, body: null, loaded });
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* non-JSON error body */
+      }
+      resolve({ status: xhr.status, body, loaded });
+    };
+    xhr.send(blob);
+    return promise;
   };
 
-  const form = new FormData();
-  form.append('file', file);
-  xhr.send(form);
-  return promise;
+  outer: while (received < file.size) {
+    for (let attempt = 1; ; attempt++) {
+      const end = Math.min(received + UPLOAD_CHUNK, file.size);
+      const res = await rawPut(file.slice(received, end), received);
+      if (res.status >= 200 && res.status < 300) {
+        received = end;
+        continue outer;
+      }
+      // Another tab advanced the session: re-sync rather than fail.
+      if (res.status === 409) {
+        const st = await request<{ received: number }>(`/api/files/upload/${id}`);
+        received = Math.min(st.received, file.size);
+        continue outer;
+      }
+      // Transient failures get bounded backoff; anything else is fatal.
+      if ((res.status === 0 || res.status >= 500 || res.status === 429) && attempt <= 5) {
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+        continue;
+      }
+      delete resumeMap[resumeKey];
+      localStorage.setItem('ii_uploads', JSON.stringify(resumeMap));
+      throw new ApiError(res.status || 0, errMessage(res.body, 'Connection lost during upload — check the file size and try again'));
+    }
+  }
+  onProgress(99);
+
+  try {
+    const done = await request<{ file: DriveFile }>(`/api/files/upload/${id}/complete`, {
+      method: 'POST',
+    });
+    delete resumeMap[resumeKey];
+    localStorage.setItem('ii_uploads', JSON.stringify(resumeMap));
+    onProgress(100);
+    return done.file;
+  } catch (e) {
+    // Keep the session record: complete is retryable while the spill
+    // lives server-side.
+    throw e;
+  }
 }

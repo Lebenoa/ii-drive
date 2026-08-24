@@ -55,8 +55,29 @@ session_path = "data/session.db"
 # "2GiB", "2GB" (= 2_000_000_000), "500MiB", "512MB", "1024KiB", "1024KB"
 max_file_size = "2GiB"
 
+# How an accepted upload reaches Telegram:
+# - "stream" (default): the client body is relayed straight into per-part
+#   uploaders. No temporary disk usage, but each part only starts draining
+#   once the sequential body feed reaches its offset.
+# - "spill": the whole body is buffered to `spill_dir` first, then every
+#   part uploads concurrently at full aggregate rate — faster tail on fast
+#   pipes, at the cost of the file size in temporary disk space.
+upload_strategy = "stream"
+
+# Directory for in-flight upload buffers ("spill" strategy and resumable
+# chunked uploads, which always buffer). Created automatically.
+spill_dir = "data/spill"
+
 # Folder containing the built web UI (svelte app). Served at "/".
 web_dist = "web/dist"
+
+# Folder of web-UI translation files served under /locales/. Only English
+# ("en.json") is required — it ships as the bundled fallback. Every other
+# language is downloaded by the UI from this repository's locales/ folder on
+# GitHub, so the catalog (locales/manifest.json in the repo) and dictionaries
+# update without rebuilding or re-releasing the server.
+# The file "manifest.json" here is reserved and never offered as a language.
+locales_dir = "locales"
 
 # Generate thumbnails for images and videos. Uses ffmpeg for videos when it
 # is on PATH; without it, video thumbs fall back to whatever Telegram

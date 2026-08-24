@@ -22,9 +22,7 @@ pub async fn get_rules(
         return Ok(Vec::new());
     };
     match row.get("rules_json").and_then(|v| v.as_str()) {
-        Some(s) => {
-            serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}")))
-        }
+        Some(s) => serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}"))),
         None => Ok(Vec::new()),
     }
 }
@@ -72,7 +70,10 @@ pub async fn set_split(
     bytes: u64,
 ) -> Result<(), DbError> {
     let mut res = db
-        .query(format!("UPSERT {} SET split_bytes = $b", upload_id(user_key)))
+        .query(format!(
+            "UPSERT {} SET split_bytes = $b",
+            upload_id(user_key)
+        ))
         .bind(("b", bytes as i64))
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
@@ -125,10 +126,7 @@ pub struct ChannelSel {
 /// Channels are stored on one schemaless row per user; the JSON payload keeps
 /// the shape flexible without schema migrations.
 fn setting_id(user_key: &str) -> String {
-    format!(
-        "setting:storage_{}",
-        user_key.replace([':', '-'], "_")
-    )
+    format!("setting:storage_{}", user_key.replace([':', '-'], "_"))
 }
 
 /// Channels the user picked as upload targets; empty when none chosen yet.
@@ -144,8 +142,9 @@ pub async fn get_channels(
         return Ok(Vec::new());
     };
     match row.get("chats_json").and_then(|v| v.as_str()) {
-        Some(s) => serde_json::from_str(s)
-            .map_err(|e| DbError::Shape(format!("channels shape: {e}"))),
+        Some(s) => {
+            serde_json::from_str(s).map_err(|e| DbError::Shape(format!("channels shape: {e}")))
+        }
         None => Ok(Vec::new()),
     }
 }
@@ -158,7 +157,10 @@ pub async fn set_channels(
     let json = serde_json::to_string(&chats)
         .map_err(|e| DbError::Shape(format!("channels serialize: {e}")))?;
     let mut res = db
-        .query(format!("UPSERT {} SET chats_json = $j", setting_id(user_key)))
+        .query(format!(
+            "UPSERT {} SET chats_json = $j",
+            setting_id(user_key)
+        ))
         .bind(("j", json))
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
@@ -228,13 +230,8 @@ pub async fn set_bot_draft(
 
 /// Forgets the draft. Used once the bot reaches the pool, and when the user
 /// cancels the conversation outright.
-pub async fn clear_bot_draft(
-    db: &surrealdb::Surreal<Conn>,
-    user_key: &str,
-) -> Result<(), DbError> {
-    let mut res = db
-        .query(format!("DELETE {}", draft_id(user_key)))
-        .await?;
+pub async fn clear_bot_draft(db: &surrealdb::Surreal<Conn>, user_key: &str) -> Result<(), DbError> {
+    let mut res = db.query(format!("DELETE {}", draft_id(user_key))).await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     Ok(())
 }

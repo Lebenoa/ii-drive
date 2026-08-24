@@ -36,6 +36,7 @@ the interface.
    | `session_path` | `data/session.db` | Pre-multi-account session, migrated on first start; per-account sessions live in `sessions/` beside it |
    | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
+   | `locales_dir` | `locales` | Web-UI translation files, served under `/locales/`; downloaded on demand |
    | `media_thumbs` | `true` | ffmpeg image/video thumbnails; audio cover art is extracted regardless |
 
 2. **Build the web UI:**
@@ -127,6 +128,30 @@ Previews come from three places, in this order:
    turns off, and the only one needing ffmpeg on `PATH`. AVIF is used when
    the build has libaom, else WebP.
 
+### Translations (i18n)
+
+Only **English** ships with the app: `locales/en.json` is the bundled
+fallback dictionary. Every other language is downloaded at runtime, when
+the user picks it under **Settings → Other**, straight from this
+repository's `locales/` folder on GitHub — so translations improve and new
+ones appear without rebuilding or re-releasing anything.
+
+- The switcher's catalog is [`locales/manifest.json`](locales/manifest.json)
+  in the repo; add your language there.
+- Dictionaries are nested JSON flattened to dot keys; `{name}`-style
+  placeholders are interpolated; `_meta.name` (display name) is metadata,
+  not a message.
+- English always loads first as the key-fallback net; if a download fails,
+  the UI keeps working on English.
+
+Adding a language = two commits: `locales/th.json` (copy of `en.json`,
+translated) plus an entry in `locales/manifest.json`. No rebuild.
+
+The server still serves whatever sits in `locales_dir` under
+`/locales/…` — that is how the bundled `en.json` reaches the UI, and it
+works as an offline override point (`manifest.json` there is reserved and
+never listed as a language).
+
 ### Troubleshooting login
 
 If the server logs `AUTH_KEY_UNREGISTERED`, the stored MTProto session is stale
@@ -171,6 +196,8 @@ just log in again through the web UI.
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
 | POST | `/api/config/reload` | token + admin | Re-read config.toml (runtime fields hot-apply) |
 | GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
+| GET | `/locales/manifest.json` | — | Languages available in `locales_dir`, with display names |
+| GET | `/locales/{lang}.json` | — | One translation dictionary; the UI downloads it on language change |
 | GET/POST | `/api/internal-db/tables` `/query` | token + admin | Developer mode: list tables / run raw SurrealQL. Unrestricted, cross-tenant — callers outside `admin_phones` get 404 |
 | GET | `/health` | — | Liveness probe |
 

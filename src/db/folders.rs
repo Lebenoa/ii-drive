@@ -68,10 +68,7 @@ pub async fn create_folder(
 }
 
 /// True when the folder still holds files or subfolders.
-pub async fn folder_is_empty(
-    db: &surrealdb::Surreal<Conn>,
-    uid: &str,
-) -> Result<bool, DbError> {
+pub async fn folder_is_empty(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<bool, DbError> {
     // count() yields a {count: 0} row even for empty sets, so read the
     // numbers instead of checking for absent rows.
     let mut res = db

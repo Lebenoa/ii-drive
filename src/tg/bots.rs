@@ -1,5 +1,5 @@
-use grammers_client::tl;
 use grammers_client::Client;
+use grammers_client::tl;
 
 use super::{BotHandle, BotSession, PeerAuth, PeerId, PeerRef, TgManager, friendly};
 
@@ -72,10 +72,16 @@ impl TgManager {
         v
     }
 
-    /// Picks a client for downloads: rotating through the bot pool for
-    /// channel-stored files, falling back to the user session (also used
-    /// for Saved Messages, which bots cannot read).
-    pub async fn download_target(&self, chat: &str) -> Result<(Client, PeerRef), String> {
+    /// Picks a client for channel traffic in either direction — uploads and
+    /// downloads alike: rotating through the bot pool for channel-stored
+    /// files, falling back to the user session (also used for Saved
+    /// Messages, which bots cannot read). Every bot is a session of its
+    /// own, so concurrent transfers each get a separate MTProto connection
+    /// with separate rate limits instead of queueing on one.
+    pub async fn pool_target(
+        &self,
+        chat: &str,
+    ) -> Result<(Client, PeerRef, Option<String>), String> {
         let key = chat.trim();
         if let Ok(n) = key.parse::<i64>() {
             let bots = self.st.lock().await.bots.len();
@@ -111,8 +117,8 @@ impl TgManager {
                                 .await
                                 .map_err(|e| format!("peer ref failed: {e}"))?
                                 .ok_or_else(|| format!("chat `{key}` has no usable peer ref"))?;
-                            tracing::debug!(bot = %bs.username, "download via bot");
-                            return Ok((bs.client.clone(), pref));
+                            tracing::info!(bot = %bs.username, chat = %key, "transfer via bot");
+                            return Ok((bs.client.clone(), pref, Some(bs.username.clone())));
                         }
                         Err(e) => {
                             last_err = format!("bot {}: {e}", bs.username);
@@ -124,30 +130,42 @@ impl TgManager {
         }
         let client = self.ensure().await?;
         let peer = self.storage_peer(chat).await?;
-        Ok((client, peer))
+        Ok((client, peer, None))
     }
 
     /// Invites every configured bot into the given storage chat and
     /// promotes it to admin, so downloads work through the pool.
     pub async fn add_bots_to_chat(&self, chat: &str) -> Vec<(String, Result<(), String>)> {
-        let sessions: Vec<BotHandle> = {
+        // One snapshot pass pairs each bot's live client with its stored
+        // identity, so the whole flow below sees a consistent pool.
+        let bots: Vec<(BotHandle, Option<tl::enums::InputUser>)> = {
             let st = self.st.lock().await;
             st.bots
                 .values()
-                .map(|b| BotHandle {
-                    client: b.conn.client.clone(),
-                    username: b.username.clone(),
+                .map(|b| {
+                    (
+                        BotHandle {
+                            client: b.conn.client.clone(),
+                            username: b.username.clone(),
+                        },
+                        b.access_hash.map(|h| {
+                            tl::enums::InputUser::User(tl::types::InputUser {
+                                user_id: b.id,
+                                access_hash: h,
+                            })
+                        }),
+                    )
                 })
                 .collect()
         };
-        if sessions.is_empty() {
+        if bots.is_empty() {
             return Vec::new();
         }
 
         let Ok(peer_ref) = self.storage_peer(chat).await else {
-            return sessions
+            return bots
                 .into_iter()
-                .map(|b| (b.username, Err(format!("cannot resolve `{chat}`"))))
+                .map(|(b, _)| (b.username, Err(format!("cannot resolve `{chat}`"))))
                 .collect();
         };
         let channel_id = peer_ref.id.bare_id_unchecked();
@@ -163,33 +181,19 @@ impl TgManager {
         // USER_ID_INVALID — so resolve each bot by username here, through
         // the user client, right before inviting.
         let st = self.st.lock().await;
-        let stored: Vec<(String, Option<tl::enums::InputUser>)> = st
-            .bots
-            .values()
-            .map(|b| {
-                (
-                    b.username.clone(),
-                    b.access_hash.map(|h| {
-                        tl::enums::InputUser::User(tl::types::InputUser {
-                            user_id: b.id,
-                            access_hash: h,
-                        })
-                    }),
-                )
-            })
-            .collect();
         let user_client = st.conn.as_ref().map(|c| c.client.clone());
         drop(st);
 
         let Some(user_client) = user_client else {
-            return sessions
+            return bots
                 .into_iter()
-                .map(|b| (b.username, Err("user session not connected".into())))
+                .map(|(b, _)| (b.username, Err("user session not connected".into())))
                 .collect();
         };
 
         let mut results = Vec::new();
-        for (username, stored_user) in stored {
+        for (bot, stored_user) in bots {
+            let username = bot.username.clone();
             let res = (|| async {
                 let input_user = match user_client.resolve_username(&username).await {
                     Ok(Some(peer)) => match peer {
@@ -204,11 +208,9 @@ impl TgManager {
                                 format!("bot @{username} resolved to an empty account")
                             })?,
                         },
-                        _ => {
-                            stored_user.clone().ok_or_else(|| {
-                                format!("@{username} is not a user account")
-                            })?
-                        }
+                        _ => stored_user
+                            .clone()
+                            .ok_or_else(|| format!("@{username} is not a user account"))?,
                     },
                     Ok(None) => stored_user.clone().ok_or_else(|| {
                         format!(
@@ -272,6 +274,21 @@ impl TgManager {
                     })
                     .await
                     .map_err(|e| friendly(format!("promoting failed: {e}")))?;
+
+                // Downloads resolve this channel from the BOT's side by id
+                // alone, which Telegram refuses (CHANNEL_INVALID) unless the
+                // bot's own session already holds the channel. Invite and
+                // promote happen from the user account, so a fresh channel
+                // never reaches the bot's cache on its own — make the bot
+                // index it once now, while the membership is brand new.
+                bot.client
+                    .invoke(&tl::functions::channels::GetChannels {
+                        id: vec![input_channel.clone()],
+                    })
+                    .await
+                    .map_err(|e| {
+                        format!("wired, but @{username} could not index the channel: {e}")
+                    })?;
                 Ok(())
             })()
             .await;
