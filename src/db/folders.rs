@@ -5,8 +5,8 @@ use super::{Conn, DbError};
 /// A user-created directory; `parent` is a folder id, "" = root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderRow {
-    /// Owning Telegram user id; `UNOWNED` for rows written before
-    /// multi-tenancy, until an account adopts them.
+    /// Owning Telegram user id. `UNOWNED` is the serde fallback for rows
+    /// that arrive without one — invisible to every tenant filter.
     #[serde(default, deserialize_with = "super::files::null_as_zero")]
     pub owner: i64,
     pub uid: String,

@@ -12,8 +12,8 @@ pub struct FilePart {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRow {
-    /// Owning Telegram user id; `UNOWNED` for rows written before
-    /// multi-tenancy, until an account adopts them.
+    /// Owning Telegram user id. `UNOWNED` is the serde fallback for rows
+    /// that arrive without one — invisible to every tenant filter.
     #[serde(default)]
     pub owner: i64,
     pub uid: String,
@@ -94,8 +94,7 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         public: bool,
         #[serde(default)]
         thumb: Option<String>,
-        // Pre-multi-tenant rows carry no owner; they stay unowned until
-        // adopt_unowned() hands them to an account.
+        // Missing owner stays UNOWNED: invisible to every tenant filter.
         #[serde(default, deserialize_with = "null_as_zero")]
         owner: i64,
     }

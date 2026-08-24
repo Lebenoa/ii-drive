@@ -126,25 +126,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 pub async fn run(state: AppState) -> std::io::Result<()> {
-    let mut accounts = Vec::new();
-
-    // A pre-multi-tenant install has one session file and rows with no
-    // owner. Adopting the session tells us who that owner is, so the
-    // existing files, folders and bot pool become theirs instead of
-    // vanishing behind the per-owner filters.
-    if let Some(uid) = state.hub.adopt_legacy().await {
-        match crate::db::adopt_unowned(&state.db, uid).await {
-            Ok(0) => tracing::info!("adopted legacy session for user {uid}"),
-            Ok(n) => tracing::info!("adopted legacy session for user {uid}: claimed {n} rows"),
-            Err(e) => tracing::warn!("could not claim legacy rows for {uid}: {e}"),
-        }
-        accounts.push(uid);
-    }
-
-    // `restore` reports only the accounts it added, skipping one already
-    // adopted above — so append rather than replace, or the adopted account
-    // would come up without its download bots.
-    accounts.extend(state.hub.restore().await);
+    let mut accounts = state.hub.restore().await;
     tracing::info!("{} signed-in account(s)", accounts.len());
     for uid in &accounts {
         let Some(tg) = state.hub.get(*uid).await else {

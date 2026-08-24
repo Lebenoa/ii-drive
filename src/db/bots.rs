@@ -11,10 +11,6 @@ pub struct BotInfo {
     pub id: i64,
 }
 
-/// The single pool every account shared before multi-tenancy. Left in place
-/// until `adopt_unowned` hands it to the account that owns the old session.
-const LEGACY_ID: &str = "setting:bots";
-
 /// One schemaless row per user, keyed like the other per-user settings.
 fn bots_id(owner: i64) -> String {
     format!("setting:bots_{}", owner.to_string().replace('-', "_"))
@@ -59,26 +55,4 @@ pub async fn remove_bot(db: &surrealdb::Surreal<Conn>, owner: i64, id: i64) -> R
     let mut bots = get_bots(db, owner).await?;
     bots.retain(|b| b.id != id);
     set_bots(db, owner, &bots).await
-}
-
-/// Moves the pre-multi-tenant global pool to `owner`, returning 1 when it
-/// claimed something. A user who already has a pool keeps it, so the legacy
-/// row is only ever merged once; the second call finds nothing to move.
-pub(super) async fn adopt_legacy_pool(
-    db: &surrealdb::Surreal<Conn>,
-    owner: i64,
-) -> Result<u64, DbError> {
-    let legacy = read_pool(db, LEGACY_ID).await?;
-    if legacy.is_empty() {
-        return Ok(0);
-    }
-    let mut mine = get_bots(db, owner).await?;
-    // Re-adding a bot the user already has would double its share of
-    // download traffic.
-    let held: Vec<i64> = mine.iter().map(|b| b.id).collect();
-    mine.extend(legacy.into_iter().filter(|l| !held.contains(&l.id)));
-    set_bots(db, owner, &mine).await?;
-    let mut res = db.query(format!("DELETE {LEGACY_ID}")).await?;
-    let _ = res.take::<surrealdb::types::Value>(0usize)?;
-    Ok(1)
 }

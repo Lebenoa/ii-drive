@@ -114,7 +114,7 @@ That's it — drag files into the drive to upload them.
    | `admin_phones` | `[]` | Phone numbers (same format as `allowed_phones`) that may use the operator endpoints; empty means nobody can |
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
-   | `session_path` | `data/session.db` | Pre-multi-account session, migrated on first start; per-account sessions live in `sessions/` beside it |
+   | `session_path` | `data/session.db` | Legacy session path kept for compatibility; per-account sessions live in `sessions/` beside it |
    | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
    | `locales_dir` | `locales` | Web-UI translation files, served under `/locales/`; downloaded on demand |
@@ -129,10 +129,7 @@ account gets its own MTProto session under `<session_path's directory>/sessions/
 and its own files, folders, storage channels, download bots, routing rules
 and upload-split threshold — an account never sees another's. Sessions are
 restored on start, so a restart does not log anybody out; `POST
-/api/auth/logout` drops just the calling account. An install that predates
-multi-account support keeps working: the old single session at
-`session_path` is migrated into the new layout on first start and every
-existing file and folder is assigned to that account.
+/api/auth/logout` drops just the calling account.
 
 
 ### Storage channels

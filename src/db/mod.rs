@@ -380,27 +380,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_rows_without_folder_are_purged() {
-        let (db, _dir) = temp_db().await;
-
-        // A row written before the folder feature existed: no folder field.
-        db.query(
-            "CREATE file SET uid = 'leg', name = 'legacy.bin', mime = 'm', size = 9, \
-             message_id = 3, chat = 'me', created_at = 1",
-        )
-        .await
-        .unwrap();
-        insert(&db, &row("01N", "new.bin", 20)).await.unwrap();
-
-        // The startup purge drops only rows without a folder.
-        assert_eq!(purge_legacy_rows(&db).await.unwrap(), 1);
-        let root = list(&db, OWNER, "", "", 100, 0).await.unwrap();
-        assert_eq!(root.len(), 1);
-        assert_eq!(root[0].uid, "01N");
-        assert!(get(&db, "leg").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
     async fn visibility_roundtrip() {
         let (db, _dir) = temp_db().await;
         insert(&db, &row("01V", "secret.bin", 1)).await.unwrap();
@@ -423,47 +402,6 @@ mod tests {
         // temp_db already ran open(); a virgin store must land on the
         // latest version without any migration noise.
         assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
-        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
-    }
-
-    #[tokio::test]
-    async fn migrations_run_once_and_record_version() {
-        let (db, _dir) = temp_db().await;
-        // temp_db opened (and migrated) at the latest version.
-        assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
-
-        // Rewind to v1 with a legacy row, as an old database would look.
-        set_schema_version(&db, 1).await.unwrap();
-        db.query(
-            "CREATE file SET uid = 'leg', name = 'legacy.bin', mime = 'm', size = 9, \
-             message_id = 3, chat = 'me', created_at = 1",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
-        assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
-        assert!(get(&db, "leg").await.unwrap().is_none(), "v2 purged it");
-
-        // A second run is a no-op.
-        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
-    }
-
-    #[tokio::test]
-    async fn public_backfill_v3() {
-        let (db, _dir) = temp_db().await;
-        // Pre-v3 row: no public field at all.
-        set_schema_version(&db, 2).await.unwrap();
-        db.query(
-            "CREATE file SET uid = 'v3', name = 'x', mime = 'm', size = 1,              message_id = 1, chat = 'me', created_at = 1, folder = ''",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
-        let row = get(&db, "v3").await.unwrap().unwrap();
-        assert!(!row.public, "backfilled rows must be private");
-        // Idempotent second run.
         assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
     }
 
@@ -532,39 +470,6 @@ mod tests {
         assert_eq!(a_pool.len(), 1);
         assert_eq!(a_pool[0].id, 2);
         assert_eq!(get_bots(&db, B).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn adopt_unowned_claims_legacy_rows_once() {
-        let (db, _dir) = temp_db().await;
-        const A: i64 = 111;
-
-        // A pre-multi-tenant store: rows and one global bot pool, no owners.
-        set_schema_version(&db, 3).await.unwrap();
-        db.query(
-            "CREATE file SET uid = 'old', name = 'old.bin', mime = 'm', size = 1, \
-             message_id = 1, chat = 'me', created_at = 1, folder = ''; \
-             CREATE folder SET uid = 'OF', name = 'Old', parent = ''; \
-             UPSERT setting:bots SET bots_json = '[{\"token\":\"t\",\"username\":\"u\",\"id\":7}]'",
-        )
-        .await
-        .unwrap();
-
-        // v4 only stamps them unowned: the data survives, visible to nobody.
-        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
-        assert_eq!(get(&db, "old").await.unwrap().unwrap().owner, UNOWNED);
-        assert!(list(&db, A, "", "", 100, 0).await.unwrap().is_empty());
-
-        // One file, one folder and the legacy pool.
-        assert_eq!(adopt_unowned(&db, A).await.unwrap(), 3);
-        assert_eq!(list(&db, A, "", "", 100, 0).await.unwrap().len(), 1);
-        assert_eq!(list_folders(&db, A).await.unwrap().len(), 1);
-        assert_eq!(get_bots(&db, A).await.unwrap()[0].id, 7);
-
-        // Idempotent: a second startup adoption claims nothing.
-        assert_eq!(adopt_unowned(&db, A).await.unwrap(), 0);
-        assert_eq!(list(&db, A, "", "", 100, 0).await.unwrap().len(), 1);
-        assert_eq!(get_bots(&db, A).await.unwrap().len(), 1);
     }
 }
 

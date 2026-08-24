@@ -185,66 +185,6 @@ impl TgHub {
         live
     }
 
-    /// Migrates the single pre-multi-tenant session file, if it is still
-    /// there, into the per-account layout. Safe on every boot: the file is
-    /// only moved once Telegram has named the account behind it.
-    pub async fn adopt_legacy(&self) -> Option<i64> {
-        let legacy = PathBuf::from(&self.cfg.session_path);
-        if !tokio::fs::try_exists(&legacy).await.unwrap_or(false) {
-            return None;
-        }
-        let manager = TgManager::new(
-            self.cfg.clone(),
-            self.cfg.session_path.clone(),
-            super::UNKNOWN_USER,
-        );
-        let status = manager.status().await;
-        let uid = match status.user {
-            Some(user) if status.authorized => user.id,
-            _ => {
-                manager.close().await;
-                if status.connected || status.relogin {
-                    // Telegram disowned the key: keeping the file would only
-                    // make every boot probe a dead session.
-                    tracing::warn!("legacy telegram session is dead; removing it");
-                    let _ = remove_session(&legacy).await;
-                } else {
-                    tracing::warn!(
-                        error = ?status.error,
-                        "legacy telegram session could not be verified; leaving it in place"
-                    );
-                }
-                return None;
-            }
-        };
-        manager.close().await;
-
-        if self.users.lock().await.contains_key(&uid) {
-            // Already migrated on an earlier boot and restored from the new
-            // layout; the legacy copy is a duplicate key for the same
-            // account, so dropping it loses nothing.
-            tracing::info!(
-                user_id = uid,
-                "legacy session already migrated; removing it"
-            );
-            let _ = remove_session(&legacy).await;
-            return Some(uid);
-        }
-
-        let dest = self.user_session(uid);
-        if let Err(e) = move_session(&legacy, &dest).await {
-            // The legacy file stays where it is, so the next boot retries.
-            tracing::error!(user_id = uid, "cannot migrate legacy session: {e}");
-            return None;
-        }
-        self.users.lock().await.insert(
-            uid,
-            Arc::new(TgManager::new(self.cfg.clone(), path_string(&dest), uid)),
-        );
-        tracing::info!(user_id = uid, "legacy telegram session adopted");
-        Some(uid)
-    }
-
     pub async fn get(&self, user_id: i64) -> Option<Arc<TgManager>> {
         self.users.lock().await.get(&user_id).cloned()
     }
