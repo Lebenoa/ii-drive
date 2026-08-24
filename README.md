@@ -12,7 +12,7 @@ the interface.
   `adapter-static` — a pure-SPA build served straight from the Rust binary.
 - **Max file size:** 2 GiB (Telegram bot-free account upload limit).
 
-## Setup
+## Get started
 
 1. **Configure** — copy the example and edit:
 
