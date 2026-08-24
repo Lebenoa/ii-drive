@@ -4,6 +4,10 @@
 
 <script lang="ts">
   import { fadeUp, stagger } from '$lib/motion';
+  import { settingsSession } from '../+layout.svelte';
+
+  const session = settingsSession();
+  const admin = $derived(session.admin);
 
   const DEV_KEY = 'ii_dev_mode';
   let devMode = $state(localStorage.getItem(DEV_KEY) === '1');
@@ -17,25 +21,36 @@
 
 <main class="content">
   <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
-    <h2>Developer mode</h2>
-    <p class="muted hint">
-      Exposes internal tooling — including a direct view of the embedded
-      database. Only enable this if you know what you are doing.
-    </p>
-    <label class="switch-row">
-      <input type="checkbox" bind:checked={devMode} />
-      <span>{devMode ? 'Enabled' : 'Disabled'}</span>
-    </label>
+    {#if admin}
+      <h2>Developer mode</h2>
+      <p class="muted hint">
+        Exposes internal tooling — including a direct view of the embedded
+        database. Only enable this if you know what you are doing.
+      </p>
+      <label class="switch-row">
+        <input type="checkbox" bind:checked={devMode} />
+        <span>{devMode ? 'Enabled' : 'Disabled'}</span>
+      </label>
 
-    {#if devMode}
-      <a
-        class="card dev-link"
-        href="/internal-db"
-        in:fadeUp={{ delay: stagger(1) }}
-      >
-        <span>🗄 Internal DB</span>
-        <span class="muted">browse tables & run SurrealQL →</span>
-      </a>
+      {#if devMode}
+        <a
+          class="card dev-link"
+          href="/internal-db"
+          in:fadeUp={{ delay: stagger(1) }}
+        >
+          <span>🗄 Internal DB</span>
+          <span class="muted">browse tables & run SurrealQL →</span>
+        </a>
+      {/if}
+    {:else}
+      <!-- Developer mode only ever unlocked the internal-DB browser, whose
+           endpoints are operator-only and answer 404 for everyone else, so
+           the toggle here would just reveal a dead link. -->
+      <h2>Internal database</h2>
+      <p class="muted hint">
+        Browsing the embedded database is reserved for the server operator.
+        This account cannot open it.
+      </p>
     {/if}
   </section>
 </main>

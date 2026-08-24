@@ -27,6 +27,9 @@ pub struct Config {
     pub max_file_size: u64,
     pub web_dist: String,
     pub allowed_phones: Vec<String>,
+    /// Telegram user ids allowed to reach operator-only endpoints (raw-SQL
+    /// browser, config reload). Not phone numbers — the tenant key.
+    pub admin_user_ids: Vec<i64>,
     /// Generate thumbnails for videos/images with ffmpeg when available.
     pub media_thumbs: bool,
 }
@@ -44,6 +47,7 @@ struct RawConfig {
     max_file_size: Option<SizeRepr>,
     web_dist: Option<String>,
     allowed_phones: Option<Vec<String>>,
+    admin_user_ids: Option<Vec<i64>>,
     media_thumbs: Option<bool>,
 }
 
@@ -61,6 +65,7 @@ impl Default for Config {
             max_file_size: 2 * 1024 * 1024 * 1024,
             web_dist: "web/dist".into(),
             allowed_phones: Vec::new(),
+            admin_user_ids: Vec::new(),
             media_thumbs: true,
         }
     }
@@ -160,6 +165,7 @@ impl Config {
                 .map(|p| normalize_phone(p))
                 .filter(|p| !p.is_empty())
                 .collect(),
+            admin_user_ids: raw.admin_user_ids.unwrap_or_default(),
             media_thumbs: raw.media_thumbs.unwrap_or(true),
         })
     }
@@ -177,10 +183,17 @@ impl Config {
                 .iter()
                 .any(|p| normalize_phone(p) == want)
     }
+    /// Operator gate for endpoints that read or write across every tenant.
+    /// The list is an explicit opt-in: an empty one (the default, and what
+    /// every pre-existing config.toml has) means nobody qualifies, so a
+    /// missing key can never silently hand one tenant the whole database.
+    pub fn is_admin(&self, user_id: i64) -> bool {
+        self.admin_user_ids.contains(&user_id)
+    }
 }
 
 /// Strips everything but ASCII digits: "+1 (555) 010-2030" -> "15550102030".
-fn normalize_phone(phone: &str) -> String {
+pub(crate) fn normalize_phone(phone: &str) -> String {
     phone.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
@@ -283,5 +296,22 @@ mod tests {
         // Empty list allows nobody.
         let open = Config::load("definitely-missing-config.toml").unwrap();
         assert!(!open.phone_allowed("+15550102030"));
+    }
+
+    #[test]
+    fn admin_allowlist() {
+        let cfg = Config {
+            admin_user_ids: vec![4242, 11],
+            ..Config::load("definitely-missing-config.toml").unwrap()
+        };
+        assert!(cfg.is_admin(4242));
+        assert!(cfg.is_admin(11));
+        // A signed-in tenant that is not listed is not an operator.
+        assert!(!cfg.is_admin(22));
+        // Fail closed: the default (and every config predating the key)
+        // grants nobody cross-tenant access.
+        let none = Config::load("definitely-missing-config.toml").unwrap();
+        assert!(none.admin_user_ids.is_empty());
+        assert!(!none.is_admin(4242));
     }
 }

@@ -1,7 +1,7 @@
 use super::{bots, Conn, DbError, UNOWNED};
 
 /// Latest schema version; a database without a recorded version is v1.
-pub(super) const SCHEMA_LATEST: u64 = 4;
+pub(super) const SCHEMA_LATEST: u64 = 5;
 
 pub(super) async fn schema_version(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
     Ok(schema_version_recorded(db).await?.unwrap_or(1))
@@ -113,6 +113,19 @@ pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
                         folders.len()
                     );
                 }
+            }
+            5 => {
+                // Every listing filters on `owner`. Without an index each
+                // one scans every tenant's rows, so one account's drive
+                // gets slower as unrelated accounts add files.
+                let mut res = db
+                    .query(
+                        "DEFINE INDEX IF NOT EXISTS file_owner ON file FIELDS owner; \
+                         DEFINE INDEX IF NOT EXISTS folder_owner ON folder FIELDS owner",
+                    )
+                    .await?;
+                let _ = res.take::<surrealdb::types::Value>(0usize)?;
+                let _ = res.take::<surrealdb::types::Value>(1usize)?;
             }
             other => return Err(DbError::Shape(format!("no migration to version {other}"))),
         }

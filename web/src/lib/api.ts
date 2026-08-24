@@ -50,6 +50,12 @@ export interface Me {
   relogin?: boolean;
   /** true once the user picked storage channels */
   channel_selected?: boolean;
+  /**
+   * True when this account may reach operator-only endpoints (config reload,
+   * the internal-DB browser). Those answer 404 for everyone else, so the UI
+   * must not offer them at all.
+   */
+  admin: boolean;
 }
 
 export interface DriveFile {

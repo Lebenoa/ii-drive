@@ -7,6 +7,7 @@
   import {
     dbQuery,
     dbTables,
+    getMe,
     getToken,
     type DbQueryResult,
   } from '$lib/api';
@@ -14,6 +15,8 @@
 
   const PAGE = 50;
   let checking = $state(true);
+  // Operator-only: set from /api/me, false until proven otherwise.
+  let allowed = $state(false);
   let tables = $state<string[]>([]);
   let active = $state('');
   let sql = $state('INFO FOR DB');
@@ -81,7 +84,9 @@
   const canPrev = $derived(active !== '' && page > 0);
   const canNext = $derived(active !== '' && rows.length === PAGE);
 
-  // Auth gate + initial table list.
+  // Auth gate + initial table list. The server answers 404 to non-admins,
+  // so ask who we are first and say so plainly instead of rendering a bare
+  // "not found" into the error banner of a page that looks operable.
   $effect(() => {
     void (async () => {
       if (!getToken()) {
@@ -89,7 +94,8 @@
         return;
       }
       try {
-        tables = (await dbTables()).tables;
+        allowed = (await getMe()).admin;
+        if (allowed) tables = (await dbTables()).tables;
       } catch (err) {
         error = err instanceof Error ? err.message : String(err);
       }
@@ -108,6 +114,13 @@
   {#if checking}
     <div class="center-screen">
       <div class="spinner" aria-label="loading"></div>
+    </div>
+  {:else if !allowed}
+    <div class="center-screen">
+      <p class="muted">
+        The internal database browser is reserved for the server operator.
+        This account cannot open it.
+      </p>
     </div>
   {:else}
     <div class="cols">

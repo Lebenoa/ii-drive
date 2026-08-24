@@ -203,3 +203,75 @@ pub async fn clear_bot_draft(
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     Ok(())
 }
+
+/// Row id for a user's token epoch. Same key sanitising as `upload_id`.
+fn epoch_id(user_key: &str) -> String {
+    format!("setting:epoch_{}", user_key.replace([':', '-'], "_"))
+}
+
+/// The account's session-token epoch. Session tokens carry the epoch they
+/// were minted under, so bumping it retires every token issued before the
+/// bump — that is what makes logout a real revocation rather than a hint.
+///
+/// Absent means 0: an account that has never logged out is at epoch 0, and
+/// its tokens say 0 too.
+pub async fn get_token_epoch(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+) -> Result<u64, DbError> {
+    let mut res = db
+        .query(format!("SELECT epoch FROM {}", epoch_id(user_key)))
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|r| r.get("epoch").cloned())
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0))
+}
+
+/// Retires every token issued for this account and returns the new epoch.
+///
+/// Read-then-write rather than an atomic increment: two concurrent bumps can
+/// only ever land on the same new value, and any value strictly greater than
+/// what outstanding tokens carry revokes them just the same. Persisting it
+/// is what keeps a logout honoured across a restart.
+pub async fn bump_token_epoch(
+    db: &surrealdb::Surreal<Conn>,
+    user_key: &str,
+) -> Result<u64, DbError> {
+    let next = get_token_epoch(db, user_key).await? + 1;
+    let mut res = db
+        .query(format!("UPSERT {} SET epoch = $e", epoch_id(user_key)))
+        .bind(("e", next as i64))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An account that has never logged out sits at epoch 0, and a bump is
+    /// monotonic and per-account — one tenant's logout must not invalidate
+    /// another tenant's tokens.
+    #[tokio::test]
+    async fn token_epoch_defaults_to_zero_and_only_grows() {
+        let db = crate::db::open_mem().await.expect("open test db");
+
+        assert_eq!(get_token_epoch(&db, "11").await.expect("read"), 0);
+
+        assert_eq!(bump_token_epoch(&db, "11").await.expect("bump"), 1);
+        assert_eq!(get_token_epoch(&db, "11").await.expect("read"), 1);
+        assert_eq!(bump_token_epoch(&db, "11").await.expect("bump"), 2);
+        assert_eq!(get_token_epoch(&db, "11").await.expect("read"), 2);
+
+        assert_eq!(
+            get_token_epoch(&db, "22").await.expect("read"),
+            0,
+            "another tenant is unaffected"
+        );
+    }
+}

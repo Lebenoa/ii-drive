@@ -23,12 +23,18 @@ pub async fn raw_file(
 
     // Private files need a credential belonging to the owner: the usual
     // Authorization header, a single-file share sig, or the short-lived media
-    // token (?mt=) used by <img>/<video> srcs.
+    // token (?mt=) used by <img>/<video> srcs. The bearer goes through
+    // `session_user` so a token revoked by logout stops reading bytes here
+    // too — this route never passes through `auth::guard`.
     //
     // Answer exactly as if the row did not exist. Several accounts share this
     // endpoint, so a distinguishable "forbidden" would let anyone probe which
     // ids exist in somebody else's drive.
-    if !may_read(&state.tokens, &row, req.headers(), &q) {
+    let bearer_user = match super::bearer(req.headers()) {
+        Some(tok) => state.session_user(tok).await,
+        None => None,
+    };
+    if !may_read(&state.tokens, &row, &q, bearer_user) {
         return Err(ApiError::not_found("file not found"));
     }
 
@@ -103,11 +109,15 @@ pub async fn file_link(
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
     // Minting a capability is an owner-only act, so this endpoint accepts the
-    // session token alone — and only the owner's. It sits on the public
-    // router (no `Caller`), hence the manual check. A caller who is not the
-    // owner is told the file does not exist, so another account's ids cannot
-    // be enumerated through the status code.
-    let authed = bearer(&req_headers).is_some_and(|t| state.tokens.verify(t) == Some(row.owner));
+    // session token alone — and only the owner's, checked through
+    // `session_user` so a revoked token cannot mint fresh share links. It
+    // sits on the public router (no `Caller`), hence the manual check. A
+    // caller who is not the owner is told the file does not exist, so another
+    // account's ids cannot be enumerated through the status code.
+    let authed = match bearer(&req_headers) {
+        Some(tok) => state.session_user(tok).await == Some(row.owner),
+        None => false,
+    };
     if !authed {
         return Err(ApiError::not_found("file not found"));
     }

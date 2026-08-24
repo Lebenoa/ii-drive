@@ -63,18 +63,23 @@ fn bearer(headers: &axum::http::HeaderMap) -> Option<&str> {
 /// session or media token minted for one account can never open another
 /// account's private file. The share sig is deliberately identity-free: it
 /// is scoped to this single uid, which is the whole point of a share link.
+///
+/// `bearer_user` is resolved by the caller through
+/// `AppState::session_user`, which also checks the account's token epoch:
+/// these routes bypass `auth::guard`, so passing a raw `Tokens::verify`
+/// result here would let a token revoked by logout keep reading bytes.
 fn may_read(
     tokens: &crate::auth::Tokens,
     row: &crate::db::FileRow,
-    headers: &axum::http::HeaderMap,
     q: &std::collections::HashMap<String, String>,
+    bearer_user: Option<i64>,
 ) -> bool {
     row.public
         || q.get("sig")
             .is_some_and(|s| tokens.verify_file(&row.uid, s))
         || q.get("mt")
             .is_some_and(|t| tokens.verify_media(t) == Some(row.owner))
-        || bearer(headers).is_some_and(|t| tokens.verify(t) == Some(row.owner))
+        || bearer_user == Some(row.owner)
 }
 
 /// True when a delete failure only means the message was already gone —
@@ -144,33 +149,24 @@ mod tests {
         }
     }
 
-    fn bearer_headers(token: &str) -> axum::http::HeaderMap {
-        let mut h = axum::http::HeaderMap::new();
-        h.insert(
-            axum::http::header::AUTHORIZATION,
-            format!("Bearer {token}").parse().expect("header value"),
-        );
-        h
-    }
-
     fn query(k: &str, v: &str) -> std::collections::HashMap<String, String> {
         std::collections::HashMap::from([(k.to_string(), v.to_string())])
     }
 
     /// The point of tenant scoping: A's credentials never open B's file.
+    /// The bearer arrives already resolved to an account, as the handlers do
+    /// it through `AppState::session_user`.
     #[test]
     fn credentials_only_open_their_own_tenant() {
         let t = crate::auth::Tokens::new("k", 3600);
         let none = std::collections::HashMap::new();
-        let empty = axum::http::HeaderMap::new();
 
-        let session_a = t.issue(A);
-        assert!(may_read(&t, &row(A, false), &bearer_headers(&session_a), &none));
-        assert!(!may_read(&t, &row(B, false), &bearer_headers(&session_a), &none));
+        assert!(may_read(&t, &row(A, false), &none, Some(A)));
+        assert!(!may_read(&t, &row(B, false), &none, Some(A)));
 
         let media_a = t.sign_media(A, 60);
-        assert!(may_read(&t, &row(A, false), &empty, &query("mt", &media_a)));
-        assert!(!may_read(&t, &row(B, false), &empty, &query("mt", &media_a)));
+        assert!(may_read(&t, &row(A, false), &query("mt", &media_a), None));
+        assert!(!may_read(&t, &row(B, false), &query("mt", &media_a), None));
     }
 
     /// A share sig is file-scoped, so it works for any owner — but only for
@@ -178,22 +174,20 @@ mod tests {
     #[test]
     fn share_sig_is_file_scoped() {
         let t = crate::auth::Tokens::new("k", 3600);
-        let empty = axum::http::HeaderMap::new();
         let sig = t.sign_file("01FILE", 60);
-        assert!(may_read(&t, &row(B, false), &empty, &query("sig", &sig)));
+        assert!(may_read(&t, &row(B, false), &query("sig", &sig), None));
 
         let other = t.sign_file("01OTHER", 60);
-        assert!(!may_read(&t, &row(B, false), &empty, &query("sig", &other)));
+        assert!(!may_read(&t, &row(B, false), &query("sig", &other), None));
     }
 
     /// A public file needs no credential at all.
     #[test]
     fn public_files_need_no_credential() {
         let t = crate::auth::Tokens::new("k", 3600);
-        let empty = axum::http::HeaderMap::new();
         let none = std::collections::HashMap::new();
-        assert!(may_read(&t, &row(A, true), &empty, &none));
-        assert!(!may_read(&t, &row(A, false), &empty, &none));
+        assert!(may_read(&t, &row(A, true), &none, None));
+        assert!(!may_read(&t, &row(A, false), &none, None));
     }
 
     /// The public read endpoints must not become an existence oracle: with

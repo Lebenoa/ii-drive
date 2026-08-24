@@ -1,13 +1,32 @@
 use axum::extract::State;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
+/// Refuses anyone the config does not name an operator. 404 rather than
+/// 403: a tenant who is not an operator learns nothing about the endpoint
+/// existing, so it cannot be probed from an ordinary account.
+fn admin_only(uid: i64) -> Result<(), ApiError> {
+    if crate::config::get().is_admin(uid) {
+        Ok(())
+    } else {
+        Err(ApiError::not_found("not found"))
+    }
+}
+
 /// GET /api/internal-db/tables — table names in the embedded store.
-pub async fn tables(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+///
+/// Operator-only, gated on `admin_user_ids`: the schema is process-wide, so
+/// it names every tenant's tables regardless of who asks.
+pub async fn tables(
+    State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    admin_only(uid)?;
     let mut res = state
         .db
         .query("INFO FOR DB")
@@ -31,13 +50,18 @@ pub struct QueryBody {
 }
 
 /// POST /api/internal-db/query — run raw SurrealQL against the embedded
-/// store and return every statement's result. Internal admin tooling: the
-/// bearer guard keeps it owner-only, but the queries themselves are
-/// unrestricted by design.
+/// store and return every statement's result. The queries are unrestricted
+/// by design, which means they read and write across EVERY tenant: `file`
+/// rows with their `chat`/`message_id`, and `setting:bots_*` which holds
+/// plaintext bot tokens. The bearer guard alone is therefore not a
+/// sufficient boundary — it only proves *some* account is signed in — so
+/// this is operator-only, gated on `admin_user_ids`.
 pub async fn query(
     State(state): State<AppState>,
+    Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<QueryBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    admin_only(uid)?;
     let sql = body.sql.trim();
     if sql.is_empty() {
         return Err(ApiError::bad_request("query must not be empty"));
@@ -109,5 +133,25 @@ mod tests {
         let mut r = db.query("SELECT * FROM missing_table").await?;
         assert!(!r.take_errors().is_empty(), "runtime error must surface");
         Ok(())
+    }
+
+    /// The handlers themselves are not exercised: `admin_only` reads the
+    /// process-wide `config::get()` static, which every test in the binary
+    /// shares, so mutating it here would race sibling tests. The gate is one
+    /// `is_admin` call, so testing that predicate covers the decision.
+    #[test]
+    fn admin_gate_decides_by_config() {
+        let base = crate::config::Config::load("definitely-missing-config.toml").unwrap();
+        let cfg = crate::config::Config {
+            admin_user_ids: vec![4242],
+            ..base.clone()
+        };
+        assert!(cfg.is_admin(4242), "listed operator gets through");
+        // A signed-in tenant that is not listed must be refused, even though
+        // the bearer guard already accepted its token.
+        assert!(!cfg.is_admin(22));
+        // Empty list (the default) denies everyone.
+        assert!(base.admin_user_ids.is_empty());
+        assert!(!base.is_admin(4242));
     }
 }

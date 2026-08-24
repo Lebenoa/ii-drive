@@ -15,8 +15,9 @@ pub use folders::{
 // tests below without a second, test-only import list.
 pub use schema::*;
 pub use settings::{
-    clear_bot_draft, get_bot_draft, get_channels, get_rules, get_split, set_bot_draft,
-    set_channels, set_rules, set_split, BotDraft, ChannelSel, DraftMsg, RouteRule,
+    bump_token_epoch, clear_bot_draft, get_bot_draft, get_channels, get_rules, get_split,
+    get_token_epoch, set_bot_draft, set_channels, set_rules, set_split, BotDraft, ChannelSel,
+    DraftMsg, RouteRule,
 };
 
 type Conn = surrealdb::engine::local::Db;
@@ -92,11 +93,7 @@ pub(crate) mod harness {
     pub(crate) fn acquire() -> EngineGuard {
         // Poisoning just means an earlier DB test panicked. This lock
         // orders engine startup, not shared data, so carry on.
-        let held = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        // The previous test released this lock as it unwound, while its
-        // store was still closing; give that a moment to finish.
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        EngineGuard(held)
+        EngineGuard(ENGINE.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 

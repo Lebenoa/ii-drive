@@ -11,8 +11,11 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// Session and media tokens carry the Telegram user id they were minted for,
 /// covered by the MAC, so a token can only ever act as that one account.
-/// Each kind also has a distinct segment count and payload prefix, so one
-/// kind can never verify as another.
+/// Session tokens additionally carry the account's token epoch, so logout can
+/// retire every outstanding one — see [`crate::state::AppState::session_user`],
+/// which is where "is this epoch still current" is answered.
+/// Each kind also has a distinct segment count — session 5, media 3, file 2 —
+/// and a distinct payload prefix, so one kind can never verify as another.
 #[derive(Clone)]
 pub struct Tokens {
     key: Vec<u8>,
@@ -33,20 +36,29 @@ impl Tokens {
         hex::encode(mac.finalize().into_bytes())
     }
 
-    /// Issues a session token for `user_id`: `<uid>.<expiry_unix>.<nonce>.<hex signature>`.
-    pub fn issue(&self, user_id: i64) -> String {
+    /// Issues a session token for `user_id` under `epoch`:
+    /// `<uid>.<epoch>.<expiry_unix>.<nonce>.<hex signature>`.
+    ///
+    /// The epoch is inside the MAC, so a stolen token cannot be rewound to an
+    /// epoch that is still current.
+    pub fn issue(&self, user_id: i64, epoch: u64) -> String {
         let exp = now_unix() + self.ttl_secs;
         let nonce: [u8; 8] = rand::random();
         let nonce_hex = hex::encode(nonce);
-        let sig = self.sign(&format!("u/{user_id}/{exp}/{nonce_hex}"));
-        format!("{user_id}.{exp}.{nonce_hex}.{sig}")
+        let sig = self.sign(&format!("u/{user_id}/{epoch}/{exp}/{nonce_hex}"));
+        format!("{user_id}.{epoch}.{exp}.{nonce_hex}.{sig}")
     }
 
-    /// Constant-time verification; returns the token's user id, or `None` when
-    /// the token is malformed, expired, tampered with, or signed by another key.
-    pub fn verify(&self, token: &str) -> Option<i64> {
+    /// Constant-time verification of the MAC and expiry only; returns the
+    /// token's user id and the epoch it was minted under, or `None` when the
+    /// token is malformed, expired, tampered with, or signed by another key.
+    ///
+    /// Whether that epoch is still current needs the account's state, so it is
+    /// decided one layer up in [`crate::state::AppState::session_user`].
+    pub fn verify(&self, token: &str) -> Option<(i64, u64)> {
         let mut parts = token.split('.');
-        let (Some(uid_str), Some(exp_str), Some(nonce), Some(sig), None) = (
+        let (Some(uid_str), Some(epoch_str), Some(exp_str), Some(nonce), Some(sig), None) = (
+            parts.next(),
             parts.next(),
             parts.next(),
             parts.next(),
@@ -56,17 +68,18 @@ impl Tokens {
             return None;
         };
         let uid = uid_str.parse::<i64>().ok()?;
+        let epoch = epoch_str.parse::<u64>().ok()?;
         if exp_str.parse::<u64>().ok()? < now_unix() {
             return None;
         }
-        let expected = self.sign(&format!("u/{uid_str}/{exp_str}/{nonce}"));
+        let expected = self.sign(&format!("u/{uid_str}/{epoch_str}/{exp_str}/{nonce}"));
         // Both sides are fixed-length hex digests of the signature, so any
         // length difference means tampering; ct_eq would panic on mismatch.
         if expected.len() != sig.len() || sig.is_empty() {
             return None;
         }
         let ok: bool = expected.as_bytes().ct_eq(sig.as_bytes()).into();
-        ok.then_some(uid)
+        ok.then_some((uid, epoch))
     }
 
     /// Signs a share link for one file: `<expiry>.<hex sig over "f/{uid}/{exp}">`.
@@ -103,6 +116,12 @@ impl Tokens {
     /// meant for `<img>`/`<video>` srcs so the long-lived session token never
     /// appears in a URL (logs, history, Referer). The uid is signed in so a
     /// media token cannot be pointed at another tenant's files.
+    ///
+    /// Deliberately NOT epoch-covered, unlike session tokens: the TTL is
+    /// minutes-to-an-hour, so the window a logout would close is already
+    /// closed by expiry, and keeping the epoch out means in-flight `<img>`
+    /// loads need no revocation lookup. The asymmetry is a decision, not an
+    /// oversight — widen it only if media TTLs ever grow.
     pub fn sign_media(&self, user_id: i64, ttl_secs: u64) -> String {
         let exp = now_unix() + ttl_secs;
         let sig = self.sign(&format!("m/{user_id}/{exp}"));
@@ -143,17 +162,25 @@ fn now_unix() -> u64 {
 pub struct Caller(pub i64);
 
 /// Bearer-token guard applied to the protected API subrouter.
+///
+/// Revocation lives in [`crate::state::AppState::session_user`] so the public
+/// routes, which never run this middleware, decide it identically.
 pub async fn guard(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     mut req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let caller = req
+    let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .and_then(|tok| state.tokens.verify(tok));
+        .map(str::to_owned);
+
+    let caller = match token {
+        Some(tok) => state.session_user(&tok).await,
+        None => None,
+    };
 
     let Some(uid) = caller else {
         return (
@@ -173,34 +200,51 @@ mod tests {
     #[test]
     fn token_roundtrip() {
         let t = Tokens::new("hunter2", 60);
-        let tok = t.issue(7);
-        assert_eq!(t.verify(&tok), Some(7));
+        let tok = t.issue(7, 0);
+        assert_eq!(t.verify(&tok), Some((7, 0)));
         assert_eq!(t.verify(&format!("{tok}x")), None);
         assert_eq!(t.verify("garbage"), None);
+        // Four segments is the old session shape; it must not verify.
         assert_eq!(t.verify("a.b.c.d"), None);
+        assert_eq!(t.verify("a.b.c.d.e"), None);
     }
 
     #[test]
-    fn token_carries_issued_uid() {
+    fn token_carries_issued_uid_and_epoch() {
         let t = Tokens::new("hunter2", 60);
         for uid in [1i64, -42, i64::MAX, i64::MIN] {
-            assert_eq!(t.verify(&t.issue(uid)), Some(uid));
+            assert_eq!(t.verify(&t.issue(uid, 3)), Some((uid, 3)));
         }
+        assert_eq!(t.verify(&t.issue(7, u64::MAX)), Some((7, u64::MAX)));
     }
 
     #[test]
     fn swapped_uid_rejected() {
         let t = Tokens::new("hunter2", 60);
-        let tok = t.issue(7);
+        let tok = t.issue(7, 0);
         let tail = tok.split_once('.').expect("token has segments").1;
         // Re-pointing the token at another account breaks the MAC.
         assert_eq!(t.verify(&format!("8.{tail}")), None);
     }
 
+    /// The epoch is the revocation counter, so it has to be inside the MAC:
+    /// otherwise a holder of a retired token just rewrites the segment.
+    #[test]
+    fn rewritten_epoch_rejected() {
+        let t = Tokens::new("hunter2", 60);
+        let tok = t.issue(7, 1);
+        let mut seg: Vec<&str> = tok.split('.').collect();
+        assert_eq!(seg.len(), 5, "session tokens have five segments");
+        for forged in ["0", "2", "99"] {
+            seg[1] = forged;
+            assert_eq!(t.verify(&seg.join(".")), None);
+        }
+    }
+
     #[test]
     fn expired_token_rejected() {
         let t = Tokens::new("k", 0);
-        let tok = t.issue(7); // exp = now + 0 => already expired on verify
+        let tok = t.issue(7, 0); // exp = now + 0 => already expired on verify
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert_eq!(t.verify(&tok), None);
     }
@@ -220,7 +264,7 @@ mod tests {
     #[test]
     fn token_kinds_do_not_cross_verify() {
         let t = Tokens::new("k", 3600);
-        let session = t.issue(11);
+        let session = t.issue(11, 0);
         let media = t.sign_media(11, 60);
         let file = t.sign_file("01ABC", 60);
         assert_eq!(t.verify_media(&session), None);
@@ -252,7 +296,7 @@ mod tests {
 
     #[test]
     fn wrong_key_rejected() {
-        let tok = Tokens::new("k1", 3600).issue(7);
+        let tok = Tokens::new("k1", 3600).issue(7, 0);
         assert_eq!(Tokens::new("k2", 3600).verify(&tok), None);
         let media = Tokens::new("k1", 3600).sign_media(7, 60);
         assert_eq!(Tokens::new("k2", 3600).verify_media(&media), None);

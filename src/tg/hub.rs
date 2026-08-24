@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -17,6 +17,13 @@ const LOGIN_BLOCK_SECS: u64 = 300;
 /// A login nobody finished (browser closed mid-flow) is dropped after this
 /// long, together with its throwaway session file.
 const LOGIN_TTL_SECS: u64 = 30 * 60;
+/// A number may be sent one login code per this window. Without it an
+/// allowlisted number can be made to receive unlimited Telegram codes,
+/// which both spams whoever owns it and burns the account's FLOOD_WAIT
+/// budget on attacker-chosen traffic.
+const CODE_RESEND_COOLDOWN_SECS: u64 = 60;
+/// How often abandoned logins are swept up.
+const PRUNE_INTERVAL_SECS: u64 = 60;
 /// A session file plus the siblings SQLite keeps next to it.
 const SESSION_SUFFIXES: [&str; 3] = ["", "-wal", "-shm"];
 /// Moving a session file can lose a race against a request that still holds
@@ -30,13 +37,31 @@ pub enum LoginStep {
     PasswordRequired { hint: Option<String> },
 }
 
-/// Brute-force gate for code and password submissions. Hub-wide, exactly as
-/// it was process-wide before several accounts existed: counting per pending
-/// login would let an attacker clear the counter by asking for a new code.
-#[derive(Default)]
+/// Brute-force gate and code-resend state for one phone number. Keyed by
+/// number rather than kept hub-wide: one hub-wide counter meant five wrong
+/// codes from anybody locked every account out of signing in. Counting per
+/// pending login would be the opposite mistake — an attacker would clear the
+/// counter by asking for a new code — so the number, which is what the
+/// secrets belong to, is the key.
 struct Throttle {
     failed: u32,
     blocked_until: Option<Instant>,
+    /// When Telegram was last asked to send a code to this number.
+    last_code_sent: Option<Instant>,
+    /// Last change to this entry, so numbers nobody is trying any more are
+    /// forgotten instead of growing the map once per number ever probed.
+    touched: Instant,
+}
+
+impl Throttle {
+    fn new() -> Self {
+        Throttle {
+            failed: 0,
+            blocked_until: None,
+            last_code_sent: None,
+            touched: Instant::now(),
+        }
+    }
 }
 
 /// One login in flight. The flow sits behind its own lock so concurrent
@@ -44,8 +69,15 @@ struct Throttle {
 /// abandoned logins can be expired without taking that lock.
 struct Login {
     started: Instant,
+    /// Normalized number this login is for; it is the throttle key, and the
+    /// flow itself keeps its own copy behind the `pending` lock.
+    phone: String,
     pending: Mutex<Pending>,
 }
+
+/// The logins map is shared with the pruning task, which holds only a `Weak`
+/// to it so it stops on its own once the hub is dropped.
+type LoginMap = Mutex<HashMap<String, Arc<Login>>>;
 
 /// Every Telegram account this process serves, plus the logins that are
 /// still trying to become one.
@@ -54,18 +86,45 @@ pub struct TgHub {
     /// Directory holding one session file per account.
     dir: PathBuf,
     users: Mutex<HashMap<i64, Arc<TgManager>>>,
-    logins: Mutex<HashMap<String, Arc<Login>>>,
-    throttle: Mutex<Throttle>,
+    logins: Arc<LoginMap>,
+    /// One entry per normalized phone number.
+    throttles: Mutex<HashMap<String, Throttle>>,
+    /// Serializes the close+move+insert section of [`TgHub::claim`]. Two
+    /// logins for the same account hold two different `pending` locks, so
+    /// without this both reach `move_session` for the same `<uid>.db`; that
+    /// move wipes its destination first, so the loser would delete the
+    /// winner's freshly filed session and leave the registered manager
+    /// pointing at a file that no longer exists — an account that looks
+    /// signed in with no session behind it. One hub-wide mutex rather than a
+    /// per-account guard map: a claim happens once at the end of a sign-in
+    /// and only renames a few files, so cross-account contention is
+    /// irrelevant next to a map that would need its own reaping.
+    claim_lock: Mutex<()>,
 }
 
 impl TgHub {
+    /// Must be called from inside a Tokio runtime: the hub owns a pruning
+    /// task from birth.
     pub fn new(cfg: Config) -> Self {
+        let logins: Arc<LoginMap> = Arc::new(Mutex::new(HashMap::new()));
+        // Pruning has to run on a timer rather than off `start_login`: an
+        // abandoned login otherwise keeps an open MTProto client and its
+        // `pending-*.db` alive for the whole process lifetime whenever
+        // nobody ever starts another login. The task holds only a `Weak`,
+        // so it ends by itself when the hub is dropped instead of
+        // outliving it or needing a handle somebody has to remember to
+        // cancel.
+        tokio::spawn(prune_loop(
+            Arc::downgrade(&logins),
+            Duration::from_secs(PRUNE_INTERVAL_SECS),
+        ));
         TgHub {
             dir: sessions_dir(&cfg.session_path),
             cfg,
             users: Mutex::new(HashMap::new()),
-            logins: Mutex::new(HashMap::new()),
-            throttle: Mutex::new(Throttle::default()),
+            logins,
+            throttles: Mutex::new(HashMap::new()),
+            claim_lock: Mutex::new(()),
         }
     }
 
@@ -187,7 +246,12 @@ impl TgHub {
     /// present to finish this login. Nothing else ties a browser to the
     /// flow, so the handle is a secret.
     pub async fn start_login(&self, phone: &str) -> Result<String, String> {
-        self.prune_logins().await;
+        // Asking Telegram to send a code is as much of an attack surface as
+        // submitting one: it is the step that actually reaches the owner of
+        // the number.
+        let key = crate::config::normalize_phone(phone);
+        self.gate(&key).await?;
+        self.reserve_code_send(&key).await?;
         let login_id = new_login_id();
         let path = self.dir.join(format!("pending-{login_id}.db"));
         let mut pending = Pending::new(self.cfg.clone(), path.clone());
@@ -200,6 +264,7 @@ impl TgHub {
             login_id.clone(),
             Arc::new(Login {
                 started: Instant::now(),
+                phone: key,
                 pending: Mutex::new(pending),
             }),
         );
@@ -208,17 +273,17 @@ impl TgHub {
 
     pub async fn submit_code(&self, login_id: &str, code: &str) -> Result<LoginStep, String> {
         let login = self.login(login_id).await?;
-        self.gate().await?;
+        self.gate(&login.phone).await?;
         let mut pending = login.pending.lock().await;
         match pending.sign_in(code).await {
             Ok(CodeStep::Done(user_id)) => {
-                self.claim(login_id, &pending, user_id).await?;
+                self.claim(login_id, &login.phone, &pending, user_id).await?;
                 Ok(LoginStep::Done(user_id))
             }
             Ok(CodeStep::PasswordRequired { hint }) => Ok(LoginStep::PasswordRequired { hint }),
             Err(e) => {
                 if e.wrong_secret {
-                    self.record_failure().await;
+                    self.record_failure(&login.phone).await;
                 }
                 Err(e.message)
             }
@@ -227,16 +292,16 @@ impl TgHub {
 
     pub async fn submit_password(&self, login_id: &str, password: &str) -> Result<i64, String> {
         let login = self.login(login_id).await?;
-        self.gate().await?;
+        self.gate(&login.phone).await?;
         let mut pending = login.pending.lock().await;
         match pending.check_password(password).await {
             Ok(user_id) => {
-                self.claim(login_id, &pending, user_id).await?;
+                self.claim(login_id, &login.phone, &pending, user_id).await?;
                 Ok(user_id)
             }
             Err(e) => {
                 if e.wrong_secret {
-                    self.record_failure().await;
+                    self.record_failure(&login.phone).await;
                 }
                 Err(e.message)
             }
@@ -257,10 +322,20 @@ impl TgHub {
 
     /// Files a finished login's session under its account and puts a fresh
     /// manager in front of it. The throwaway session is closed first:
-    /// an open SQLite file cannot be moved on Windows.
-    async fn claim(&self, login_id: &str, pending: &Pending, user_id: i64) -> Result<(), String> {
+    /// an open SQLite file cannot be moved on Windows. Everything from that
+    /// close to the registration of the new manager runs under
+    /// [`TgHub::claim_lock`], so two logins finishing for the same account
+    /// cannot interleave their moves and lose the session file.
+    async fn claim(
+        &self,
+        login_id: &str,
+        phone: &str,
+        pending: &Pending,
+        user_id: i64,
+    ) -> Result<(), String> {
+        let _serialized = self.claim_lock.lock().await;
         self.logins.lock().await.remove(login_id);
-        self.record_success().await;
+        self.record_success(phone).await;
         pending.manager.close().await;
 
         if let Some(previous) = self.users.lock().await.remove(&user_id) {
@@ -292,56 +367,78 @@ impl TgHub {
             .ok_or_else(|| "this login expired — start again".to_string())
     }
 
-    /// Rejects submissions while a brute-force block is active.
-    async fn gate(&self) -> Result<(), String> {
-        let mut throttle = self.throttle.lock().await;
-        if let Some(until) = throttle.blocked_until {
+    /// Rejects submissions while this number's brute-force block is active.
+    async fn gate(&self, phone: &str) -> Result<(), String> {
+        let mut throttles = self.throttles.lock().await;
+        let Some(entry) = throttles.get_mut(phone) else {
+            return Ok(());
+        };
+        if let Some(until) = entry.blocked_until {
             let now = Instant::now();
             if now < until {
                 let secs = (until - now).as_secs() + 1;
                 return Err(format!(
-                    "too many failed login attempts; try again in {secs}s"
+                    "too many failed login attempts for this number; try again in {secs}s"
                 ));
             }
             // Block has lapsed.
-            throttle.blocked_until = None;
+            entry.blocked_until = None;
+            entry.touched = now;
         }
         Ok(())
     }
 
-    async fn record_failure(&self) {
-        let mut throttle = self.throttle.lock().await;
-        throttle.failed += 1;
-        if throttle.failed >= MAX_LOGIN_ATTEMPTS {
-            throttle.blocked_until = Some(Instant::now() + Duration::from_secs(LOGIN_BLOCK_SECS));
-            throttle.failed = 0;
-            tracing::warn!("login blocked for {LOGIN_BLOCK_SECS}s after repeated failures");
+    /// Claims the right to have Telegram send a code to `phone`. The send is
+    /// booked before it is attempted on purpose: two requests racing here
+    /// must not both reach Telegram, and a send that failed is itself a
+    /// reason to back off rather than to retry immediately.
+    async fn reserve_code_send(&self, phone: &str) -> Result<(), String> {
+        let cooldown = Duration::from_secs(CODE_RESEND_COOLDOWN_SECS);
+        let mut throttles = self.throttles.lock().await;
+        prune_throttles(&mut throttles);
+        let entry = throttles
+            .entry(phone.to_string())
+            .or_insert_with(Throttle::new);
+        if let Some(sent) = entry.last_code_sent {
+            let elapsed = sent.elapsed();
+            if elapsed < cooldown {
+                let secs = (cooldown - elapsed).as_secs() + 1;
+                return Err(format!(
+                    "a login code was already sent to this number; wait {secs}s before asking for another"
+                ));
+            }
+        }
+        let now = Instant::now();
+        entry.last_code_sent = Some(now);
+        entry.touched = now;
+        Ok(())
+    }
+
+    async fn record_failure(&self, phone: &str) {
+        let mut throttles = self.throttles.lock().await;
+        prune_throttles(&mut throttles);
+        let entry = throttles
+            .entry(phone.to_string())
+            .or_insert_with(Throttle::new);
+        entry.failed += 1;
+        entry.touched = Instant::now();
+        if entry.failed >= MAX_LOGIN_ATTEMPTS {
+            entry.blocked_until = Some(entry.touched + Duration::from_secs(LOGIN_BLOCK_SECS));
+            entry.failed = 0;
+            tracing::warn!(
+                "sign-in for this number blocked for {LOGIN_BLOCK_SECS}s after repeated failures"
+            );
         }
     }
 
-    async fn record_success(&self) {
-        let mut throttle = self.throttle.lock().await;
-        throttle.failed = 0;
-        throttle.blocked_until = None;
-    }
-
-    /// Drops logins nobody finished, with their throwaway session files.
-    async fn prune_logins(&self) {
-        let ttl = Duration::from_secs(LOGIN_TTL_SECS);
-        let stale: Vec<Arc<Login>> = {
-            let mut logins = self.logins.lock().await;
-            let ids: Vec<String> = logins
-                .iter()
-                .filter(|(_, login)| login.started.elapsed() > ttl)
-                .map(|(id, _)| id.clone())
-                .collect();
-            ids.iter().filter_map(|id| logins.remove(id)).collect()
-        };
-        for login in stale {
-            let pending = login.pending.lock().await;
-            pending.manager.close().await;
-            let _ = remove_session(&pending.session_path).await;
-            tracing::info!("dropped an abandoned login");
+    async fn record_success(&self, phone: &str) {
+        let mut throttles = self.throttles.lock().await;
+        // The resend cooldown survives: a code was still sent to this number
+        // however the login ended.
+        if let Some(entry) = throttles.get_mut(phone) {
+            entry.failed = 0;
+            entry.blocked_until = None;
+            entry.touched = Instant::now();
         }
     }
 
@@ -395,6 +492,51 @@ impl TgHub {
     fn user_session(&self, user_id: i64) -> PathBuf {
         self.dir.join(format!("{user_id}.db"))
     }
+}
+
+/// Drops abandoned logins every `every`, and stops as soon as the hub that
+/// owns the map is gone — the task is the hub's, so it must not outlive it.
+async fn prune_loop(logins: Weak<LoginMap>, every: Duration) {
+    let mut ticker = tokio::time::interval(every);
+    // A tick missed while a prune was slow must not queue up a burst of
+    // catch-up prunes behind it.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let Some(logins) = logins.upgrade() else {
+            return;
+        };
+        prune_stale_logins(&logins).await;
+    }
+}
+
+/// Drops logins nobody finished, with their throwaway session files.
+async fn prune_stale_logins(logins: &LoginMap) {
+    let ttl = Duration::from_secs(LOGIN_TTL_SECS);
+    let stale: Vec<Arc<Login>> = {
+        let mut logins = logins.lock().await;
+        let ids: Vec<String> = logins
+            .iter()
+            .filter(|(_, login)| login.started.elapsed() > ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter().filter_map(|id| logins.remove(id)).collect()
+    };
+    for login in stale {
+        let pending = login.pending.lock().await;
+        pending.manager.close().await;
+        let _ = remove_session(&pending.session_path).await;
+        tracing::info!("dropped an abandoned login");
+    }
+}
+
+/// Forgets numbers untouched for a whole block's length, so trying a fresh
+/// number per request cannot grow the map without bound. A block is exactly
+/// that long and resets the counter when it starts, so nothing an entry
+/// still owes can survive its own expiry.
+fn prune_throttles(throttles: &mut HashMap<String, Throttle>) {
+    let ttl = Duration::from_secs(LOGIN_BLOCK_SECS);
+    throttles.retain(|_, t| t.touched.elapsed() <= ttl);
 }
 
 /// Per-account session files live in a `sessions/` directory beside the
@@ -577,6 +719,14 @@ mod tests {
         assert_eq!(abandoned, vec![hub.dir.join("pending-deadbeef.db")]);
     }
 
+    fn pending_login(hub: &TgHub, phone: &str, started: Instant, path: PathBuf) -> Arc<Login> {
+        Arc::new(Login {
+            started,
+            phone: phone.to_string(),
+            pending: Mutex::new(Pending::new(hub.cfg.clone(), path)),
+        })
+    }
+
     #[tokio::test]
     async fn abandoned_logins_and_their_files_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
@@ -590,26 +740,184 @@ mod tests {
             let mut logins = hub.logins.lock().await;
             logins.insert(
                 "stale".to_string(),
-                Arc::new(Login {
-                    started: Instant::now() - Duration::from_secs(LOGIN_TTL_SECS + 1),
-                    pending: Mutex::new(Pending::new(hub.cfg.clone(), stale.clone())),
-                }),
+                pending_login(
+                    &hub,
+                    "15550102030",
+                    Instant::now() - Duration::from_secs(LOGIN_TTL_SECS + 1),
+                    stale.clone(),
+                ),
             );
             logins.insert(
                 "fresh".to_string(),
-                Arc::new(Login {
-                    started: Instant::now(),
-                    pending: Mutex::new(Pending::new(hub.cfg.clone(), fresh.clone())),
-                }),
+                pending_login(&hub, "15550102031", Instant::now(), fresh.clone()),
             );
         }
 
-        hub.prune_logins().await;
+        prune_stale_logins(&hub.logins).await;
 
         let logins = hub.logins.lock().await;
         assert_eq!(logins.keys().collect::<Vec<_>>(), vec!["fresh"]);
         assert!(!stale.exists());
         assert!(fresh.exists());
+    }
+
+    /// The pruner has to reclaim an abandoned login on its own: before it ran
+    /// on a timer, a leftover client and its `pending-*.db` survived for the
+    /// whole process lifetime unless somebody started another login.
+    #[tokio::test]
+    async fn the_pruner_reclaims_abandoned_logins_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path());
+        tokio::fs::create_dir_all(&hub.dir).await.unwrap();
+        let stale = hub.dir.join("pending-stale.db");
+        tokio::fs::write(&stale, b"x").await.unwrap();
+        hub.logins.lock().await.insert(
+            "stale".to_string(),
+            pending_login(
+                &hub,
+                "15550102030",
+                Instant::now() - Duration::from_secs(LOGIN_TTL_SECS + 1),
+                stale.clone(),
+            ),
+        );
+
+        let tick = Duration::from_millis(5);
+        let pruner = tokio::spawn(prune_loop(Arc::downgrade(&hub.logins), tick));
+        for _ in 0..200 {
+            if hub.logins.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(tick).await;
+        }
+        assert!(
+            hub.logins.lock().await.is_empty(),
+            "the timer dropped the abandoned login without a new login arriving"
+        );
+        assert!(!stale.exists());
+
+        // The task belongs to the hub, so it must end with it rather than
+        // ticking on for the rest of the process.
+        drop(hub);
+        tokio::time::timeout(Duration::from_secs(5), pruner)
+            .await
+            .expect("the pruner stops once the hub is gone")
+            .expect("the pruner did not panic");
+    }
+
+    /// Two logins finishing for the same account each hold only their own
+    /// `pending` lock, so their `claim`s used to be free to interleave — and
+    /// a move that wipes its destination first can then leave the account
+    /// with a database from one login and a write-ahead log from another,
+    /// or with nothing at all.
+    #[tokio::test]
+    async fn concurrent_claims_for_one_account_file_exactly_one_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = Arc::new(hub(dir.path()));
+        tokio::fs::create_dir_all(&hub.dir).await.unwrap();
+        let uid = 77;
+
+        let claims: Vec<_> = ["a", "b", "c", "d", "e", "f", "g", "h"]
+            .into_iter()
+            .map(|tag| {
+                let hub = Arc::clone(&hub);
+                tokio::spawn(async move {
+                    let path = hub.dir.join(format!("pending-{tag}.db"));
+                    tokio::fs::write(&path, tag.as_bytes()).await.unwrap();
+                    // The log has to travel with its database; a pair from
+                    // two different logins is the corruption `move_session`
+                    // exists to prevent.
+                    tokio::fs::write(with_suffix(&path, "-wal"), tag.as_bytes())
+                        .await
+                        .unwrap();
+                    let pending = Pending::new(hub.cfg.clone(), path);
+                    hub.claim(tag, "15550102030", &pending, uid).await
+                })
+            })
+            .collect();
+        for claim in claims {
+            claim.await.unwrap().expect("every claim completes");
+        }
+
+        let dest = hub.user_session(uid);
+        let filed = tokio::fs::read(&dest)
+            .await
+            .expect("the account still has a session file");
+        let log = tokio::fs::read(with_suffix(&dest, "-wal"))
+            .await
+            .expect("with its write-ahead log");
+        assert_eq!(filed, log, "the session and its log come from one login");
+        assert!(hub.get(uid).await.is_some(), "and a manager is in front of it");
+        for tag in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            assert!(
+                !hub.dir.join(format!("pending-{tag}.db")).exists(),
+                "no throwaway session is left behind"
+            );
+        }
+    }
+
+    /// The throttle used to be hub-wide, so five wrong codes from anybody
+    /// locked every account out of signing in.
+    #[tokio::test]
+    async fn failed_attempts_only_block_the_number_that_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path());
+        let attacker = "15550109999";
+        let victim = "15550102030";
+
+        for _ in 0..MAX_LOGIN_ATTEMPTS - 1 {
+            hub.record_failure(attacker).await;
+        }
+        hub.gate(attacker)
+            .await
+            .expect("below the limit nothing is blocked");
+        hub.record_failure(attacker).await;
+
+        let err = hub
+            .gate(attacker)
+            .await
+            .expect_err("the number that failed is blocked");
+        assert!(err.contains("too many failed login attempts"), "{err}");
+        hub.gate(victim).await.expect("another number is unaffected");
+        hub.reserve_code_send(victim)
+            .await
+            .expect("and can still ask for a code");
+    }
+
+    #[tokio::test]
+    async fn signing_in_clears_that_numbers_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path());
+        let phone = "15550102030";
+        for _ in 0..MAX_LOGIN_ATTEMPTS {
+            hub.record_failure(phone).await;
+        }
+        assert!(hub.gate(phone).await.is_err());
+
+        hub.record_success(phone).await;
+
+        hub.gate(phone)
+            .await
+            .expect("a successful sign-in lifts the block");
+    }
+
+    #[tokio::test]
+    async fn a_second_code_for_one_number_waits_out_the_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path());
+        let phone = "15550102030";
+        hub.reserve_code_send(phone).await.expect("first code");
+
+        let err = hub
+            .reserve_code_send(phone)
+            .await
+            .expect_err("a resend inside the cooldown is refused");
+        assert!(
+            err.contains(&format!("{CODE_RESEND_COOLDOWN_SECS}s")),
+            "the refusal names how long to wait: {err}"
+        );
+        hub.reserve_code_send("15550109999")
+            .await
+            .expect("a different number is not held back");
     }
 
     #[tokio::test]

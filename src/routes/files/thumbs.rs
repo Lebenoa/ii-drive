@@ -218,8 +218,13 @@ pub async fn file_thumb(
         .ok_or_else(|| ApiError::not_found("file not found"))?;
 
     // Indistinguishable from a missing row, as in `raw_file`: the status code
-    // must not reveal that another account owns this id.
-    if !super::may_read(&state.tokens, &row, req.headers(), &q) {
+    // must not reveal that another account owns this id. The bearer is
+    // epoch-checked for the same reason as there.
+    let bearer_user = match super::bearer(req.headers()) {
+        Some(tok) => state.session_user(tok).await,
+        None => None,
+    };
+    if !super::may_read(&state.tokens, &row, &q, bearer_user) {
         return Err(ApiError::not_found("file not found"));
     }
 

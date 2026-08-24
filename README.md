@@ -30,6 +30,7 @@ the interface.
    | `api_id` / `api_hash` | — | Telegram app credentials (required) |
    | `secret` | — | HMAC key for session tokens (required) |
    | `allowed_phones` | `[]` | Phone numbers that may log in; any number of them may be signed in at once |
+   | `admin_user_ids` | `[]` | Telegram user ids (from `GET /api/me`, not phone numbers) that may use the operator endpoints; empty means nobody can |
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
    | `session_path` | `data/session.db` | Pre-multi-account session, migrated on first start; per-account sessions live in `sessions/` beside it |
@@ -89,7 +90,9 @@ Settings lives under `/settings` with three categories:
 - **Uploads** — split-upload threshold and auto-upload routing rules
   (mime-prefix → folder).
 - **Other** — developer mode, which unlocks `/internal-db`: browse the
-  embedded tables and run SurrealQL directly.
+  embedded tables and run SurrealQL directly. Those queries span every
+  signed-in account, so the endpoints behind it answer only to ids in
+  `admin_user_ids` and read as missing to anybody else.
 
 ### Split uploads
 
@@ -166,9 +169,9 @@ just log in again through the web UI.
 | GET | `/api/files/{id}/link` | token | Mint time-limited share URL |
 | GET/POST | `/api/folders`(`/{id}`) | token | List / create / delete folders |
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
-| POST | `/api/config/reload` | token | Re-read config.toml (runtime fields hot-apply) |
+| POST | `/api/config/reload` | token + admin | Re-read config.toml (runtime fields hot-apply) |
 | GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
-| GET/POST | `/api/internal-db/tables` `/query` | token | Developer mode: list tables / run raw SurrealQL |
+| GET/POST | `/api/internal-db/tables` `/query` | token + admin | Developer mode: list tables / run raw SurrealQL. Unrestricted, cross-tenant — callers outside `admin_user_ids` get 404 |
 | GET | `/health` | — | Liveness probe |
 
 ## Development

@@ -57,13 +57,16 @@ async fn channel_ready(state: &AppState, user_id: i64) -> bool {
 }
 
 /// The success payload of a completed login: the session token is minted for
-/// the account that just signed in, never for whoever asked.
-async fn signed_in(state: &AppState, user_id: i64) -> Json<serde_json::Value> {
-    Json(json!({
+/// the account that just signed in, never for whoever asked, and under that
+/// account's current epoch so a logout that happened while this login was in
+/// flight still wins.
+async fn signed_in(state: &AppState, user_id: i64) -> ApiResult<Json<serde_json::Value>> {
+    let epoch = state.epoch(user_id).await?;
+    Ok(Json(json!({
         "status": "ok",
-        "token": state.tokens.issue(user_id),
+        "token": state.tokens.issue(user_id, epoch),
         "channel_selected": channel_ready(state, user_id).await,
-    }))
+    })))
 }
 
 /// Step 2: confirm the code. Returns a token when no 2FA is configured.
@@ -77,7 +80,7 @@ pub async fn auth_code(
         .await
         .map_err(tg_err)?;
     match step {
-        crate::tg::LoginStep::Done(user_id) => Ok(signed_in(&state, user_id).await),
+        crate::tg::LoginStep::Done(user_id) => signed_in(&state, user_id).await,
         crate::tg::LoginStep::PasswordRequired { hint } => {
             Ok(Json(json!({ "status": "password_required", "hint": hint })))
         }
@@ -282,20 +285,31 @@ pub async fn auth_password(
         .submit_password(body.login_id.trim(), &body.password)
         .await
         .map_err(tg_err)?;
-    Ok(signed_in(&state, user_id).await)
+    signed_in(&state, user_id).await
 }
 
-/// POST /api/auth/logout — sign the caller's account out of Telegram and
-/// forget its session. Only that one account: other tenants keep working.
+/// POST /api/auth/logout — retire the caller's session tokens, then sign its
+/// account out of Telegram and forget its session. Only that one account:
+/// other tenants keep working.
+///
+/// The epoch bump comes first and happens even if the Telegram sign-out
+/// fails: dropping the hub session alone does not stop a stolen token, which
+/// starts working again the moment the account signs back in. Bumping is the
+/// part that actually revokes, so it must not be skipped by an upstream
+/// error. Media tokens are deliberately not epoch-covered — they are
+/// minutes-lived, so expiry already closes that window.
 pub async fn auth_logout(
     State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    state.bump_epoch(uid).await?;
     state.hub.logout(uid).await.map_err(tg_err)?;
     Ok(Json(json!({ "ok": true })))
 }
 
-/// GET /api/me — connection status plus whether storage channels are set up.
+/// GET /api/me — connection status, whether storage channels are set up, and
+/// whether the caller may reach operator-only endpoints (the UI hides those
+/// surfaces; the endpoints themselves still check).
 pub async fn me(
     State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
@@ -309,6 +323,7 @@ pub async fn me(
         "error": status.error,
         "relogin": status.relogin,
         "channel_selected": channel_selected,
+        "admin": crate::config::get().is_admin(uid),
     })))
 }
 
@@ -423,7 +438,16 @@ pub async fn save_settings(
 /// POST /api/config/reload — re-reads config.toml from disk. Hot-applies
 /// runtime fields (upload cap, phone allowlist, thumbnail toggle); paths and
 /// credentials only take effect after a restart.
-pub async fn reload_config() -> ApiResult<Json<serde_json::Value>> {
+///
+/// `config.toml` is process-wide, so a reload moves the upload cap and the
+/// phone allowlist for every tenant at once: operators only. 404 rather than
+/// 403 so a non-admin cannot even confirm the endpoint exists.
+pub async fn reload_config(
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !crate::config::get().is_admin(uid) {
+        return Err(ApiError::not_found("not found"));
+    }
     let cfg = crate::config::reload().map_err(|e| e.to_string()).map_err(ApiError::bad_request)?;
     Ok(Json(json!({
         "ok": true,
@@ -503,5 +527,39 @@ mod tests {
 
         let stored = crate::db::get_rules(&state.db, "22").await.expect("rules");
         assert!(stored.is_empty(), "the rejected rule set is not persisted");
+    }
+
+    /// `config.toml` is process-wide, so a reload changes the upload cap and
+    /// the phone allowlist for every tenant. With no `admin_user_ids`
+    /// configured nobody qualifies, and the endpoint must not even admit to
+    /// existing.
+    #[tokio::test]
+    async fn config_reload_is_operator_only() {
+        let err = reload_config(Extension(Caller(11)))
+            .await
+            .expect_err("a non-admin tenant cannot reload global config");
+        assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// Logout has to revoke, not just forget: before the epoch existed, a
+    /// token stolen from this account resumed working as soon as the account
+    /// signed back in.
+    #[tokio::test]
+    async fn logout_revokes_outstanding_tokens() {
+        let state = temp_state().await;
+        let epoch = state.epoch(11).await.expect("epoch");
+        let stolen = state.tokens.issue(11, epoch);
+        assert_eq!(state.session_user(&stolen).await, Some(11));
+
+        let body = auth_logout(State(state.clone()), Extension(Caller(11)))
+            .await
+            .expect("logout");
+        assert_eq!(body.0["ok"], serde_json::json!(true));
+
+        assert_eq!(state.session_user(&stolen).await, None);
+        assert!(
+            state.epoch(11).await.expect("epoch") > epoch,
+            "logout advances the account's epoch"
+        );
     }
 }

@@ -1,6 +1,4 @@
 
-use std::sync::Arc;
-
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
@@ -158,9 +156,9 @@ pub async fn run(state: AppState) -> std::io::Result<()> {
 
 pub fn shared_state(db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> AppState {
     let cfg = crate::config::get();
-    AppState {
-        db: Arc::new(db),
-        tokens: Arc::new(crate::auth::Tokens::new(&cfg.secret, cfg.token_ttl_secs)),
-        hub: Arc::new(crate::tg::TgHub::new(cfg)),
-    }
+    AppState::new(
+        db,
+        crate::auth::Tokens::new(&cfg.secret, cfg.token_ttl_secs),
+        crate::tg::TgHub::new(cfg),
+    )
 }

@@ -1,7 +1,28 @@
+<script lang="ts" module>
+  import { getContext, setContext } from 'svelte';
+
+  const SESSION = Symbol('settings-session');
+
+  /** The signed-in account, as far as the settings pages care about it. */
+  export interface SettingsSession {
+    /** Operator-only endpoints answer 404 for everyone else, so the controls
+     *  that call them must not render at all. */
+    readonly admin: boolean;
+  }
+
+  /**
+   * Read the session from a page rendered inside this layout, so the whole
+   * settings section shares one /api/me round-trip.
+   */
+  export function settingsSession(): SettingsSession {
+    return getContext<SettingsSession>(SESSION);
+  }
+</script>
+
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { getToken } from '$lib/api';
+  import { getMe, getToken } from '$lib/api';
   import ReloadConfigButton from '$lib/components/ReloadConfigButton.svelte';
   import { fadeUp, stagger } from '$lib/motion';
   import './settings.css';
@@ -15,11 +36,28 @@
   ];
 
   let checking = $state(true);
+  let admin = $state(false);
+
+  setContext<SettingsSession>(SESSION, {
+    get admin() {
+      return admin;
+    },
+  });
 
   $effect(() => {
     void (async () => {
-      if (!getToken()) goto('/login');
-      else checking = false;
+      if (!getToken()) {
+        goto('/login');
+        return;
+      }
+      try {
+        admin = (await getMe()).admin;
+      } catch {
+        // Fail closed: a probe that did not answer must not unlock operator
+        // controls. The pages below still render their non-admin content.
+        admin = false;
+      }
+      checking = false;
     })();
   });
 </script>
@@ -28,7 +66,13 @@
   <header class="topbar">
     <a class="back" href="/">← Back to files</a>
     <span class="title">Settings</span>
-    <ReloadConfigButton />
+    <!-- Always present so the sticky bar keeps three flex slots and the
+         title does not jump when the operator button is absent. -->
+    <div class="tools">
+      {#if admin}
+        <ReloadConfigButton />
+      {/if}
+    </div>
   </header>
 
   {#if checking}
