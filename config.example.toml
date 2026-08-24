@@ -27,15 +27,16 @@ secret = "change-me-to-a-long-random-string"
 # another account's.
 allowed_phones = ["+15551234567"]
 
-# Telegram user ids (numeric — NOT phone numbers) allowed to reach the
-# operator-only endpoints: the raw-SQL browser under /api/internal-db and
-# POST /api/config/reload. Those run unrestricted queries over the whole
-# store, so they see and can rewrite every signed-in account's files and
-# bot tokens — being signed in is deliberately not enough.
-# Find your id at GET /api/me while signed in ("id" in the response).
+# Phone numbers allowed to reach the operator-only endpoints: the raw-SQL
+# browser under /api/internal-db and POST /api/config/reload. Those run
+# unrestricted queries over the whole store, so they see and can rewrite
+# every signed-in account's files and bot tokens — being signed in is
+# deliberately not enough.
+# Same format as allowed_phones (spacing and punctuation do not matter), and
+# the number must also be in allowed_phones to be able to sign in at all.
 # An empty list (the default) leaves those endpoints unreachable for
 # everyone, which is the right setting unless you actually need them.
-admin_user_ids = []
+admin_phones = []
 
 # How long issued login tokens stay valid, in seconds (default 30 days)
 token_ttl_secs = 2592000

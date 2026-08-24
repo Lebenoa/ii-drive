@@ -27,9 +27,11 @@ pub struct Config {
     pub max_file_size: u64,
     pub web_dist: String,
     pub allowed_phones: Vec<String>,
-    /// Telegram user ids allowed to reach operator-only endpoints (raw-SQL
-    /// browser, config reload). Not phone numbers — the tenant key.
-    pub admin_user_ids: Vec<i64>,
+    /// Phone numbers allowed to reach operator-only endpoints (raw-SQL
+    /// browser, config reload). Phone rather than Telegram user id because
+    /// Telegram never shows a user their own numeric id, so an id would be
+    /// a setting nobody can fill in unaided.
+    pub admin_phones: Vec<String>,
     /// Generate thumbnails for videos/images with ffmpeg when available.
     pub media_thumbs: bool,
 }
@@ -47,7 +49,7 @@ struct RawConfig {
     max_file_size: Option<SizeRepr>,
     web_dist: Option<String>,
     allowed_phones: Option<Vec<String>>,
-    admin_user_ids: Option<Vec<i64>>,
+    admin_phones: Option<Vec<String>>,
     media_thumbs: Option<bool>,
 }
 
@@ -65,7 +67,7 @@ impl Default for Config {
             max_file_size: 2 * 1024 * 1024 * 1024,
             web_dist: "web/dist".into(),
             allowed_phones: Vec::new(),
-            admin_user_ids: Vec::new(),
+            admin_phones: Vec::new(),
             media_thumbs: true,
         }
     }
@@ -165,7 +167,13 @@ impl Config {
                 .map(|p| normalize_phone(p))
                 .filter(|p| !p.is_empty())
                 .collect(),
-            admin_user_ids: raw.admin_user_ids.unwrap_or_default(),
+            admin_phones: raw
+                .admin_phones
+                .unwrap_or_default()
+                .iter()
+                .map(|p| normalize_phone(p))
+                .filter(|p| !p.is_empty())
+                .collect(),
             media_thumbs: raw.media_thumbs.unwrap_or(true),
         })
     }
@@ -187,8 +195,12 @@ impl Config {
     /// The list is an explicit opt-in: an empty one (the default, and what
     /// every pre-existing config.toml has) means nobody qualifies, so a
     /// missing key can never silently hand one tenant the whole database.
-    pub fn is_admin(&self, user_id: i64) -> bool {
-        self.admin_user_ids.contains(&user_id)
+    ///
+    /// Keyed on the phone the account signed in with, since that is the only
+    /// identifier the operator can actually look up.
+    pub fn is_admin_phone(&self, phone: &str) -> bool {
+        let want = normalize_phone(phone);
+        !want.is_empty() && self.admin_phones.contains(&want)
     }
 }
 
@@ -301,17 +313,22 @@ mod tests {
     #[test]
     fn admin_allowlist() {
         let cfg = Config {
-            admin_user_ids: vec![4242, 11],
+            admin_phones: vec!["15550102030".into()],
             ..Config::load("definitely-missing-config.toml").unwrap()
         };
-        assert!(cfg.is_admin(4242));
-        assert!(cfg.is_admin(11));
-        // A signed-in tenant that is not listed is not an operator.
-        assert!(!cfg.is_admin(22));
+        assert!(cfg.is_admin_phone("+15550102030"));
+        // Formatting is normalized, as it is for the login allowlist: an
+        // operator writes the number the way Telegram shows it.
+        assert!(cfg.is_admin_phone("+1 (555) 010-2030"));
+        // A signed-in tenant whose number is not listed is not an operator.
+        assert!(!cfg.is_admin_phone("+447700900123"));
+        // An account whose phone Telegram would not give us cannot slip
+        // through on an empty string.
+        assert!(!cfg.is_admin_phone(""));
         // Fail closed: the default (and every config predating the key)
         // grants nobody cross-tenant access.
         let none = Config::load("definitely-missing-config.toml").unwrap();
-        assert!(none.admin_user_ids.is_empty());
-        assert!(!none.is_admin(4242));
+        assert!(none.admin_phones.is_empty());
+        assert!(!none.is_admin_phone("+15550102030"));
     }
 }

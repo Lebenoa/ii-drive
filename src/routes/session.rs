@@ -316,6 +316,13 @@ pub async fn me(
 ) -> ApiResult<Json<serde_json::Value>> {
     let status = state.tg(uid).await?.status().await;
     let channel_selected = status.authorized && channel_ready(&state, uid).await;
+    // The phone is already in hand here, so the operator check costs nothing
+    // extra; `state.is_admin` exists for callers without a status.
+    let admin = status
+        .user
+        .as_ref()
+        .and_then(|u| u.phone.as_deref())
+        .is_some_and(|p| crate::config::get().is_admin_phone(p));
     Ok(Json(json!({
         "connected": status.connected,
         "authorized": status.authorized,
@@ -323,7 +330,7 @@ pub async fn me(
         "error": status.error,
         "relogin": status.relogin,
         "channel_selected": channel_selected,
-        "admin": crate::config::get().is_admin(uid),
+        "admin": admin,
     })))
 }
 
@@ -443,9 +450,10 @@ pub async fn save_settings(
 /// phone allowlist for every tenant at once: operators only. 404 rather than
 /// 403 so a non-admin cannot even confirm the endpoint exists.
 pub async fn reload_config(
+    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !crate::config::get().is_admin(uid) {
+    if !state.is_admin(uid).await {
         return Err(ApiError::not_found("not found"));
     }
     let cfg = crate::config::reload().map_err(|e| e.to_string()).map_err(ApiError::bad_request)?;
@@ -530,12 +538,13 @@ mod tests {
     }
 
     /// `config.toml` is process-wide, so a reload changes the upload cap and
-    /// the phone allowlist for every tenant. With no `admin_user_ids`
-    /// configured nobody qualifies, and the endpoint must not even admit to
-    /// existing.
+    /// the phone allowlist for every tenant. The caller here has no Telegram
+    /// session, so no phone can be resolved for it and it cannot be an
+    /// operator — the endpoint must not even admit to existing.
     #[tokio::test]
     async fn config_reload_is_operator_only() {
-        let err = reload_config(Extension(Caller(11)))
+        let state = temp_state().await;
+        let err = reload_config(State(state), Extension(Caller(11)))
             .await
             .expect_err("a non-admin tenant cannot reload global config");
         assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);

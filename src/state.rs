@@ -89,6 +89,24 @@ impl AppState {
         // its expiry says.
         (epoch >= self.epoch(uid).await.ok()?).then_some(uid)
     }
+
+    /// Whether this account may reach operator-only endpoints.
+    ///
+    /// Resolved from the phone its Telegram session is signed in with, not
+    /// from a configured user id: Telegram never shows a user their own
+    /// numeric id, so an id-keyed allowlist is one nobody can fill in. The
+    /// phone comes from the manager's cached `get_me`, so this costs no
+    /// network call, and an account that is not signed in is never an
+    /// operator.
+    pub async fn is_admin(&self, user_id: i64) -> bool {
+        let Some(tg) = self.hub.get(user_id).await else {
+            return false;
+        };
+        let Some(phone) = tg.status().await.user.and_then(|u| u.phone) else {
+            return false;
+        };
+        crate::config::get().is_admin_phone(&phone)
+    }
 }
 
 #[cfg(test)]

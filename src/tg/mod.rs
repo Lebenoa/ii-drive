@@ -32,6 +32,11 @@ pub struct UserInfo {
     pub id: i64,
     pub name: String,
     pub username: Option<String>,
+    /// The number this account signed in with, used for the operator gate.
+    /// Never serialized: the web client has no use for it, and it is the one
+    /// field here that identifies a person outside Telegram.
+    #[serde(skip_serializing)]
+    pub phone: Option<String>,
 }
 
 /// True when an RPC failure means the session's auth key is not bound to a
@@ -151,6 +156,9 @@ async fn get_me_info(client: &Client) -> Option<UserInfo> {
             id: u.id().bare_id_unchecked(),
             name: u.full_name(),
             username: u.username().map(|s| s.to_string()),
+            // Always present for one's own account, which is the only user
+            // this is ever called for.
+            phone: u.phone().map(|s| s.to_string()),
         }),
         Err(e) => {
             tracing::warn!("get_me failed: {e}");

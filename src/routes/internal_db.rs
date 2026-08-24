@@ -10,8 +10,8 @@ use crate::state::AppState;
 /// Refuses anyone the config does not name an operator. 404 rather than
 /// 403: a tenant who is not an operator learns nothing about the endpoint
 /// existing, so it cannot be probed from an ordinary account.
-fn admin_only(uid: i64) -> Result<(), ApiError> {
-    if crate::config::get().is_admin(uid) {
+async fn admin_only(state: &AppState, uid: i64) -> Result<(), ApiError> {
+    if state.is_admin(uid).await {
         Ok(())
     } else {
         Err(ApiError::not_found("not found"))
@@ -20,13 +20,13 @@ fn admin_only(uid: i64) -> Result<(), ApiError> {
 
 /// GET /api/internal-db/tables — table names in the embedded store.
 ///
-/// Operator-only, gated on `admin_user_ids`: the schema is process-wide, so
+/// Operator-only, gated on `admin_phones`: the schema is process-wide, so
 /// it names every tenant's tables regardless of who asks.
 pub async fn tables(
     State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    admin_only(uid)?;
+    admin_only(&state, uid).await?;
     let mut res = state
         .db
         .query("INFO FOR DB")
@@ -55,13 +55,13 @@ pub struct QueryBody {
 /// rows with their `chat`/`message_id`, and `setting:bots_*` which holds
 /// plaintext bot tokens. The bearer guard alone is therefore not a
 /// sufficient boundary — it only proves *some* account is signed in — so
-/// this is operator-only, gated on `admin_user_ids`.
+/// this is operator-only, gated on `admin_phones`.
 pub async fn query(
     State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<QueryBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    admin_only(uid)?;
+    admin_only(&state, uid).await?;
     let sql = body.sql.trim();
     if sql.is_empty() {
         return Err(ApiError::bad_request("query must not be empty"));
@@ -135,23 +135,28 @@ mod tests {
         Ok(())
     }
 
-    /// The handlers themselves are not exercised: `admin_only` reads the
-    /// process-wide `config::get()` static, which every test in the binary
-    /// shares, so mutating it here would race sibling tests. The gate is one
-    /// `is_admin` call, so testing that predicate covers the decision.
+    /// The handlers themselves are not exercised: `admin_only` resolves the
+    /// caller's phone through the hub and reads the process-wide
+    /// `config::get()` static, which every test in the binary shares, so
+    /// mutating it here would race sibling tests. The gate is one
+    /// `is_admin_phone` call over that phone, so testing the predicate
+    /// covers the decision.
     #[test]
     fn admin_gate_decides_by_config() {
         let base = crate::config::Config::load("definitely-missing-config.toml").unwrap();
         let cfg = crate::config::Config {
-            admin_user_ids: vec![4242],
+            admin_phones: vec!["15550102030".into()],
             ..base.clone()
         };
-        assert!(cfg.is_admin(4242), "listed operator gets through");
+        assert!(
+            cfg.is_admin_phone("+15550102030"),
+            "listed operator gets through"
+        );
         // A signed-in tenant that is not listed must be refused, even though
         // the bearer guard already accepted its token.
-        assert!(!cfg.is_admin(22));
+        assert!(!cfg.is_admin_phone("+447700900123"));
         // Empty list (the default) denies everyone.
-        assert!(base.admin_user_ids.is_empty());
-        assert!(!base.is_admin(4242));
+        assert!(base.admin_phones.is_empty());
+        assert!(!base.is_admin_phone("+15550102030"));
     }
 }
