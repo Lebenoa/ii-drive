@@ -47,13 +47,16 @@ Keep the files together — relative paths resolve beside the executable.
 cp config.example.toml config.toml
 ```
 
-Open `config.toml` and set four things:
+Open `config.toml` and set three things:
 
 | Key | Where to get it |
 |---|---|
 | `api_id` / `api_hash` | from my.telegram.org (step above) |
 | `allowed_phones` | your phone number(s), e.g. `["+15551234567"]` — only these may sign in |
-| `secret` | leave unset — a random one is generated and stored in `secret.key` beside the database |
+
+**Recommended:** set `secret` yourself — any long random string. If you
+leave it unset, a random one is generated and stored in `secret.key` beside
+the database, which works fine but is one more file to back up.
 
 Everything else has sane defaults. The full option table is under
 [Configuration reference](#configuration-reference).
