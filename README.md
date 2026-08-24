@@ -53,7 +53,7 @@ Open `config.toml` and set four things:
 |---|---|
 | `api_id` / `api_hash` | from my.telegram.org (step above) |
 | `allowed_phones` | your phone number(s), e.g. `["+15551234567"]` — only these may sign in |
-| `secret` | any long random string; it signs web session tokens |
+| `secret` | leave unset — a random one is generated and stored in `secret.key` beside the database |
 
 Everything else has sane defaults. The full option table is under
 [Configuration reference](#configuration-reference).
@@ -98,15 +98,15 @@ That's it — drag files into the drive to upload them.
    cp config.example.toml config.toml
    ```
 
-   At minimum set `api_id`, `api_hash`, `allowed_phones`, and a long random
-   `secret` (the secret signs session tokens; logging in happens through
-   Telegram).
+   At minimum set `api_id`, `api_hash`, and `allowed_phones`. A session
+   `secret` is generated automatically on first start (the secret signs
+   web tokens; logging in happens through Telegram).
 
    | Option | Default | Meaning |
    |---|---|---|
    | `host` / `port` | `127.0.0.1:8080` | HTTP bind address |
    | `api_id` / `api_hash` | — | Telegram app credentials (required) |
-   | `secret` | — | HMAC key for session tokens (required) |
+   | `secret` | auto-generated, stored in `secret.key` | HMAC key for session tokens |
    | `allowed_phones` | `[]` | Phone numbers that may log in; any number of them may be signed in at once |
    | `admin_phones` | `[]` | Phone numbers (same format as `allowed_phones`) that may use the operator endpoints; empty means nobody can |
    | `token_ttl_secs` | 30 days | Web session lifetime |

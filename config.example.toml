@@ -2,8 +2,8 @@
 # Copy this file to config.toml and fill in your values.
 #
 # Every key below is optional — the server starts with these defaults if
-# config.toml is missing or a key is omitted. Only api_id/api_hash and a
-# real `secret` are needed before the drive is usable and secure.
+# config.toml is missing or a key is omitted. Only api_id/api_hash are
+# needed before the drive is usable.
 
 # HTTP server bind address
 host = "127.0.0.1"
@@ -14,9 +14,11 @@ api_id = 0
 api_hash = ""
 
 # Secret used to sign session tokens (NOT a login password — logging in is
-# done through Telegram). Use a long random string; anyone who knows it can
-# forge tokens.
-secret = "change-me-to-a-long-random-string"
+# done through Telegram). Leave unset and a random secret is generated and
+# stored beside the database on first start. Set your own long random
+# string only if you need tokens to survive wiping the data directory;
+# anyone who knows this value can forge tokens.
+# secret = "a-long-random-string-you-keep-safe"
 
 # Phone numbers allowed to log in via Telegram. Login sends a Telegram code
 # to the number, so possession of that Telegram account is the credential.

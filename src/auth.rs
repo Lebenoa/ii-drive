@@ -32,9 +32,9 @@ impl Tokens {
 
     fn sign(&self, payload: &str) -> String {
         // HMAC-SHA256 accepts every key length, so `new_from_slice` cannot
-        // fail today; the fixed 32-byte fallback keeps the server alive and
+        // fail today; the zeroed-key fallback keeps the server alive and
         // signing (all tokens share the fallback) if that ever changes.
-        const FALLBACK: [u8; 32] = [0x49; 32];
+        // An invariant breach here is logged loudly — see below.
         let mut mac = match HmacSha256::new_from_slice(&self.key) {
             Ok(mac) => mac,
             // HMAC-SHA256 accepts every key length, so this arm cannot fire

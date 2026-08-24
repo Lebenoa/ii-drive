@@ -109,12 +109,61 @@ impl Default for Config {
 /// Loads `path`, anchors its relative data paths against the file's
 /// directory, and installs it as the process-wide config.
 pub fn init(path: &str) -> anyhow::Result<Config> {
-    let cfg = anchor_paths(Config::load(path)?, path);
+    let mut cfg = anchor_paths(Config::load(path)?, path);
+    resolve_secret(&mut cfg);
     let _ = CONFIG_PATH.set(path.to_string());
     *CONFIG
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg.clone();
     Ok(cfg)
+}
+
+/// Secret values that must never reach production token signing: the
+/// built-in default, the example-config suggestion, and empty.
+fn is_placeholder_secret(s: &str) -> bool {
+    s.is_empty() || s == "change-me" || s == "change-me-to-a-long-random-string"
+}
+
+/// Replaces a missing or placeholder `secret` with a random one persisted
+/// beside the database, so users get safe sessions without hand-editing
+/// crypto material — and the value survives restarts. An explicitly set
+/// short secret is honored but flagged: overriding a deliberate choice is
+/// worse than warning about it.
+fn resolve_secret(cfg: &mut Config) {
+    if !is_placeholder_secret(&cfg.secret) {
+        if cfg.secret.len() < 32 {
+            tracing::warn!("config secret is shorter than 32 chars — use a long random string");
+        }
+        return;
+    }
+
+    let dir = std::path::Path::new(&cfg.db_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let file = dir.join("secret.key");
+    if let Ok(existing) = std::fs::read_to_string(&file) {
+        let trimmed = existing.trim();
+        if trimmed.len() >= 32 {
+            cfg.secret = trimmed.to_string();
+            tracing::info!("using generated session secret from {}", file.display());
+            return;
+        }
+    }
+
+    let secret: [u8; 32] = rand::random();
+    let hex_secret = hex::encode(secret);
+    if std::fs::create_dir_all(dir).is_ok() && std::fs::write(&file, &hex_secret).is_ok() {
+        tracing::info!("generated session secret, stored at {}", file.display());
+    } else {
+        // Not persisted: sessions reset on restart until the user fixes
+        // permissions or sets `secret` manually. Still better than a
+        // publicly-known placeholder.
+        tracing::warn!(
+            "could not write {}: session secret will change on restart",
+            file.display()
+        );
+    }
+    cfg.secret = hex_secret;
 }
 
 /// Snapshot of the current configuration; cheap enough to call per request.
@@ -165,8 +214,6 @@ enum SizeRepr {
     Str(String),
 }
 
-pub const DEFAULT_SECRET_WARNING: &str = "config secret is the default placeholder — anyone can log in; set a real `secret` in config.toml";
-
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let raw: RawConfig = match std::fs::read_to_string(path) {
@@ -178,10 +225,9 @@ impl Config {
             Err(e) => return Err(e.into()),
         };
 
-        let secret = raw.secret.unwrap_or_else(|| "change-me".to_string());
-        if secret == "change-me" {
-            tracing::warn!("{DEFAULT_SECRET_WARNING}");
-        }
+        // A placeholder secret is replaced by a generated, persisted one in
+        // `resolve_secret` (init/reload); user-set secrets pass through and
+        // only get a warning there if they look weak.
 
         let max_file_size = match raw.max_file_size {
             Some(SizeRepr::Num(n)) => n,
@@ -194,7 +240,9 @@ impl Config {
             port: raw.port.unwrap_or(8080),
             api_id: raw.api_id.unwrap_or(0),
             api_hash: raw.api_hash.unwrap_or_default(),
-            secret,
+            // resolve_secret (init/reload) swaps this placeholder for a
+            // generated, persisted value.
+            secret: raw.secret.unwrap_or_else(|| "change-me".into()),
             token_ttl_secs: raw.token_ttl_secs.unwrap_or(30 * 24 * 3600),
             db_path: raw.db_path.unwrap_or_else(|| "data/drive.surrealkv".into()),
             session_path: raw.session_path.unwrap_or_else(|| "data/session.db".into()),
