@@ -171,30 +171,28 @@ impl TgManager {
         seen: &mut HashSet<String>,
     ) {
         for c in chats {
-            match c {
-                tl::enums::Chat::Channel(ch) => {
-                    if ch.left && !ch.creator {
-                        continue; // we left it — cannot post
-                    }
-                    if !ch.creator && !Self::can_wire_bots(ch.admin_rights.as_ref()) {
-                        // Read-only for us — bots cannot be wired in.
-                        tracing::debug!(
-                            title = %ch.title,
-                            megagroup = ch.megagroup,
-                            admin = ch.admin_rights.is_some(),
-                            "skipping chat: no rights to wire download bots"
-                        );
-                        continue;
-                    }
-                    let key = format!("-100{}", ch.id);
-                    if seen.insert(key.clone()) {
-                        out.push(ChannelInfo {
-                            chat: key,
-                            title: ch.title.clone(),
-                        });
-                    }
-                }
-                _ => {}
+            let tl::enums::Chat::Channel(ch) = c else {
+                continue;
+            };
+            if ch.left && !ch.creator {
+                continue; // we left it — cannot post
+            }
+            if !ch.creator && !Self::can_wire_bots(ch.admin_rights.as_ref()) {
+                // Read-only for us — bots cannot be wired in.
+                tracing::debug!(
+                    title = %ch.title,
+                    megagroup = ch.megagroup,
+                    admin = ch.admin_rights.is_some(),
+                    "skipping chat: no rights to wire download bots"
+                );
+                continue;
+            }
+            let key = format!("-100{}", ch.id);
+            if seen.insert(key.clone()) {
+                out.push(ChannelInfo {
+                    chat: key,
+                    title: ch.title.clone(),
+                });
             }
         }
     }

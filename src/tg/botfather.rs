@@ -26,10 +26,11 @@ impl TgManager {
             ))
             .await;
             let mut it = client.iter_messages(peer).limit(1);
-            if let Ok(Some(msg)) = it.next().await {
-                if !msg.outgoing() && msg.id() > sent.id() {
-                    return Ok(msg.text().to_string());
-                }
+            if let Ok(Some(msg)) = it.next().await
+                && !msg.outgoing()
+                && msg.id() > sent.id()
+            {
+                return Ok(msg.text().to_string());
             }
         }
         Err("BotFather did not answer — try again shortly".to_string())

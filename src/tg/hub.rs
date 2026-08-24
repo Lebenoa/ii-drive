@@ -481,10 +481,10 @@ impl TgHub {
             return;
         };
         while let Ok(Some(entry)) = dir.next_entry().await {
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                if let Err(e) = tokio::fs::remove_file(entry.path()).await {
-                    tracing::warn!("cannot delete bot session {:?}: {e}", entry.path());
-                }
+            if entry.file_name().to_string_lossy().starts_with(&prefix)
+                && let Err(e) = tokio::fs::remove_file(entry.path()).await
+            {
+                tracing::warn!("cannot delete bot session {:?}: {e}", entry.path());
             }
         }
     }
@@ -656,9 +656,10 @@ mod tests {
     }
 
     fn hub(dir: &Path) -> TgHub {
-        let mut cfg = Config::default();
-        cfg.session_path = path_string(&dir.join("session.db"));
-        TgHub::new(cfg)
+        TgHub::new(Config {
+            session_path: path_string(&dir.join("session.db")),
+            ..Config::default()
+        })
     }
 
     #[tokio::test]

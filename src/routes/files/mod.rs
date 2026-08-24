@@ -216,8 +216,7 @@ mod tests {
                     req,
                 )
                 .await
-                .err()
-                .expect("anonymous read is refused");
+                .expect_err("anonymous read is refused");
                 (err.0, err.1)
             }
         };

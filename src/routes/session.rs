@@ -233,10 +233,10 @@ pub async fn add_bot(
     // so the next "create a bot" starts a fresh /newbot rather than
     // resuming a finished conversation.
     let key = uid.to_string();
-    if let Ok(Some(draft)) = crate::db::get_bot_draft(&state.db, &key).await {
-        if draft.token == token {
-            crate::db::clear_bot_draft(&state.db, &key).await?;
-        }
+    if let Ok(Some(draft)) = crate::db::get_bot_draft(&state.db, &key).await
+        && draft.token == token
+    {
+        crate::db::clear_bot_draft(&state.db, &key).await?;
     }
 
     // Wire the whole pool into every selected storage channel.
