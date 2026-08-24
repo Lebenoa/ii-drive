@@ -5,12 +5,39 @@ A personal file drive backed by Telegram, in the spirit of
 documents to Telegram **storage channels** you pick after signing in and
 streamed back on demand — Telegram is the storage backend, this server is
 the interface.
-- **Backend:** Rust, [axum](https://github.com/tokio-rs/axum) +
-  [grammers](https://github.com/Lonami/grammers) (MTProto), embedded
-  [SurrealDB](https://surrealdb.com) (SurrealKv) for metadata.
-- **Frontend:** [SvelteKit](https://kit.svelte.dev) (Svelte 5) with
-  `adapter-static` — a pure-SPA build served straight from the Rust binary.
-- **Max file size:** 2 GiB (Telegram bot-free account upload limit).
+
+## Features
+
+- **Multi-account concurrent sessions** — every allowed phone number signs in simultaneously, with isolated files, folders, bots, routing rules and settings.
+- **Download bot pool** — add several bots to spread upload and download load across separate MTProto connections for higher throughput.
+- **Split uploads** — files above a threshold are cut into parts (at most 64) and uploaded in parallel, round-robin across storage channels.
+- **Transparent chunking** — files above Telegram's per-document cap are always chunked; parts are re-joined on stream/download and deleted together.
+- **Thumbnail extraction** — audio cover art is parsed straight from ID3/FLAC bytes (no ffmpeg); videos and images get background ffmpeg thumbnails.
+- **On-demand i18n** — only English ships; other languages download at runtime from GitHub, so translations improve without rebuilding.
+- **Guided @BotFather chat** — create or import download bots through a resumable in-app conversation with @BotFather.
+- **Developer mode** — `/internal-db` gives admin users a SurrealDB browser; endpoints answer only to `admin_phones`.
+- **Resumable uploads** — the `spill` strategy buffers to disk so uploads keep draining even if Telegram is slow.
+- **Streaming with resume** — files stream back on demand and resume transparently when Telegram's file references expire mid-transfer.
+
+## Comparison with Teldrive
+
+| Aspect | ii-drive | Teldrive |
+|---|---|---|
+| **Language** | Rust | Go |
+| **Database** | Embedded SurrealDB (SurrealKv) — no external service | PostgreSQL (or BoltDB / memory) |
+| **Frontend** | SvelteKit SPA, served from the binary | Separate web UI (React-based) |
+| **Accounts** | Multi-tenant: several Telegram accounts signed in at once, fully isolated | Single user per session |
+| **Bots** | Built-in @BotFather chat; guided create/import; auto-invite into channels | Manual bot configuration |
+| **Rclone / WebDAV** | No — pure HTTP API + web UI | Yes — rclone remote integration |
+| **Chunking** | Configurable split threshold, ≤64 parts, round-robin across channels, rotating bot sessions | Chunked with configurable size, threads, retention |
+| **Thumbnails** | Audio cover art from ID3/FLAC; ffmpeg for video/images | Not documented |
+| **Deployment** | One binary: embedded DB + web assets; TOML config | Binary + separate UI + external DB; TOML/YAML config |
+| **Config reload** | `POST /api/config/reload` hot-applies runtime fields | Restart required |
+| **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/config/reload` | Admin API / UI |
+| **Max file size** | 2 GiB (Telegram free-account cap) | Same Telegram cap |
+| **Upload strategy** | `stream` (relay) or `spill` (disk-buffer) | Stream with configurable buffers |
+
+##
 
 ## Get started
 
@@ -293,6 +320,18 @@ cargo test            # offline unit tests (auth, config, db, art, stream, route
 cargo clippy
 cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `npm run dev` etc. work the same
 ```
+
+## Technology Stack
+
+- **Backend:** Rust, [axum](https://github.com/tokio-rs/axum) +
+  [grammers](https://github.com/Lonami/grammers) (MTProto), embedded
+  [SurrealDB](https://surrealdb.com) (SurrealKv) for metadata.
+- **Frontend:** [SvelteKit](https://kit.svelte.dev) (Svelte 5) with
+  `adapter-static` — a pure-SPA build served straight from the Rust binary.
+- **Max file size:** 2 GiB (Telegram bot-free account upload limit).
+- **Thumbnails:** ffmpeg (optional, on `PATH`) for video/images; audio cover art parsed from ID3/FLAC.
+- **Build:** Rust 1.85+ (edition 2024), Node.js 18+ for the web UI.
+- **Deployment:** single binary with embedded web assets and database — no external dependencies.
 
 The database is embedded — no external SurrealDB server. Both `data/` files
 are safe to back up together; deleting them resets metadata (files remain in
