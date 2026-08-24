@@ -74,7 +74,12 @@ pub async fn file_stream_from(
                 st.iter = Some(it);
             }
 
-            let iter = st.iter.as_mut().expect("iter just set");
+            // The block above guarantees the iterator exists; fall through
+            // to a stream error rather than panicking if that invariant
+            // ever breaks.
+            let Some(iter) = st.iter.as_mut() else {
+                return Some((Err(std::io::Error::other("download iterator missing")), st));
+            };
             match iter.next().await {
                 Ok(Some(chunk)) => {
                     let mut chunk = Bytes::from(chunk);

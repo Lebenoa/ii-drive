@@ -111,13 +111,18 @@ impl Default for Config {
 pub fn init(path: &str) -> anyhow::Result<Config> {
     let cfg = anchor_paths(Config::load(path)?, path);
     let _ = CONFIG_PATH.set(path.to_string());
-    *CONFIG.write().expect("config lock poisoned") = cfg.clone();
+    *CONFIG
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg.clone();
     Ok(cfg)
 }
 
 /// Snapshot of the current configuration; cheap enough to call per request.
 pub fn get() -> Config {
-    CONFIG.read().expect("config lock poisoned").clone()
+    CONFIG
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Re-reads the config file from disk and swaps it in. Startup-only fields

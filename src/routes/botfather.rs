@@ -100,7 +100,7 @@ pub async fn send(
     // Capture the token server-side too: the browser may never come back
     // to click "add to pool", and re-deriving it later would mean walking
     // BotFather's menus again.
-    if let Some(tok) = crate::tg::bot_token_regex().find(&reply) {
+    if let Some(tok) = crate::tg::bot_token_regex().and_then(|re| re.find(&reply)) {
         draft.token = tok.as_str().to_string();
     }
     draft.updated_at = now_secs();

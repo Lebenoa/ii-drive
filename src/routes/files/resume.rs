@@ -26,17 +26,11 @@ struct Session {
 
 const SESSION_TTL_SECS: u64 = 24 * 3600;
 
-static SESSIONS: std::sync::LazyLock<Mutex<Option<HashMap<String, Session>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(None));
+static SESSIONS: std::sync::LazyLock<Mutex<HashMap<String, Session>>> =
+    std::sync::LazyLock::new(Mutex::default);
 
-async fn sessions() -> tokio::sync::MutexGuard<'static, Option<HashMap<String, Session>>> {
-    // The None state only exists before the first upload; every caller goes
-    // through here, so one lazy init covers all of them.
-    let mut guard = SESSIONS.lock().await;
-    if guard.is_none() {
-        *guard = Some(HashMap::new());
-    }
-    guard
+async fn sessions() -> tokio::sync::MutexGuard<'static, HashMap<String, Session>> {
+    SESSIONS.lock().await
 }
 
 /// Sweeps expired sessions (deleting their spill files) while holding the
@@ -130,7 +124,7 @@ pub async fn init(
 
     {
         let mut guard = sessions().await;
-        let map = guard.as_mut().expect("initialized");
+        let map = &mut *guard;
         sweep(map).await;
         map.insert(
             id.clone(),
@@ -151,7 +145,7 @@ pub async fn init(
 
 async fn owned_session(uid: i64, id: &str) -> ApiResult<Session> {
     let mut guard = sessions().await;
-    let map = guard.as_mut().expect("initialized");
+    let map = &mut *guard;
     let s = map
         .get_mut(id)
         .filter(|s| s.owner == uid)
@@ -172,10 +166,8 @@ async fn owned_session(uid: i64, id: &str) -> ApiResult<Session> {
 }
 
 async fn set_received(id: &str, n: u64) {
-    let mut guard = SESSIONS.lock().await;
-    if let Some(map) = guard.as_mut()
-        && let Some(s) = map.get_mut(id)
-    {
+    let mut map = SESSIONS.lock().await;
+    if let Some(s) = map.get_mut(id) {
         s.received = n;
         s.last_touch = Instant::now();
     }
@@ -248,19 +240,13 @@ async fn remove_spill(path: &std::path::Path) {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 }
-
 pub async fn abort(
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = owned_session(uid, &id).await?;
     remove_spill(&s.path).await;
-    SESSIONS
-        .lock()
-        .await
-        .as_mut()
-        .expect("initialized")
-        .remove(&id);
+    SESSIONS.lock().await.remove(&id);
     Ok(Json(serde_json::json!({ "aborted": true })))
 }
 
@@ -321,12 +307,7 @@ pub async fn complete(
     {
         Ok(v) => {
             let _guard = SpillFile(s.path.clone());
-            SESSIONS
-                .lock()
-                .await
-                .as_mut()
-                .expect("initialized")
-                .remove(&id);
+            SESSIONS.lock().await.remove(&id);
             Ok(v)
         }
         Err(e) => Err(e),

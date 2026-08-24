@@ -31,7 +31,23 @@ impl Tokens {
     }
 
     fn sign(&self, payload: &str) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.key).expect("hmac accepts any key length");
+        // HMAC-SHA256 accepts every key length, so `new_from_slice` cannot
+        // fail today; the fixed 32-byte fallback keeps the server alive and
+        // signing (all tokens share the fallback) if that ever changes.
+        const FALLBACK: [u8; 32] = [0x49; 32];
+        let mut mac = match HmacSha256::new_from_slice(&self.key) {
+            Ok(mac) => mac,
+            // HMAC-SHA256 accepts every key length, so this arm cannot fire
+            // today; a zeroed key keeps the server signing (all tokens share
+            // it) instead of taking the process down — but it is a security
+            // downgrade, so scream into the logs if it ever happens.
+            Err(_) => {
+                tracing::error!(
+                    "HMAC key rejected by new_from_slice; signing with public fallback key"
+                );
+                HmacSha256::new(&Default::default())
+            }
+        };
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }

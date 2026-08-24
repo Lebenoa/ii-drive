@@ -218,7 +218,11 @@ impl TgManager {
             .await?;
 
         // The token lands in a fresh incoming message; poll for it.
-        let token_re = bot_token_regex();
+        // Regex compiled once; a None here means the pattern itself is
+        // broken, so bail out with an error instead of matching anything.
+        let Some(token_re) = bot_token_regex() else {
+            return Err("bot token matcher unavailable".into());
+        };
         for attempt in 0u32..16 {
             tokio::time::sleep(std::time::Duration::from_millis(if attempt < 4 {
                 300
@@ -228,8 +232,11 @@ impl TgManager {
             .await;
             let mut it = client.iter_messages(peer_ref).limit(3);
             while let Ok(Some(msg)) = it.next().await {
-                if !msg.outgoing() && token_re.is_match(msg.text()) {
-                    return Ok(token_re.find(msg.text()).unwrap().as_str().to_string());
+                if let Some(m) = (!msg.outgoing())
+                    .then(|| token_re.find(msg.text()))
+                    .flatten()
+                {
+                    return Ok(m.as_str().to_string());
                 }
             }
         }
