@@ -1,3 +1,4 @@
+mod bench;
 mod dto;
 mod folders;
 mod listing;
@@ -10,6 +11,7 @@ mod upload;
 // The submodules below are a pure split of what used to be one flat
 // `files` module; re-exporting each one's public surface keeps every
 // `files::<item>` path resolving exactly as before.
+pub use bench::bench as upload_bench;
 pub use dto::*;
 pub use folders::*;
 pub use listing::*;

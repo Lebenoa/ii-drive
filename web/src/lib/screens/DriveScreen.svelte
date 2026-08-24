@@ -6,6 +6,7 @@
         listFolders,
         moveFile,
         uploadFile,
+        UploadCancelled,
         type DriveFile,
         type Folder,
     } from "$lib/api";
@@ -50,11 +51,19 @@
         key: number;
         name: string;
         progress: number;
-        state: "pending" | "uploading" | "done" | "error";
+        state: "pending" | "uploading" | "done" | "error" | "cancelled";
         error: string;
         target: string;
+        speed: number;
     };
     let queue = $state<QueueItem[]>([]);
+
+    // Parallel uploads to the server: each item runs its own chunk pipeline,
+    // so a stalled transfer never starves the others. Abort controllers are
+    // keyed per item for one-click cancellation.
+    const MAX_PARALLEL_UPLOADS = 3;
+    let activeUploads = 0;
+    const aborts = new Map<number, AbortController>();
   let panelCollapsed = $state(false);
 
   // Cut/paste: ids staged for a move into whichever folder gets the paste.
@@ -129,7 +138,6 @@
     let input = $state<HTMLInputElement | null>(null);
     const filesByKey = new Map<number, File>();
     let nextKey = 1;
-    let pumping = false;
 
     // Folder tree, flattened depth-first with a depth per entry for indentation.
     let tree = $derived.by(() => {
@@ -248,45 +256,70 @@
                 state: "pending",
                 error: "",
                 target,
+                speed: 0,
             });
         }
-        void pump();
+        queue = queue;
+        pump();
     }
 
-    async function pump(): Promise<void> {
-        if (pumping) return;
-        pumping = true;
+    function fmtSpeed(bps: number): string {
+        if (bps <= 0) return "";
+        if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+        return `${Math.max(1, Math.round(bps / 1024))} KB/s`;
+    }
+
+    function pump(): void {
+        while (activeUploads < MAX_PARALLEL_UPLOADS) {
+            const item = queue.find((i) => i.state === "pending");
+            if (!item) return;
+            void startUpload(item);
+        }
+    }
+
+    async function startUpload(item: QueueItem): Promise<void> {
+        activeUploads++;
+        item.state = "uploading";
+        const ctrl = new AbortController();
+        aborts.set(item.key, ctrl);
+        const file = filesByKey.get(item.key);
         try {
-            while (true) {
-                const item = queue.find((i) => i.state === "pending");
-                if (!item) break;
-                const file = filesByKey.get(item.key);
-                item.state = "uploading";
-                if (!file) {
-                    item.state = "error";
-                    item.error = t("drive.handleLost");
-                    continue;
-                }
-                try {
-                    await uploadFile(
-                        file,
-                        (pct) => {
-                            item.progress = pct;
-                        },
-                        item.target,
-                    );
-                    item.state = "done";
-                    item.progress = 100;
-                    reloadTick++;
-                } catch (err) {
-                    item.state = "error";
-                    item.error =
-                        err instanceof Error ? err.message : String(err);
-                }
+            if (!file) {
+                item.state = "error";
+                item.error = t("drive.handleLost");
+                return;
+            }
+            await uploadFile(
+                file,
+                (pct, speed) => {
+                    item.progress = pct;
+                    item.speed = speed;
+                },
+                item.target,
+                { signal: ctrl.signal },
+            );
+            item.state = "done";
+            item.progress = 100;
+            reloadTick++;
+        } catch (err) {
+            if (err instanceof UploadCancelled || ctrl.signal.aborted) {
+                item.state = "cancelled";
+                filesByKey.delete(item.key);
+            } else {
+                item.state = "error";
+                item.error =
+                    err instanceof Error ? err.message : String(err);
             }
         } finally {
-            pumping = false;
+            aborts.delete(item.key);
+            activeUploads--;
+            queue = queue;
+            pump();
         }
+    }
+
+    function cancelUpload(key: number): void {
+        aborts.get(key)?.abort();
     }
 
     function clearFinished(): void {
@@ -548,12 +581,26 @@
                                             {t("drive.queued")}
                                         {:else if item.state === "uploading"}
                                             {item.progress}%
+                                            {#if item.speed > 0}
+                                                <span class="q-speed">{fmtSpeed(item.speed)}</span>
+                                            {/if}
+                                        {:else if item.state === "cancelled"}
+                                            {t("drive.cancelled")}
                                         {:else if item.state === "done"}
                                             <span class="q-tick" in:pop>✓</span>
                                         {:else}
                                             ✗
                                         {/if}
                                     </span>
+                                    {#if item.state === "uploading"}
+                                        <button
+                                            class="q-cancel"
+                                            type="button"
+                                            title={t("drive.cancelUpload")}
+                                            aria-label={t("drive.cancelUpload")}
+                                            onclick={() => cancelUpload(item.key)}
+                                        >✕</button>
+                                    {/if}
                                 </div>
                                 <div class="bar">
                                     <div
@@ -903,6 +950,28 @@
     /* `pop` scales, which a bare inline box would ignore. */
     .q-tick {
         display: inline-block;
+    }
+
+    .q-speed {
+        margin-left: 6px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+    }
+
+    .q-cancel {
+        flex-shrink: 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 4px;
+        line-height: 1;
+    }
+
+    .q-cancel:hover {
+        color: var(--danger, #e5484d);
+        background: rgba(229, 72, 77, 0.12);
     }
 
     .bar {

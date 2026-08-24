@@ -237,12 +237,24 @@ pub async fn chunk(
     Ok(Json(serde_json::json!({ "received": received })))
 }
 
+/// Removes a spill file, retrying briefly: on Windows the delete fails
+/// while this process still holds an append handle from an in-flight chunk,
+/// and a silently failed delete would orphan the file until the TTL sweep.
+async fn remove_spill(path: &std::path::Path) {
+    for _ in 0..10 {
+        if tokio::fs::remove_file(path).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
 pub async fn abort(
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = owned_session(uid, &id).await?;
-    let _ = tokio::fs::remove_file(&s.path).await;
+    remove_spill(&s.path).await;
     SESSIONS
         .lock()
         .await
@@ -274,7 +286,7 @@ pub async fn complete(
         fn drop(&mut self) {
             let p = self.0.clone();
             tokio::spawn(async move {
-                let _ = tokio::fs::remove_file(&p).await;
+                remove_spill(&p).await;
             });
         }
     }

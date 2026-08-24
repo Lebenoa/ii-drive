@@ -70,6 +70,56 @@ impl TgManager {
         Ok((msg.id(), name.to_string(), mime.to_string(), thumb))
     }
 
+    /// Admin diagnostic: pushes the same buffer to the given storage chat
+    /// twice — once through the rotating bot pool, once forced through the
+    /// owner session — and reports wall-clock timings. Same channel, same
+    /// code path, so the only variable is which session carries the bytes.
+    /// Both posted messages are deleted afterwards.
+    pub async fn bench_upload(
+        &self,
+        size_mb: u64,
+        chat: &str,
+    ) -> Result<serde_json::Value, String> {
+        let size = size_mb * 1024 * 1024;
+
+        let run = |client: grammers_client::Client, peer: super::PeerRef| {
+            let data = vec![0xAAu8; size as usize];
+            let mut reader = std::io::Cursor::new(data);
+            let start = std::time::Instant::now();
+            async move {
+                let uploaded = client
+                    .upload_stream(&mut reader, size as usize, "bench.bin".to_string())
+                    .await
+                    .map_err(|e| friendly(format!("bench upload failed: {e}")))?;
+                let msg = client
+                    .send_message(peer, InputMessage::new().text("").document(uploaded))
+                    .await
+                    .map_err(|e| friendly(format!("bench send failed: {e}")))?;
+                let secs = start.elapsed().as_secs_f64();
+                Ok::<_, String>((msg.id(), secs))
+            }
+        };
+
+        let (bot_msg, bot_secs) = {
+            let (client, peer, _) = self.pool_target(chat).await?;
+            run(client, peer).await?
+        };
+        let (own_msg, own_secs) = {
+            let client = self.ensure().await?;
+            let peer = self.storage_peer(chat).await?;
+            run(client, peer).await?
+        };
+
+        self.delete_message(bot_msg, chat).await.ok();
+        self.delete_message(own_msg, chat).await.ok();
+
+        Ok(serde_json::json!({
+            "size_mb": size_mb,
+            "bot_secs": bot_secs,
+            "owner_secs": own_secs,
+        }))
+    }
+
     pub async fn delete_message(&self, message_id: i32, chat: &str) -> Result<(), String> {
         let client = self.ensure().await?;
         let peer = self.storage_peer(chat).await?;

@@ -184,6 +184,8 @@
     "clearFinished": "Clear finished",
     "queued": "queued",
     "handleLost": "File handle lost",
+    "cancelUpload": "Cancel upload",
+    "cancelled": "Cancelled",
     "uploadFiles": "Upload files",
     "uploadTo": "Upload to {folder}",
     "newFolder": "New folder",

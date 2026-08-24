@@ -99,6 +99,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/files/{id}/move",
             axum::routing::patch(crate::routes::move_file),
         )
+        .route("/api/files/upload-bench", post(crate::routes::upload_bench))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::guard,

@@ -184,6 +184,8 @@
     "clearFinished": "ล้างรายการที่เสร็จแล้ว",
     "queued": "รอคิว",
     "handleLost": "ข้อมูลไฟล์หายไป",
+    "cancelUpload": "ยกเลิกการอัปโหลด",
+    "cancelled": "ยกเลิกแล้ว",
     "uploadFiles": "อัปโหลดไฟล์",
     "uploadTo": "อัปโหลดไปที่ {folder}",
     "newFolder": "โฟลเดอร์ใหม่",

@@ -98,9 +98,9 @@ function errMessage(body: unknown, fallback: string): string {
 /** fetch wrapper; attaches bearer token unless `auth:false`. Rejects ApiError on !ok. */
 export async function request<T>(
   path: string,
-  opts: { method?: string; body?: unknown; auth?: boolean } = {},
+  opts: { method?: string; body?: unknown; auth?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
-  const { method = 'GET', body, auth = true } = opts;
+  const { method = 'GET', body, auth = true, signal } = opts;
   const headers: Record<string, string> = {};
   if (auth && getToken()) headers['Authorization'] = `Bearer ${getToken()}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -109,6 +109,7 @@ export async function request<T>(
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   const data = await parseBody(res);
   if (!res.ok) {
@@ -485,17 +486,50 @@ export async function maxFileSize(): Promise<number> {
 
 const UPLOAD_CHUNK = 8 * 1024 * 1024;
 
+/** Thrown when an upload is cancelled through its AbortSignal. */
+export class UploadCancelled extends Error {
+  constructor() {
+    super('Upload cancelled');
+    this.name = 'UploadCancelled';
+  }
+}
+
+export interface UploadOpts {
+  signal?: AbortSignal;
+}
+
 /**
  * Chunked resumable upload: init -> PUT chunks at X-Offset -> complete.
  * Chunks retry with backoff; the server-acknowledged offset survives page
  * reloads in localStorage so a dropped connection resumes instead of
- * restarting a multi-gigabyte transfer.
+ * restarting a multi-gigabyte transfer. `onProgress` reports percent plus
+ * an EMA-smoothed bytes/sec rate. Aborting `signal` stops the transfer,
+ * tells the server to drop the spill, and rejects with UploadCancelled.
  */
 export async function uploadFile(
   file: File,
-  onProgress: (pct: number) => void,
+  onProgress: (pct: number, speed: number) => void,
   folder = '',
+  opts: UploadOpts = {},
 ): Promise<DriveFile> {
+  // Abort checks live below, once the session id exists — cancelling must
+  // also drop the server-side spill, which needs that id.
+  // EMA-smoothed rate over chunk progress events: raw per-event deltas are
+  // too spiky to read, but a 0.3 factor tracks direction changes within a
+  // couple of updates.
+  let ema = 0;
+  let lastBytes = 0;
+  let lastTime = performance.now();
+  const tick = (bytes: number) => {
+    const now = performance.now();
+    const dt = (now - lastTime) / 1000;
+    if (dt <= 0.05) return;
+    const inst = (bytes - lastBytes) / dt;
+    ema = ema === 0 ? inst : ema * 0.7 + inst * 0.3;
+    lastBytes = bytes;
+    lastTime = now;
+  };
+
   const max = await maxFileSize();
   if (file.size > max) {
     throw new ApiError(413, `File is larger than the server limit (${max} bytes)`);
@@ -521,6 +555,27 @@ export async function uploadFile(
       // Session expired or purged — start over.
     }
   }
+  // Abort always means "user cancelled". The server spill is dropped
+  // explicitly on the cancel throw paths below — a signal listener cannot
+  // own this job, because per-chunk XHR teardown would strip it after the
+  // first successful chunk.
+  const abandonSession = () => {
+    if (!id) return false;
+    void fetch(`/api/files/upload/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+    }).catch(() => {});
+    delete resumeMap[resumeKey];
+    localStorage.setItem('ii_uploads', JSON.stringify(resumeMap));
+    id = null;
+    return true;
+  };
+  const checkAbort = () => {
+    if (opts.signal?.aborted) {
+      abandonSession();
+      throw new UploadCancelled();
+    }
+  };
   if (!id) {
     const r = await request<{ id: string }>('/api/files/upload/init', {
       method: 'POST',
@@ -545,11 +600,20 @@ export async function uploadFile(
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
         loaded = e.loaded;
-        onProgress(Math.min(99, Math.round(((offset + loaded) / file.size) * 100)));
+        tick(offset + loaded);
+        onProgress(Math.min(99, Math.round(((offset + loaded) / file.size) * 100)), ema);
       }
     };
-    xhr.onerror = () => resolve({ status: 0, body: null, loaded });
+    xhr.onabort = () => {
+
+      resolve({ status: -1, body: null, loaded });
+    };
+    xhr.onerror = () => {
+
+      resolve({ status: 0, body: null, loaded });
+    };
     xhr.onload = () => {
+
       let body: unknown = null;
       try {
         body = JSON.parse(xhr.responseText);
@@ -564,8 +628,13 @@ export async function uploadFile(
 
   outer: while (received < file.size) {
     for (let attempt = 1; ; attempt++) {
+      checkAbort();
       const end = Math.min(received + UPLOAD_CHUNK, file.size);
       const res = await rawPut(file.slice(received, end), received);
+      if (res.status === -1) {
+        abandonSession();
+        throw new UploadCancelled();
+      }
       if (res.status >= 200 && res.status < 300) {
         received = end;
         continue outer;
@@ -586,19 +655,25 @@ export async function uploadFile(
       throw new ApiError(res.status || 0, errMessage(res.body, 'Connection lost during upload — check the file size and try again'));
     }
   }
-  onProgress(99);
+  checkAbort();
+  onProgress(99, ema);
 
   try {
     const done = await request<{ file: DriveFile }>(`/api/files/upload/${id}/complete`, {
       method: 'POST',
+      signal: opts.signal,
     });
     delete resumeMap[resumeKey];
     localStorage.setItem('ii_uploads', JSON.stringify(resumeMap));
-    onProgress(100);
+    onProgress(100, ema);
     return done.file;
   } catch (e) {
     // Keep the session record: complete is retryable while the spill
     // lives server-side.
+    if (e instanceof ApiError && e.status === 0 && opts.signal?.aborted) {
+      abandonSession();
+      throw new UploadCancelled();
+    }
     throw e;
   }
 }
