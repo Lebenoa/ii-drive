@@ -1,7 +1,7 @@
 # ii-drive
 
 A personal file drive backed by Telegram, in the spirit of
-[teldrive](https://github.com/teldrive/teldrive). Files are uploaded as
+[teldrive](https://github.com/tgdrive/teldrive). Files are uploaded as
 documents to Telegram **storage channels** you pick after signing in and
 streamed back on demand — Telegram is the storage backend, this server is
 the interface.
