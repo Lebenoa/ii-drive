@@ -44,6 +44,22 @@ pub async fn upload_limit(
     Ok(next.run(req).await)
 }
 
+/// One spawned part upload: message id, name echo, mime echo, thumb.
+pub(crate) type UploaderHandle =
+    tokio::task::JoinHandle<Result<(i32, String, String, Option<Vec<u8>>), String>>;
+
+/// A file fully described and already uploaded: everything persist_row
+/// needs to record it.
+struct StoredFile {
+    name: String,
+    mime: String,
+    declared: u64,
+    folder: String,
+    parts: Vec<crate::db::FilePart>,
+    thumb_b64: Option<String>,
+    head: Vec<u8>,
+}
+
 pub async fn upload_file(
     State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
@@ -379,7 +395,18 @@ pub async fn upload_file(
     }
     let (name, mime) = meta_rx.borrow().clone().unwrap_or_default();
     persist_row(
-        &state, tg, uid, name, mime, declared, folder, parts, thumb_b64, &head,
+        &state,
+        tg,
+        uid,
+        StoredFile {
+            name,
+            mime,
+            declared,
+            folder,
+            parts,
+            thumb_b64,
+            head: head.clone(),
+        },
     )
     .await
 }
@@ -711,7 +738,18 @@ async fn spill_upload(
     }
     tracing::info!(%name, parts = plan.nparts, %declared, "uploaded file");
     persist_row(
-        &state, tg, uid, name, mime, declared, folder, parts, thumb_b64, &head,
+        &state,
+        tg,
+        uid,
+        StoredFile {
+            name,
+            mime,
+            declared,
+            folder,
+            parts,
+            thumb_b64,
+            head: head.clone(),
+        },
     )
     .await
 }
@@ -719,9 +757,7 @@ async fn spill_upload(
 /// Awaits every part uploader, collecting landed message ids; on any
 /// failure the already-posted parts are removed so no orphans stay behind.
 async fn collect_uploaders(
-    mut uploaders: Vec<
-        tokio::task::JoinHandle<Result<(i32, String, String, Option<Vec<u8>>), String>>,
-    >,
+    mut uploaders: Vec<UploaderHandle>,
     plan: &PartPlan,
     tg: &crate::tg::TgManager,
 ) -> ApiResult<(Vec<crate::db::FilePart>, Option<Vec<u8>>)> {
@@ -760,25 +796,34 @@ async fn collect_uploaders(
 /// Fans a fully-buffered local file out to Telegram as parts, then records
 /// it. Shared by the `spill` strategy and resumable uploads, which always
 /// buffer by design.
+/// A buffered local file plus its metadata, ready to fan out to Telegram.
+pub(crate) struct FileInput<'a> {
+    pub path: &'a std::path::Path,
+    pub declared: u64,
+    pub name: String,
+    pub mime: String,
+    pub folder: String,
+}
+
 pub(crate) async fn store_from_file(
     state: &AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
-    path: &std::path::Path,
-    declared: u64,
-    name: String,
-    mime: String,
-    folder: String,
+    file: FileInput<'_>,
     head: &[u8],
 ) -> ApiResult<Json<serde_json::Value>> {
+    let declared = file.declared;
+    let name = file.name;
+    let path = file.path;
+
     let plan = PartPlan::new(state, uid, declared).await?;
     let nparts = plan.nparts;
-    let mime = if mime.is_empty() {
+    let mime = if file.mime.is_empty() {
         mime_guess::from_path(&name)
             .first_or_octet_stream()
             .to_string()
     } else {
-        mime
+        file.mime
     };
 
     use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -787,7 +832,7 @@ pub(crate) async fn store_from_file(
         let expected = plan.expected(i);
         let tg = tg.clone();
         let chat = plan.chat_for(i);
-        let path = path.to_owned();
+        let path = path.to_path_buf();
         let name = name.clone();
         let mime = mime.clone();
         let part_size = plan.part_size;
@@ -824,7 +869,18 @@ pub(crate) async fn store_from_file(
     }
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     persist_row(
-        state, tg, uid, name, mime, declared, folder, parts, thumb_b64, head,
+        state,
+        tg,
+        uid,
+        StoredFile {
+            name,
+            mime,
+            declared,
+            folder: file.folder,
+            parts,
+            thumb_b64,
+            head: head.to_vec(),
+        },
     )
     .await
 }
@@ -833,14 +889,18 @@ async fn persist_row(
     state: &AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
-    name: String,
-    mime: String,
-    declared: u64,
-    mut folder: String,
-    parts: Vec<crate::db::FilePart>,
-    mut thumb_b64: Option<String>,
-    head: &[u8],
+    file: StoredFile,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let StoredFile {
+        name,
+        mime,
+        declared,
+        mut folder,
+        parts,
+        mut thumb_b64,
+        head,
+    } = file;
+    let head = head.as_slice();
     // Auto-upload routing claims the file only when no explicit folder was
     // chosen; a stale rule falls through to the root rather than failing.
     if folder.is_empty()

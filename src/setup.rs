@@ -80,10 +80,7 @@ fn validate_and_write(config_path: &Path, body: SetupBody) -> Result<String, Str
     }
 
     let mut phones = Vec::new();
-    for raw in body
-        .phones
-        .split(|c: char| c == ',' || c == '\n' || c == ';')
-    {
+    for raw in body.phones.split([',', '\n', ';']) {
         if raw.trim().is_empty() {
             continue;
         }

@@ -126,7 +126,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 pub async fn run(state: AppState) -> std::io::Result<()> {
-    let mut accounts = state.hub.restore().await;
+    let accounts = state.hub.restore().await;
     tracing::info!("{} signed-in account(s)", accounts.len());
     for uid in &accounts {
         let Some(tg) = state.hub.get(*uid).await else {

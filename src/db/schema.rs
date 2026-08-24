@@ -4,10 +4,6 @@ use super::{Conn, DbError};
 /// reset their data directory rather than migrate.
 pub(super) const SCHEMA_LATEST: u64 = 1;
 
-pub(super) async fn schema_version(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
-    Ok(schema_version_recorded(db).await?.unwrap_or(1))
-}
-
 pub(super) async fn set_schema_version(
     db: &surrealdb::Surreal<Conn>,
     v: u64,

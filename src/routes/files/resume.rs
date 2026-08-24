@@ -292,19 +292,14 @@ pub async fn complete(
             .map_err(|e| ApiError::bad_request(format!("read upload buffer head: {e}")))?;
     }
 
-    match super::upload::store_from_file(
-        &state,
-        tg,
-        uid,
-        &s.path,
-        s.declared,
-        s.name.clone(),
-        s.mime.clone(),
-        s.folder.clone(),
-        &head,
-    )
-    .await
-    {
+    let file = super::upload::FileInput {
+        path: &s.path,
+        declared: s.declared,
+        name: s.name.clone(),
+        mime: s.mime.clone(),
+        folder: s.folder.clone(),
+    };
+    match super::upload::store_from_file(&state, tg, uid, file, &head).await {
         Ok(v) => {
             let _guard = SpillFile(s.path.clone());
             SESSIONS.lock().await.remove(&id);

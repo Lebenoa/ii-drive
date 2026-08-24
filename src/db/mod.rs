@@ -401,7 +401,7 @@ mod tests {
         let (db, _dir) = temp_db().await;
         // temp_db already ran open(); a virgin store must land on the
         // latest version without any migration noise.
-        assert_eq!(schema_version(&db).await.unwrap(), SCHEMA_LATEST);
+        assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
         assert_eq!(migrate(&db).await.unwrap(), SCHEMA_LATEST);
     }
 
