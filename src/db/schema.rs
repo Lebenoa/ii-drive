@@ -1,4 +1,4 @@
-use super::{bots, Conn, DbError, UNOWNED};
+use super::{bots, settings, Conn, DbError, UNOWNED};
 
 /// Latest schema version; a database without a recorded version is v1.
 pub(super) const SCHEMA_LATEST: u64 = 5;
@@ -170,7 +170,9 @@ pub async fn adopt_unowned(db: &surrealdb::Surreal<Conn>, owner: i64) -> Result<
         .await?;
     let files: Vec<serde_json::Value> = res.take(0)?;
     let folders: Vec<serde_json::Value> = res.take(1)?;
-    let claimed = (files.len() + folders.len()) as u64 + bots::adopt_legacy_pool(db, owner).await?;
+    let claimed = (files.len() + folders.len()) as u64
+        + bots::adopt_legacy_pool(db, owner).await?
+        + settings::adopt_legacy_split(db, owner).await?;
     if claimed > 0 {
         tracing::info!(%owner, claimed, "adopted pre-multi-tenant rows");
     }

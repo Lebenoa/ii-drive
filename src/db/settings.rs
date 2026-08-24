@@ -79,6 +79,41 @@ pub async fn set_split(
     Ok(())
 }
 
+/// Row the split threshold lived in before it was per-user.
+const LEGACY_UPLOAD_ID: &str = "setting:upload";
+
+/// Moves the pre-multi-tenant global split threshold to `owner`, returning 1
+/// when it claimed something.
+///
+/// Without this, upgrading silently reset a configured threshold to 0 and the
+/// next oversized upload would fail outright instead of being chunked. A user
+/// who already has their own row keeps it, so the legacy row is merged once.
+pub(super) async fn adopt_legacy_split(
+    db: &surrealdb::Surreal<Conn>,
+    owner: i64,
+) -> Result<u64, DbError> {
+    let mut res = db
+        .query(format!("SELECT split_bytes FROM {LEGACY_UPLOAD_ID}"))
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    let Some(bytes) = rows
+        .into_iter()
+        .next()
+        .and_then(|r| r.get("split_bytes").cloned())
+        .and_then(|v| v.as_u64())
+    else {
+        return Ok(0);
+    };
+    let key = owner.to_string();
+    // Only adopt into an account that has not set its own threshold since.
+    if get_split(db, &key).await? == 0 {
+        set_split(db, &key, bytes).await?;
+    }
+    let mut res = db.query(format!("DELETE {LEGACY_UPLOAD_ID}")).await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(1)
+}
+
 /// One selected storage channel for a user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSel {
@@ -273,5 +308,29 @@ mod tests {
             0,
             "another tenant is unaffected"
         );
+    }
+
+    /// Upgrading must not silently reset a configured split threshold: an
+    /// operator who chunked at 1 GiB would otherwise find oversized uploads
+    /// failing outright instead of being split.
+    #[tokio::test]
+    async fn a_legacy_split_threshold_is_adopted_once() {
+        let db = crate::db::open_mem().await.expect("open test db");
+        let mut res = db
+            .query(format!("UPSERT {LEGACY_UPLOAD_ID} SET split_bytes = $b"))
+            .bind(("b", 1_073_741_824i64))
+            .await
+            .expect("plant the pre-multi-tenant row");
+        let _ = res.take::<surrealdb::types::Value>(0usize).expect("upsert");
+
+        assert_eq!(adopt_legacy_split(&db, 7).await.expect("adopt"), 1);
+        assert_eq!(get_split(&db, "7").await.expect("read"), 1_073_741_824);
+
+        // Idempotent: the legacy row is gone, so a second boot claims nothing
+        // and cannot overwrite a threshold the user has since changed.
+        assert_eq!(adopt_legacy_split(&db, 7).await.expect("adopt"), 0);
+        set_split(&db, "7", 500).await.expect("retune");
+        assert_eq!(adopt_legacy_split(&db, 7).await.expect("adopt"), 0);
+        assert_eq!(get_split(&db, "7").await.expect("read"), 500);
     }
 }
