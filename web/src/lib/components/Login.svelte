@@ -1,11 +1,20 @@
 <script lang="ts">
   import { sendLoginPhone, sendLoginCode, sendLoginPassword, setToken } from '$lib/api';
+  import CountrySelect from '$lib/components/CountrySelect.svelte';
+  import { guessCountry, splitNumber, toE164, type Country } from '$lib/countries';
   import { fadeOnly, slideX } from '$lib/motion';
 
   let { onSuccess }: { onSuccess: () => void } = $props();
 
   let step: 'phone' | 'code' | 'password' = $state('phone');
-  let phone = $state('');
+  /**
+   * The field is kept verbatim — never rewritten under the user's caret, or
+   * a typed "+" would vanish before the next keystroke lands. Everything
+   * else is derived from it.
+   */
+  let phoneRaw = $state('');
+  /** The combobox choice; overridden whenever the field names its own country. */
+  let chosen = $state<Country>(guessCountry());
   /** identifies the in-flight attempt on the server; issued by the phone step */
   let loginId = $state('');
   let code = $state('');
@@ -14,6 +23,12 @@
   let busy = $state(false);
   let error = $state('');
 
+  const parsed = $derived(splitNumber(phoneRaw, chosen));
+  const country = $derived(parsed.country);
+  const e164 = $derived(toE164(country, parsed.national));
+  /** Dial code alone is not a number; guards the submit button. */
+  const phoneReady = $derived(parsed.national.length > 0);
+
   function finish(token: string): void {
     setToken(token);
     onSuccess();
@@ -21,11 +36,11 @@
 
   async function submitPhone(e: SubmitEvent): Promise<void> {
     e.preventDefault();
-    if (busy || phone.trim().length === 0) return;
+    if (busy || !phoneReady) return;
     busy = true;
     error = '';
     try {
-      loginId = await sendLoginPhone(phone.trim());
+      loginId = await sendLoginPhone(e164);
       step = 'code';
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -94,16 +109,32 @@
       {#key step}
         <div class="step" in:slideX={{ x: 14 }} out:fadeOnly>
           {#if step === 'phone'}
-            <label class="lbl" for="phone">Phone number (with country code)</label>
-            <input
-              id="phone"
-              class="field"
-              type="tel"
-              placeholder="+15551234567"
-              autocomplete="tel"
-              bind:value={phone}
-              disabled={busy}
-            />
+            <label class="lbl" for="phone">Phone number</label>
+            <div class="phone-row">
+              <CountrySelect
+                {country}
+                disabled={busy}
+                onpick={(c) => {
+                  chosen = c;
+                  // An international number in the field would keep winning
+                  // over the pick, so an explicit choice clears it instead.
+                  const digits = phoneRaw.replace(/\D/g, '');
+                  if (phoneRaw.trim().startsWith('+') || digits.startsWith('00')) {
+                    phoneRaw = '';
+                  }
+                }}
+              />
+              <input
+                id="phone"
+                class="field"
+                type="tel"
+                placeholder="988 962 019"
+                autocomplete="tel-national"
+                inputmode="tel"
+                bind:value={phoneRaw}
+                disabled={busy}
+              />
+            </div>
           {:else if step === 'code'}
             <label class="lbl" for="code">Confirmation code sent to Telegram</label>
             <input
@@ -140,7 +171,7 @@
       class="btn btn-primary submit"
       type="submit"
       disabled={busy ||
-        (step === 'phone' && phone.trim().length === 0) ||
+        (step === 'phone' && !phoneReady) ||
         (step === 'code' && code.trim().length === 0) ||
         (step === 'password' && tgPassword.length === 0)}
     >
@@ -174,6 +205,18 @@
     text-align: center;
     margin: 0 0 14px;
     font-size: 13.5px;
+  }
+
+  /* Country picker and the number share one control, visually. */
+  .phone-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .phone-row .field {
+    flex: 1;
+    min-width: 0;
   }
 
   .lbl {
