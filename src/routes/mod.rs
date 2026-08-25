@@ -15,9 +15,9 @@ pub use botfather::{
     send as botfather_send, token as botfather_token,
 };
 pub use session::{
-    add_bot, auth_code, auth_logout, auth_password, auth_phone, avatar, create_channel, get_rules,
-    get_settings, list_bots, list_channels, me, reload_config, remove_bot, save_rules,
-    save_settings, select_channels,
+    add_bot, auth_code, auth_logout, auth_password, auth_phone, avatar, create_channel,
+    get_instance, get_rules, get_settings, list_bots, list_channels, me, remove_bot, save_instance,
+    save_rules, save_settings, select_channels,
 };
 
 pub use internal_db::{query as internal_db_query, tables as internal_db_tables};

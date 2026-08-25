@@ -57,6 +57,12 @@ async fn main() {
         eprintln!("failed to open database {}: {e}", cfg.db_path);
         std::process::exit(1);
     }
+    // Before anything can serve a request, so no upload is ever checked
+    // against the placeholder cap the lazy state had to start with.
+    if let Err(e) = state.hydrate_instance(&cfg.legacy).await {
+        eprintln!("failed to load instance settings: {e}");
+        std::process::exit(1);
+    }
     match db::counts(&state.db).await {
         Ok((files, folders)) => {
             tracing::info!(

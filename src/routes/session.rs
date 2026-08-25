@@ -422,8 +422,8 @@ pub async fn save_settings(
             "split threshold cannot exceed Telegram's document limit ({TG_DOC_CAP_MB} MB)"
         )));
     }
-    if body.split_mb > 0 && bytes >= crate::config::get().max_file_size {
-        let cap = crate::config::get().max_file_size / MB;
+    if body.split_mb > 0 && bytes >= state.instance().max_file_size {
+        let cap = state.instance().max_file_size / MB;
         return Err(ApiError::bad_request(format!(
             "split threshold must be below the upload limit ({cap} MB) — use 0 to disable splitting"
         )));
@@ -432,29 +432,64 @@ pub async fn save_settings(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// POST /api/config/reload — re-reads config.toml from disk. Hot-applies
-/// runtime fields (upload cap, phone allowlist, thumbnail toggle); paths and
-/// credentials only take effect after a restart.
+/// A change to the instance settings. Every field is optional so a caller can
+/// move one without restating the rest.
+#[derive(Deserialize)]
+pub struct InstanceBody {
+    /// Bytes, or a human size like `"2GiB"`.
+    max_file_size: Option<crate::config::SizeRepr>,
+    media_thumbs: Option<bool>,
+    upload_strategy: Option<crate::db::UploadStrategy>,
+}
+
+/// GET /api/instance — the instance-wide tunables.
 ///
-/// `config.toml` is process-wide, so a reload moves the upload cap and the
-/// phone allowlist for every tenant at once: operators only. 404 rather than
-/// 403 so a non-admin cannot even confirm the endpoint exists.
-pub async fn reload_config(
+/// One row serves every tenant, so reading and writing it is operator-only.
+/// 404 rather than 403 so a non-admin cannot even confirm it exists, matching
+/// the raw-SQL browser.
+pub async fn get_instance(
     Extension(Caller(uid)): Extension<Caller>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<crate::db::Instance>> {
     let state = crate::state::get();
     if !state.is_admin(uid).await {
         return Err(ApiError::not_found("not found"));
     }
-    let cfg = crate::config::reload()
-        .map_err(|e| e.to_string())
-        .map_err(ApiError::bad_request)?;
-    Ok(Json(json!({
-        "ok": true,
-        "max_file_size": cfg.max_file_size,
-        "allowed_phones": cfg.allowed_phones.len(),
-        "media_thumbs": cfg.media_thumbs,
-    })))
+    Ok(Json(state.instance()))
+}
+
+/// PUT /api/instance — changes tunables for the whole instance, taking effect
+/// on the next request rather than the next restart.
+///
+/// A zero cap is refused: it would reject every upload, and "off" is not a
+/// meaning an upload limit can carry. Lowering the cap below a tenant's split
+/// threshold is allowed and leaves that threshold inert until they lower it —
+/// the alternative is silently rewriting settings the operator never saw.
+pub async fn save_instance(
+    Extension(Caller(uid)): Extension<Caller>,
+    Json(body): Json<InstanceBody>,
+) -> ApiResult<Json<crate::db::Instance>> {
+    let state = crate::state::get();
+    if !state.is_admin(uid).await {
+        return Err(ApiError::not_found("not found"));
+    }
+
+    let mut next = state.instance();
+    if let Some(size) = body.max_file_size {
+        let bytes = size.bytes().map_err(ApiError::bad_request)?;
+        if bytes == 0 {
+            return Err(ApiError::bad_request("upload limit must be above zero"));
+        }
+        next.max_file_size = bytes;
+    }
+    if let Some(thumbs) = body.media_thumbs {
+        next.media_thumbs = thumbs;
+    }
+    if let Some(strategy) = body.upload_strategy {
+        next.upload_strategy = strategy;
+    }
+
+    state.set_instance(next).await?;
+    Ok(Json(next))
 }
 
 #[cfg(test)]
@@ -530,17 +565,25 @@ mod tests {
         });
     }
 
-    /// `config.toml` is process-wide, so a reload changes the upload cap and
-    /// the phone allowlist for every tenant. The caller here has no Telegram
-    /// session, so no phone can be resolved for it and it cannot be an
-    /// operator — the endpoint must not even admit to existing.
+    /// One row serves every tenant, so both halves of the endpoint are
+    /// operator-only. The caller here has no Telegram session, so no phone
+    /// can be resolved for it and it cannot be an operator — the endpoint
+    /// must not even admit to existing.
     #[test]
-    fn config_reload_is_operator_only() {
+    fn instance_settings_are_operator_only() {
         with_state(|_state| async move {
-            let err = reload_config(Extension(Caller(next_uid())))
+            let read = get_instance(Extension(Caller(next_uid())))
                 .await
-                .expect_err("a non-admin tenant cannot reload global config");
-            assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+                .expect_err("a non-admin tenant cannot read instance settings");
+            assert_eq!(read.0, axum::http::StatusCode::NOT_FOUND);
+
+            let write = save_instance(
+                Extension(Caller(next_uid())),
+                Json(serde_json::from_value(json!({ "media_thumbs": false })).expect("body")),
+            )
+            .await
+            .expect_err("a non-admin tenant cannot change instance settings");
+            assert_eq!(write.0, axum::http::StatusCode::NOT_FOUND);
         });
     }
 

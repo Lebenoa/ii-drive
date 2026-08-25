@@ -97,11 +97,16 @@
       "telegram": "Telegram",
       "uploads": "Uploads",
       "other": "Other"
-    },
-    "reloadConfig": "Reload config",
-    "reloading": "Reloading…",
-    "reloaded": "Config reloaded.",
-    "reloadConfigHint": "Re-read config.toml — paths and credentials need a restart"
+    }
+  },
+  "instance": {
+    "title": "Instance settings",
+    "hint": "Server-wide upload behaviour, shared by every account. Stored in the database and applied immediately — no restart, no config.toml edit.",
+    "cap": "Upload limit",
+    "thumbs": "Generate video and image thumbnails with ffmpeg",
+    "strategy": "Strategy",
+    "strategyStream": "Stream — relay straight to Telegram, no disk use",
+    "strategySpill": "Spill — buffer to disk first, faster on fast links"
   },
   "other": {
     "language": "Language",

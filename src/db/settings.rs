@@ -247,6 +247,108 @@ pub async fn bump_token_epoch(
     Ok(next)
 }
 
+/// How an accepted upload reaches Telegram.
+///
+/// `Stream` relays the client body straight into per-part uploaders — no disk
+/// usage, but each part only starts draining once the sequential body feed
+/// reaches it. `Spill` buffers the whole body to `spill_dir` first, then
+/// drains every part at full aggregate rate: a faster tail on fast pipes,
+/// paid for in temporary disk space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UploadStrategy {
+    Stream,
+    Spill,
+}
+
+/// Instance-wide tunables: the settings an operator actually revisits while
+/// the server runs. They live here rather than in `config.toml` so changing
+/// one is a request instead of an edit-and-restart — the file is left for
+/// values that are set once (credentials, paths, the phone allowlists).
+///
+/// One row for the whole process, not one per user: an upload cap that each
+/// tenant could raise for themselves would not be a cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Instance {
+    /// Largest accepted upload. Files above Telegram's per-document limit
+    /// are chunked transparently, so this can exceed it.
+    pub max_file_size: u64,
+    /// Generate thumbnails for videos/images with ffmpeg when available.
+    pub media_thumbs: bool,
+    pub upload_strategy: UploadStrategy,
+}
+
+impl Default for Instance {
+    fn default() -> Self {
+        Instance {
+            max_file_size: 2 * 1024 * 1024 * 1024,
+            media_thumbs: true,
+            upload_strategy: UploadStrategy::Stream,
+        }
+    }
+}
+
+/// The one instance row. Global, so it takes no user key.
+const INSTANCE_ID: &str = "setting:instance";
+
+/// The stored tunables, or None when nothing has written them yet.
+///
+/// The caller needs that distinction: absent means a fresh install (or one
+/// whose values still sit in `config.toml`), which is the only moment seeding
+/// them from the file is right. Fields are read individually and fall back to
+/// the default one by one, so a row hand-edited through `/internal-db` into a
+/// partial shape degrades to defaults instead of failing every upload.
+pub async fn get_instance(db: &surrealdb::Surreal<Conn>) -> Result<Option<Instance>, DbError> {
+    let mut res = db
+        .query(format!(
+            "SELECT max_file_size, media_thumbs, upload_strategy FROM {INSTANCE_ID}"
+        ))
+        .await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    let fallback = Instance::default();
+    Ok(Some(Instance {
+        max_file_size: row
+            .get("max_file_size")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(fallback.max_file_size),
+        media_thumbs: row
+            .get("media_thumbs")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(fallback.media_thumbs),
+        upload_strategy: match row.get("upload_strategy").and_then(|v| v.as_str()) {
+            Some("spill") => UploadStrategy::Spill,
+            Some("stream") => UploadStrategy::Stream,
+            _ => fallback.upload_strategy,
+        },
+    }))
+}
+
+pub async fn set_instance(db: &surrealdb::Surreal<Conn>, inst: &Instance) -> Result<(), DbError> {
+    let mut res = db
+        .query(format!(
+            "UPSERT {INSTANCE_ID} SET max_file_size = $s, media_thumbs = $t, \
+             upload_strategy = $u"
+        ))
+        .bind(("s", inst.max_file_size as i64))
+        .bind(("t", inst.media_thumbs))
+        .bind(("u", inst.upload_strategy.to_string()))
+        .await?;
+    let _ = res.take::<surrealdb::types::Value>(0usize)?;
+    Ok(())
+}
+
+impl std::fmt::Display for UploadStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            UploadStrategy::Stream => "stream",
+            UploadStrategy::Spill => "spill",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +372,37 @@ mod tests {
             0,
             "another tenant is unaffected"
         );
+    }
+
+    /// `None` is what tells startup the values still live in `config.toml`,
+    /// so an unwritten row must not read back as defaults.
+    #[tokio::test]
+    async fn instance_settings_round_trip() {
+        let db = crate::db::open_mem().await.expect("open test db");
+
+        assert_eq!(get_instance(&db).await.expect("read"), None);
+
+        let want = Instance {
+            max_file_size: 500 * 1024 * 1024,
+            media_thumbs: false,
+            upload_strategy: UploadStrategy::Spill,
+        };
+        set_instance(&db, &want).await.expect("write");
+        assert_eq!(get_instance(&db).await.expect("read"), Some(want));
+    }
+
+    /// The row is reachable from `/internal-db`, so a hand-written partial
+    /// one must degrade field by field rather than fail every upload.
+    #[tokio::test]
+    async fn a_partial_instance_row_falls_back_per_field() {
+        let db = crate::db::open_mem().await.expect("open test db");
+        db.query(format!("UPSERT {INSTANCE_ID} SET media_thumbs = false"))
+            .await
+            .expect("plant a partial row");
+
+        let got = get_instance(&db).await.expect("read").expect("row exists");
+        assert!(!got.media_thumbs, "the written field is honoured");
+        assert_eq!(got.max_file_size, Instance::default().max_file_size);
+        assert_eq!(got.upload_strategy, UploadStrategy::Stream);
     }
 }

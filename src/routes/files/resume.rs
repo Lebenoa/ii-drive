@@ -97,10 +97,10 @@ pub async fn init(
     if req.size == 0 {
         return Err(ApiError::bad_request("size must be positive"));
     }
-    if req.size > crate::config::get().max_file_size {
+    if req.size > crate::state::get().instance().max_file_size {
         return Err(ApiError::too_large(format!(
             "file exceeds limit of {} bytes",
-            crate::config::get().max_file_size
+            crate::state::get().instance().max_file_size
         )));
     }
     if !req.folder.is_empty()

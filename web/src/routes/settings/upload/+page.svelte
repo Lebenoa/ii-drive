@@ -4,16 +4,70 @@
 
 <script lang="ts">
   import {
+    getInstance,
     getRules,
     getSettings,
     listFolders,
+    saveInstance,
     saveRules,
     saveSettings,
     type Folder,
+    type Instance,
     type RouteRule,
   } from '$lib/api';
   import { collapse, fadeUp, stagger } from '$lib/motion';
   import { t } from '$lib/i18n.svelte';
+  import { settingsSession } from '../+layout.svelte';
+
+  const session = settingsSession();
+
+  // --- Instance settings (operator-only) ---
+  // The cap is stored in bytes but edited in MB: nobody wants to type
+  // 2147483648, and the server accepts either.
+  const MB = 1024 * 1024;
+  let instance = $state<Instance | undefined>();
+  let capMb = $state(0);
+  let instanceSaving = $state(false);
+  let instanceMsg = $state('');
+  let instanceError = $state('');
+
+  async function loadInstance(): Promise<void> {
+    if (!session.admin || instance) return;
+    try {
+      instance = await getInstance();
+      capMb = Math.round(instance.max_file_size / MB);
+    } catch (err) {
+      // A 404 here means the account lost operator rights between the
+      // /api/me probe and this call; the panel simply stays hidden.
+      instanceError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // A cap of 500 MB (decimal, as `max_file_size = "500MB"` once allowed)
+  // displays as 477 MB, so re-sending the rounded field would quietly move
+  // the stored value. Send it only when the operator actually edited it —
+  // the endpoint keeps whatever a request leaves out.
+  const capEdited = $derived(!!instance && capMb !== Math.round(instance.max_file_size / MB));
+
+  async function saveInstanceSettings(): Promise<void> {
+    if (instanceSaving || !instance) return;
+    instanceSaving = true;
+    instanceMsg = '';
+    instanceError = '';
+    try {
+      instance = await saveInstance({
+        ...(capEdited ? { max_file_size: Math.max(1, Math.floor(Number(capMb) || 0)) * MB } : {}),
+        media_thumbs: instance.media_thumbs,
+        upload_strategy: instance.upload_strategy,
+      });
+      capMb = Math.round(instance.max_file_size / MB);
+      instanceMsg = t('common.saved');
+    } catch (err) {
+      instanceError = err instanceof Error ? err.message : String(err);
+    } finally {
+      instanceSaving = false;
+    }
+  }
 
   // --- Split uploads ---
   let splitMb = $state(0);
@@ -106,15 +160,53 @@
     }
   }
 
-  // Both panels are on screen together, so their loads run concurrently
+  // All panels are on screen together, so their loads run concurrently
   // instead of waiting on each other.
   $effect(() => {
-    void Promise.all([loadSplit(), loadRouting()]);
+    void Promise.all([loadSplit(), loadRouting(), loadInstance()]);
   });
 </script>
 
 <main class="content">
-  <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
+  {#if session.admin}
+    <section class="card section" in:fadeUp={{ delay: stagger(0) }}>
+      <h2>{t('instance.title')}</h2>
+      <p class="muted hint">{t('instance.hint')}</p>
+      {#if instance}
+        <div class="split-row">
+          <label class="cap-label" for="cap">{t('instance.cap')}</label>
+          <input id="cap" class="field split-input" type="number" min="1" bind:value={capMb} />
+          <span class="muted">MB</span>
+        </div>
+        <label class="switch-row">
+          <input type="checkbox" bind:checked={instance.media_thumbs} />
+          <span>{t('instance.thumbs')}</span>
+        </label>
+        <div class="split-row">
+          <label class="cap-label" for="strategy">{t('instance.strategy')}</label>
+          <select id="strategy" class="field" bind:value={instance.upload_strategy}>
+            <option value="stream">{t('instance.strategyStream')}</option>
+            <option value="spill">{t('instance.strategySpill')}</option>
+          </select>
+          <button
+            class="btn btn-primary busy-btn"
+            type="button"
+            disabled={instanceSaving}
+            onclick={() => void saveInstanceSettings()}
+          >
+            {#if instanceSaving}<span class="spinner btn-spin"></span>{/if}
+            {instanceSaving ? t('common.saving') : t('common.save')}
+          </button>
+        </div>
+        {#if instanceMsg}<p class="ok-text" transition:fadeUp>{instanceMsg}</p>{/if}
+      {:else if !instanceError}
+        <p class="muted">{t('common.loading')}</p>
+      {/if}
+      {#if instanceError}<p class="error-text">{instanceError}</p>{/if}
+    </section>
+  {/if}
+
+  <section class="card section" in:fadeUp={{ delay: stagger(session.admin ? 1 : 0) }}>
     <h2>{t('upload.splitTitle')}</h2>
     <p class="muted hint">{t('upload.splitHint')}</p>
     {#if splitLoaded}
@@ -154,7 +246,7 @@
     {/if}
   </section>
 
-  <section class="card section" in:fadeUp={{ delay: stagger(1) }}>
+  <section class="card section" in:fadeUp={{ delay: stagger(session.admin ? 2 : 1) }}>
     <h2>{t('upload.routingTitle')}</h2>
     <p class="muted hint">{t('upload.routingHint')}</p>
     {#if rulesLoaded}
@@ -225,6 +317,28 @@
   .split-input {
     width: 90px;
     margin: 0;
+  }
+
+  .cap-label {
+    font-size: 14px;
+    min-width: 5.5rem;
+  }
+
+  /* Mirrors the toggle row on the Other page so the two operator panels
+     line up rather than each inventing a spacing. */
+  .switch-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+
+  .switch-row input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent, inherit);
   }
 
   .preset.active {

@@ -6,5 +6,5 @@ pub async fn health() -> Json<serde_json::Value> {
 
 /// Public upload limits so clients can pre-check files before transferring.
 pub async fn limits() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "max_file_size": crate::config::get().max_file_size }))
+    Json(serde_json::json!({ "max_file_size": crate::state::get().instance().max_file_size }))
 }

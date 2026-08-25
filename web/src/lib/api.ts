@@ -237,9 +237,26 @@ export function botfatherToken(bot: string): Promise<{ token: string }> {
   return request('/api/botfather/token', { method: 'POST', body: { bot } });
 }
 
-/** POST /api/config/reload — re-read config.toml; hot-applies runtime fields. */
-export function reloadConfig(): Promise<{ ok: true }> {
-  return request('/api/config/reload', { method: 'POST' });
+/** Instance-wide upload settings. Operator-only: every other caller gets 404. */
+export interface Instance {
+  max_file_size: number;
+  media_thumbs: boolean;
+  upload_strategy: 'stream' | 'spill';
+}
+
+/** GET /api/instance — the instance-wide upload settings. */
+export function getInstance(): Promise<Instance> {
+  return request('/api/instance');
+}
+
+/**
+ * PUT /api/instance — change instance-wide settings, effective immediately.
+ *
+ * Partial by design: fields left out keep their stored value, so two
+ * operators editing different settings cannot clobber each other.
+ */
+export function saveInstance(patch: Partial<Instance>): Promise<Instance> {
+  return request('/api/instance', { method: 'PUT', body: patch });
 }
 
 /** POST /api/channels/create — creates a broadcast channel on Telegram */

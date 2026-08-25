@@ -15,8 +15,9 @@ use super::{
 };
 
 /// Per-request body-limit guard for POST /api/files. The limit cannot be
-/// baked into the router at startup: `max_file_size` is runtime-reloadable,
-/// and a frozen cap kept rejecting uploads after a reload raised it.
+/// baked into the router at startup: the cap is an instance setting an
+/// operator can change while the server runs, and a frozen copy kept
+/// rejecting uploads after the cap was raised.
 /// Browsers always send Content-Length, so this refuses oversized bodies
 /// before any bytes move; absent or lying headers fall through to the
 /// handler's streaming check, which enforces the same live limit.
@@ -26,7 +27,10 @@ pub async fn upload_limit(
 ) -> Result<axum::response::Response, ApiError> {
     // Multipart overhead beyond the raw file bytes: boundary, headers.
     const SLACK: u64 = 1024 * 1024;
-    let max = crate::config::get().max_file_size.saturating_add(SLACK);
+    let max = crate::state::get()
+        .instance()
+        .max_file_size
+        .saturating_add(SLACK);
     let declared_len = req
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
@@ -77,7 +81,7 @@ pub async fn upload_file(
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| ApiError::bad_request("missing X-File-Size header"))?;
 
-    let max = crate::config::get().max_file_size;
+    let max = crate::state::get().instance().max_file_size;
     if declared > max {
         return Err(ApiError::too_large(format!(
             "file exceeds limit of {} bytes",
@@ -143,7 +147,7 @@ pub async fn upload_file(
     // Spill trades temporary disk for a decoupled drain: the whole body is
     // buffered before any part starts uploading, so Telegram's aggregate
     // rate is never throttled behind this request's sequential body feed.
-    if crate::config::get().upload_strategy == crate::config::UploadStrategy::Spill {
+    if crate::state::get().instance().upload_strategy == crate::db::UploadStrategy::Spill {
         return spill_upload(state, tg, uid, multipart, declared, max, folder).await;
     }
 
@@ -942,7 +946,7 @@ async fn persist_row(
         cleanup_parts(&tg, &row.parts).await;
         return Err(e.into());
     }
-    if crate::config::get().media_thumbs
+    if crate::state::get().instance().media_thumbs
         && row.thumb.is_none()
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {

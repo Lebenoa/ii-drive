@@ -11,11 +11,12 @@ the interface.
 - **Multi-account concurrent sessions** — every allowed phone number signs in simultaneously, with isolated files, folders, bots, routing rules and settings.
 - **Download bot pool** — add several bots to spread upload and download load across separate MTProto connections for higher throughput.
 - **Split uploads** — files above a threshold are cut into parts (at most 64) and uploaded in parallel, round-robin across storage channels.
-- **Transparent chunking** — `max_file_size` above Telegram's per-document cap is honored by splitting into parts (≤64); parts are re-joined on download and deleted together.
+- **Transparent chunking** — an upload cap above Telegram's per-document cap is honored by splitting into parts (≤64); parts are re-joined on download and deleted together.
 - **Thumbnail extraction** — audio cover art is parsed straight from ID3/FLAC bytes (no ffmpeg); videos and images get background ffmpeg thumbnails.
 - **On-demand i18n** — only English ships; other languages download at runtime from GitHub, so translations improve without rebuilding.
 - **Guided @BotFather chat** — create or import download bots through a resumable in-app conversation with @BotFather.
 - **Developer mode** — `/internal-db` gives admin users a SurrealDB browser; endpoints answer only to `admin_phones`.
+- **Live instance settings** — upload cap, thumbnail switch and upload strategy live in the database and apply on the next request; `config.toml` holds only what you set once.
 - **Resumable uploads** — the `spill` strategy buffers to disk so uploads keep draining even if Telegram is slow.
 - **Streaming with resume** — files stream back on demand and resume transparently when Telegram's file references expire mid-transfer.
 
@@ -32,8 +33,8 @@ the interface.
 | **Chunking** | Configurable split threshold, ≤64 parts, round-robin across channels, rotating bot sessions | Chunked uploads; configurable threads, retries, retention; optional encryption |
 | **Thumbnails** | Audio cover art from ID3/FLAC; ffmpeg for video/images | Optional imgproxy image resizing/thumbnails |
 | **Deployment** | Single binary + `web/dist` folder + embedded DB file; TOML config | Binary + separate React UI + PostgreSQL; optional Redis, imgproxy |
-| **Config reload** | `POST /api/config/reload` hot-applies runtime fields | Restart required |
-| **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/config/reload` | CLI check/clean utilities |
+| **Runtime settings** | Upload cap, thumbnails and strategy stored in the DB, changed from the UI, no restart | Config file, restart required |
+| **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/instance` | CLI check/clean utilities |
 | **Max file size** | 2 GiB default, configurable; larger files chunk into parts | 2 GB per Telegram document, chunked |
 | **Upload strategy** | `stream` (relay) or `spill` (disk-buffer) | Stream with configurable buffers |
 
@@ -140,12 +141,27 @@ That's it — drag files into the drive to upload them.
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
    | `session_path` | `data/session.db` | Legacy session path kept for compatibility; per-account sessions live in `sessions/` beside it |
-   | `max_file_size` | `2GiB` | Upload cap; `2GiB`, `500MiB`, `2GB` (=2·10⁹), plain bytes |
    | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
    | `locales_dir` | `locales` | Web-UI translation files, served under `/locales/`; downloaded on demand |
+   | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (`spill` strategy + resumable uploads) |
+
+   Every key above is set once and read only at startup — there is no config
+   reload, because there is nothing here worth re-reading.
+
+   The settings you actually revisit live in the database instead, editable
+   under **Settings → Uploads** (operator only) or through `PUT /api/instance`.
+   They take effect on the next request:
+
+   | Setting | Default | Meaning |
+   |---|---|---|
+   | `max_file_size` | `2GiB` | Upload cap; bytes or `2GiB`, `500MiB`, `2GB` (=2·10⁹) |
    | `media_thumbs` | `true` | ffmpeg image/video thumbnails; audio cover art is extracted regardless |
    | `upload_strategy` | `stream` | How an accepted upload reaches Telegram: `stream` relays the body directly, `spill` buffers to disk first so all parts drain at full rate |
-   | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (`spill` strategy + resumable uploads) |
+
+   These three used to be config keys. An install that still sets them in
+   `config.toml` has them copied into the database once, on the first startup
+   after upgrading, and logs which keys to delete — your existing cap is not
+   silently reset.
 
 ### Multi-account notes
 
@@ -178,7 +194,9 @@ Settings lives under `/settings` with three categories:
   rather than leaving @BotFather waiting, and an explicit cancel tells
   @BotFather to drop it.
 - **Uploads** — split-upload threshold and auto-upload routing rules
-  (mime-prefix → folder).
+  (mime-prefix → folder). Operators also get the instance settings here:
+  upload cap, ffmpeg thumbnails and upload strategy, applied immediately
+  and shared by every account.
 - **Other** — developer mode, which unlocks `/internal-db`: browse the
   embedded tables and run SurrealQL directly. Those queries span every
   signed-in account, so the endpoints behind it answer only to numbers in
@@ -283,7 +301,7 @@ just log in again through the web UI.
 | GET | `/api/files/{id}/link` | token | Mint time-limited share URL |
 | GET/POST | `/api/folders`(`/{id}`) | token | List / create / delete folders |
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
-| POST | `/api/config/reload` | token + admin | Re-read config.toml (runtime fields hot-apply) |
+| GET/PUT | `/api/instance` | token + admin | Instance-wide upload cap, thumbnail switch and strategy; non-admins get 404 |
 | GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
 | GET | `/locales/manifest.json` | — | Languages available in `locales_dir`, with display names |
 | GET | `/locales/{lang}.json` | — | One translation dictionary; the UI downloads it on language change |

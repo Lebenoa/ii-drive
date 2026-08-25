@@ -1,17 +1,24 @@
 use anyhow::Result;
-use std::sync::{LazyLock, OnceLock, RwLock};
+use std::sync::{LazyLock, OnceLock};
 
 use serde::Deserialize;
 
-/// Process-wide configuration. Loaded once at startup via [`init`], read
-/// through [`get`] (cheap snapshot clone), and refreshed from disk with
-/// [`reload`]. `LazyLock` makes the static self-initializing without
-/// needing a `once_cell`-style dance in `main`.
-static CONFIG: LazyLock<RwLock<Config>> = LazyLock::new(|| RwLock::new(Config::default()));
+use crate::db::UploadStrategy;
 
-/// Where the config was loaded from, kept so [`reload`] re-reads the same
-/// file even when the server was started with an explicit path argument.
-static CONFIG_PATH: OnceLock<String> = OnceLock::new();
+/// Process-wide configuration, loaded once by [`init`] and read through
+/// [`get`] for the rest of the process' life.
+///
+/// Everything here is a value an operator sets once and forgets: Telegram
+/// credentials, filesystem paths, the phone allowlists. There is deliberately
+/// nothing worth re-reading at runtime — tunables that do get revisited live
+/// in the database as [`crate::db::Instance`], where changing one is a
+/// request rather than an edit-and-restart.
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+/// What [`get`] answers before [`init`] has run. Only test binaries ever see
+/// it: keeping it in its own cell means a read that lands early cannot fill
+/// `CONFIG` with defaults and leave the real load with nowhere to go.
+static DEFAULTS: LazyLock<Config> = LazyLock::new(Config::default);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -23,43 +30,58 @@ pub struct Config {
     pub token_ttl_secs: u64,
     pub db_path: String,
     pub session_path: String,
-    pub max_file_size: u64,
     pub web_dist: String,
     /// Folder of translation files (`{lang}.json`) served to the web UI,
     /// which downloads a language only after the user picks it.
     pub locales_dir: String,
     pub allowed_phones: Vec<String>,
     /// Phone numbers allowed to reach operator-only endpoints (raw-SQL
-    /// browser, config reload). Phone rather than Telegram user id because
-    /// Telegram never shows a user their own numeric id, so an id would be
-    /// a setting nobody can fill in unaided.
+    /// browser, instance settings). Phone rather than Telegram user id
+    /// because Telegram never shows a user their own numeric id, so an id
+    /// would be a setting nobody can fill in unaided.
+    ///
+    /// Deliberately a file setting and not a database one: `/internal-db`
+    /// runs unrestricted SurrealQL, so an admin list living in the store
+    /// would be a list admins can extend. Keeping it in a file the server
+    /// only ever reads means granting operator rights takes filesystem
+    /// access, not a session.
     pub admin_phones: Vec<String>,
-    /// Generate thumbnails for videos/images with ffmpeg when available.
-    pub media_thumbs: bool,
-    /// How an accepted upload reaches Telegram. `Stream` relays the client
-    /// body straight into per-part uploaders (no disk usage, but each part
-    /// only starts draining once the sequential body feed reaches it).
-    /// `Spill` buffers the whole body to `spill_dir` first, then drains all
-    /// parts at full aggregate rate — faster tail on fast pipes, costs the
-    /// file size in temporary disk space.
-    pub upload_strategy: UploadStrategy,
-    /// Directory for in-flight upload buffers (strategy `spill`, and the
-    /// resumable-upload sessions, which always spill by design).
+    /// Directory for in-flight upload buffers (upload strategy `spill`, and
+    /// the resumable-upload sessions, which always spill by design).
     pub spill_dir: String,
+    /// Values that used to be configured here; see [`Legacy`].
+    pub legacy: Legacy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UploadStrategy {
-    Stream,
-    Spill,
+/// Tunables that lived in `config.toml` before they moved into the database.
+///
+/// Read once so an existing install's values are not silently dropped: when
+/// the database has no instance row yet, startup seeds it from these and logs
+/// what to delete from the file. Nothing consults them afterwards, and a
+/// malformed one is a warning rather than a failed boot — refusing to start
+/// over a key that no longer configures anything would be absurd.
+#[derive(Debug, Clone, Default)]
+pub struct Legacy {
+    pub max_file_size: Option<u64>,
+    pub media_thumbs: Option<bool>,
+    pub upload_strategy: Option<UploadStrategy>,
 }
 
-impl std::fmt::Display for UploadStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            UploadStrategy::Stream => "stream",
-            UploadStrategy::Spill => "spill",
-        })
+impl Legacy {
+    /// The moved keys this file still sets, named so the seeding warning can
+    /// tell the operator exactly what to delete.
+    pub fn present_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.max_file_size.is_some() {
+            keys.push("max_file_size");
+        }
+        if self.media_thumbs.is_some() {
+            keys.push("media_thumbs");
+        }
+        if self.upload_strategy.is_some() {
+            keys.push("upload_strategy");
+        }
+        keys
     }
 }
 
@@ -94,28 +116,25 @@ impl Default for Config {
             token_ttl_secs: 30 * 24 * 3600,
             db_path: "data/drive.surrealkv".into(),
             session_path: "data/session.db".into(),
-            max_file_size: 2 * 1024 * 1024 * 1024,
             web_dist: "web/dist".into(),
             locales_dir: "locales".into(),
             allowed_phones: Vec::new(),
             admin_phones: Vec::new(),
-            media_thumbs: true,
-            upload_strategy: UploadStrategy::Stream,
             spill_dir: "data/spill".into(),
+            legacy: Legacy::default(),
         }
     }
 }
 
 /// Loads `path`, anchors its relative data paths against the file's
 /// directory, and installs it as the process-wide config.
-pub fn init(path: &str) -> anyhow::Result<Config> {
+pub fn init(path: &str) -> anyhow::Result<&'static Config> {
     let mut cfg = anchor_paths(Config::load(path)?, path);
     resolve_secret(&mut cfg);
-    let _ = CONFIG_PATH.set(path.to_string());
-    *CONFIG
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = cfg.clone();
-    Ok(cfg)
+    CONFIG
+        .set(cfg)
+        .map_err(|_| anyhow::anyhow!("configuration is already initialized"))?;
+    Ok(get())
 }
 
 /// Secret values that must never reach production token signing: the
@@ -166,23 +185,13 @@ fn resolve_secret(cfg: &mut Config) {
     cfg.secret = hex_secret;
 }
 
-/// Snapshot of the current configuration; cheap enough to call per request.
-pub fn get() -> Config {
-    CONFIG
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
-/// Re-reads the config file from disk and swaps it in. Startup-only fields
-/// (`db_path`, `session_path`, credentials/secret already baked into open
-/// sessions and issued tokens) are re-read but have no effect until restart.
-pub fn reload() -> anyhow::Result<Config> {
-    let path = CONFIG_PATH
-        .get()
-        .map(String::as_str)
-        .unwrap_or("config.toml");
-    init(path)
+/// The process-wide configuration. Immutable once [`init`] has run, so this
+/// hands out a borrow rather than a snapshot: call it as freely as you like.
+///
+/// Defaults stand in when `init` never ran, which only happens in test
+/// binaries — production `main` initializes before touching anything else.
+pub fn get() -> &'static Config {
+    CONFIG.get().unwrap_or(&DEFAULTS)
 }
 
 /// Resolves the config's relative filesystem paths against the config
@@ -207,11 +216,22 @@ fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
     cfg
 }
 
+/// A byte size written either as a plain number of bytes or as a human
+/// string like `"2GiB"`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum SizeRepr {
+pub(crate) enum SizeRepr {
     Num(u64),
     Str(String),
+}
+
+impl SizeRepr {
+    pub(crate) fn bytes(&self) -> Result<u64, String> {
+        match self {
+            SizeRepr::Num(n) => Ok(*n),
+            SizeRepr::Str(s) => parse_size(s),
+        }
+    }
 }
 
 impl Config {
@@ -229,10 +249,28 @@ impl Config {
         // `resolve_secret` (init/reload); user-set secrets pass through and
         // only get a warning there if they look weak.
 
-        let max_file_size = match raw.max_file_size {
-            Some(SizeRepr::Num(n)) => n,
-            Some(SizeRepr::Str(s)) => parse_size(&s).map_err(anyhow::Error::msg)?,
-            None => 2 * 1024 * 1024 * 1024, // 2 GiB
+        // These three moved into the database. They are still parsed so an
+        // existing install can seed that row once, at startup.
+        let legacy = Legacy {
+            max_file_size: raw.max_file_size.and_then(|r| match r.bytes() {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    tracing::warn!("ignoring config key `max_file_size`: {e}");
+                    None
+                }
+            }),
+            media_thumbs: raw.media_thumbs,
+            upload_strategy: match raw.upload_strategy.as_deref() {
+                None => None,
+                Some("stream") => Some(UploadStrategy::Stream),
+                Some("spill") => Some(UploadStrategy::Spill),
+                Some(other) => {
+                    tracing::warn!(
+                        "ignoring config key `upload_strategy`: expected \"stream\" or \"spill\", got `{other}`"
+                    );
+                    None
+                }
+            },
         };
 
         Ok(Config {
@@ -246,7 +284,6 @@ impl Config {
             token_ttl_secs: raw.token_ttl_secs.unwrap_or(30 * 24 * 3600),
             db_path: raw.db_path.unwrap_or_else(|| "data/drive.surrealkv".into()),
             session_path: raw.session_path.unwrap_or_else(|| "data/session.db".into()),
-            max_file_size,
             web_dist: raw.web_dist.unwrap_or_else(|| "web/dist".into()),
             locales_dir: raw.locales_dir.unwrap_or_else(|| "locales".into()),
             allowed_phones: raw
@@ -263,17 +300,8 @@ impl Config {
                 .map(|p| normalize_phone(p))
                 .filter(|p| !p.is_empty())
                 .collect(),
-            media_thumbs: raw.media_thumbs.unwrap_or(true),
-            upload_strategy: match raw.upload_strategy.as_deref() {
-                None | Some("stream") => UploadStrategy::Stream,
-                Some("spill") => UploadStrategy::Spill,
-                Some(other) => {
-                    return Err(anyhow::anyhow!(
-                        "invalid upload_strategy `{other}` (expected \"stream\" or \"spill\")"
-                    ));
-                }
-            },
             spill_dir: raw.spill_dir.unwrap_or_else(|| "data/spill".into()),
+            legacy,
         })
     }
 
@@ -386,8 +414,11 @@ mod tests {
         let cfg = Config::load("definitely-missing-config.toml").unwrap();
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 8080);
-        assert_eq!(cfg.max_file_size, 2 * 1024 * 1024 * 1024);
         assert!(!cfg.tg_configured());
+        assert!(
+            cfg.legacy.present_keys().is_empty(),
+            "a file without the moved keys has nothing to seed"
+        );
     }
 
     #[test]
@@ -433,34 +464,43 @@ mod tests {
     }
 }
 #[cfg(test)]
-mod strategy_tests {
+mod legacy_keys {
     use super::*;
 
-    #[test]
-    fn strategy_defaults_to_stream() {
-        let cfg = Config::load("nonexistent-config.toml").unwrap();
-        assert_eq!(cfg.upload_strategy, UploadStrategy::Stream);
-        assert!(!cfg.spill_dir.is_empty());
+    fn load(text: &str) -> Config {
+        let dir = std::env::temp_dir().join("iidrive-legacy-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("{}.toml", text.len()));
+        std::fs::write(&p, text).unwrap();
+        let cfg = Config::load(p.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&p).ok();
+        cfg
     }
 
+    /// The keys no longer configure anything directly, but they are what an
+    /// upgrading install's values arrive in — dropping them would silently
+    /// reset that install's upload cap.
     #[test]
-    fn strategy_accepts_both_values_and_rejects_others() {
-        let dir = std::env::temp_dir().join("iidrive-strategy-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        for (text, want) in [
-            ("upload_strategy = \"stream\"", UploadStrategy::Stream),
-            ("upload_strategy = \"spill\"", UploadStrategy::Spill),
-        ] {
-            let p = dir.join("c.toml");
-            std::fs::write(&p, text).unwrap();
-            assert_eq!(
-                Config::load(p.to_str().unwrap()).unwrap().upload_strategy,
-                want
-            );
-        }
-        let p = dir.join("bad.toml");
-        std::fs::write(&p, "upload_strategy = \"turbo\"").unwrap();
-        assert!(Config::load(p.to_str().unwrap()).is_err());
-        std::fs::remove_dir_all(&dir).ok();
+    fn moved_keys_are_captured_for_seeding() {
+        let cfg =
+            load("max_file_size = \"500MB\"\nmedia_thumbs = false\nupload_strategy = \"spill\"\n");
+        assert_eq!(cfg.legacy.max_file_size, Some(500 * 1000 * 1000));
+        assert_eq!(cfg.legacy.media_thumbs, Some(false));
+        assert_eq!(cfg.legacy.upload_strategy, Some(UploadStrategy::Spill));
+        assert_eq!(
+            cfg.legacy.present_keys(),
+            vec!["max_file_size", "media_thumbs", "upload_strategy"]
+        );
+    }
+
+    /// These keys used to be validated hard enough to abort startup. They no
+    /// longer configure anything, so a stale typo must not keep the server
+    /// from booting — it is dropped with a warning instead.
+    #[test]
+    fn a_malformed_moved_key_is_ignored_rather_than_fatal() {
+        let cfg = load("upload_strategy = \"turbo\"\nmax_file_size = \"2 potatoes\"\n");
+        assert_eq!(cfg.legacy.upload_strategy, None);
+        assert_eq!(cfg.legacy.max_file_size, None);
+        assert!(cfg.legacy.present_keys().is_empty());
     }
 }

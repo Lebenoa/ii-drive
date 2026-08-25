@@ -23,7 +23,6 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import { getMe, getToken } from '$lib/api';
-  import ReloadConfigButton from '$lib/components/ReloadConfigButton.svelte';
   import { fadeUp, stagger } from '$lib/motion';
   import { t } from '$lib/i18n.svelte';
   import './settings.css';
@@ -68,12 +67,8 @@
     <a class="back" href="/">← {t('nav.backToFiles')}</a>
     <span class="title">{t('nav.settings')}</span>
     <!-- Always present so the sticky bar keeps three flex slots and the
-         title does not jump when the operator button is absent. -->
-    <div class="tools">
-      {#if admin}
-        <ReloadConfigButton />
-      {/if}
-    </div>
+         title stays centred. -->
+    <div class="tools"></div>
   </header>
 
   {#if checking}

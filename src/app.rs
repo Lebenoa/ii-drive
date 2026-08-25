@@ -44,7 +44,10 @@ pub fn build_router() -> Router {
             "/api/settings",
             get(crate::routes::get_settings).put(crate::routes::save_settings),
         )
-        .route("/api/config/reload", post(crate::routes::reload_config))
+        .route(
+            "/api/instance",
+            get(crate::routes::get_instance).put(crate::routes::save_instance),
+        )
         .route(
             "/api/internal-db/tables",
             get(crate::routes::internal_db_tables),
@@ -61,10 +64,11 @@ pub fn build_router() -> Router {
             "/api/files",
             get(crate::routes::list_files)
                 .post(crate::routes::upload_file)
-                // The upload cap is runtime-reloadable, so no static body
-                // limit here: the guard reads the live config per request,
-                // and axum's own default cap is disabled for this route
-                // (the handler still enforces the limit while streaming).
+                // The upload cap is an instance setting an operator can
+                // change at runtime, so no static body limit here: the guard
+                // reads the live cap per request, and axum's own default cap
+                // is disabled for this route (the handler still enforces the
+                // limit while streaming).
                 .layer(axum::extract::DefaultBodyLimit::disable())
                 .layer(axum::middleware::from_fn(crate::routes::upload_limit)),
         )
@@ -100,9 +104,8 @@ pub fn build_router() -> Router {
         .route("/api/files/upload-bench", post(crate::routes::upload_bench))
         .layer(axum::middleware::from_fn(crate::auth::guard));
 
-    let web_dist = crate::config::get().web_dist;
     let app: Router = public.merge(protected);
-    let dist = std::path::Path::new(&web_dist);
+    let dist = std::path::Path::new(&crate::config::get().web_dist);
     if dist.is_dir() {
         let index = dist.join("index.html");
         let spa = ServeDir::new(dist).fallback(ServeFile::new(index));
@@ -110,7 +113,7 @@ pub fn build_router() -> Router {
     } else {
         tracing::warn!(
             "web_dist `{}` not found — API-only mode (run `nub run build` in web/)",
-            web_dist
+            dist.display()
         );
         app.fallback(|| async {
             axum::response::Html(

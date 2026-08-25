@@ -19,17 +19,21 @@ use crate::tg::{TgHub, TgManager};
 /// Lazy initialization imposes two ordering rules, both satisfied by `main`
 /// touching the state directly after loading the config:
 /// * [`crate::config::init`] must have run first — the token signer and the
-///   Telegram hub capture their settings here and never re-read them, so a
-///   later [`crate::config::reload`] leaves both alone (as it did before).
+///   Telegram hub read their settings out of it here.
 /// * first touch must be inside the tokio runtime, because [`TgHub::new`]
 ///   spawns the abandoned-login pruner.
+///
+/// The instance tunables start at their defaults and are replaced by the
+/// stored ones in [`AppState::hydrate_instance`], which needs the connected
+/// database this initializer cannot wait for.
 static STATE: LazyLock<AppState> = LazyLock::new(|| {
     let cfg = crate::config::get();
     AppState {
         db: surrealdb::Surreal::init(),
         tokens: Tokens::new(&cfg.secret, cfg.token_ttl_secs),
-        hub: TgHub::new(cfg),
+        hub: TgHub::new(cfg.clone()),
         epochs: tokio::sync::RwLock::new(HashMap::new()),
+        instance: std::sync::RwLock::new(crate::db::Instance::default()),
     }
 });
 
@@ -56,6 +60,14 @@ pub struct AppState {
     /// `RwLock` because the read path (one lookup per request) vastly
     /// outnumbers the write path (one entry per login, one per logout).
     epochs: tokio::sync::RwLock<HashMap<i64, u64>>,
+    /// Instance-wide tunables, cached. Every upload reads the cap and the
+    /// strategy, so these must not cost a query — the stored row exists to
+    /// survive a restart, and [`Self::set_instance`] keeps both in step.
+    ///
+    /// A `std` lock rather than a tokio one: [`crate::db::Instance`] is
+    /// `Copy`, so readers take a copy and drop the guard without ever
+    /// holding it across an await.
+    instance: std::sync::RwLock<crate::db::Instance>,
 }
 
 impl AppState {
@@ -128,6 +140,75 @@ impl AppState {
         crate::config::get().is_admin_phone(&phone)
     }
 
+    /// The instance tunables. A copy out of the cache, so this is free to
+    /// call per request.
+    pub fn instance(&self) -> crate::db::Instance {
+        *self
+            .instance
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Stores new tunables and updates the cache.
+    ///
+    /// The write lands first: a cache that outlived a failed write would
+    /// report a setting the next restart silently undoes.
+    pub async fn set_instance(&self, next: crate::db::Instance) -> Result<(), crate::db::DbError> {
+        crate::db::set_instance(&self.db, &next).await?;
+        *self
+            .instance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        Ok(())
+    }
+
+    /// Fills the tunable cache from the database, creating the row on first
+    /// run from whatever the moved `config.toml` keys in `legacy` still say.
+    ///
+    /// `main` calls this after [`crate::db::connect`] and before the listener
+    /// binds, so no request can read the placeholder defaults the lazy
+    /// initializer had to start with.
+    ///
+    /// Seeding is what keeps an upgrade honest: an install that had
+    /// `max_file_size = "500MB"` in its file would otherwise come back up
+    /// silently accepting 2 GiB. It happens exactly once — once the row
+    /// exists it is the only source, so an operator's later change is never
+    /// undone by a key they forgot to delete.
+    pub async fn hydrate_instance(
+        &self,
+        legacy: &crate::config::Legacy,
+    ) -> Result<(), crate::db::DbError> {
+        let stored = match crate::db::get_instance(&self.db).await? {
+            Some(stored) => stored,
+            None => {
+                let base = crate::db::Instance::default();
+                let seeded = crate::db::Instance {
+                    max_file_size: legacy.max_file_size.unwrap_or(base.max_file_size),
+                    media_thumbs: legacy.media_thumbs.unwrap_or(base.media_thumbs),
+                    upload_strategy: legacy.upload_strategy.unwrap_or(base.upload_strategy),
+                };
+                crate::db::set_instance(&self.db, &seeded).await?;
+                let moved = legacy.present_keys();
+                if moved.is_empty() {
+                    tracing::info!("instance settings initialized at their defaults");
+                } else {
+                    tracing::warn!(
+                        "instance settings seeded from config.toml: {} — these keys now live \
+                         in the database and the file copies are ignored, so delete them and \
+                         change these under Settings -> Uploads",
+                        moved.join(", ")
+                    );
+                }
+                seeded
+            }
+        };
+        *self
+            .instance
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stored;
+        Ok(())
+    }
+
     /// A standalone state over `db`, for tests that exercise state logic
     /// rather than a handler: each one gets a store of its own, so nothing
     /// leaks between them. Production builds exactly one state, lazily, in
@@ -138,8 +219,9 @@ impl AppState {
         AppState {
             db,
             tokens: Tokens::new(&cfg.secret, cfg.token_ttl_secs),
-            hub: TgHub::new(cfg),
+            hub: TgHub::new(cfg.clone()),
             epochs: tokio::sync::RwLock::new(HashMap::new()),
+            instance: std::sync::RwLock::new(crate::db::Instance::default()),
         }
     }
 }
@@ -199,6 +281,84 @@ mod tests {
     /// A state of this test's own, over a store nothing else can see.
     async fn scratch() -> AppState {
         AppState::scratch(crate::db::open_mem().await.expect("open test db"))
+    }
+
+    /// An upgrade must carry the operator's old file values into the store,
+    /// or an install that capped uploads at 500 MB comes back up accepting
+    /// 2 GiB. Keys the file never set keep their default.
+    #[tokio::test]
+    async fn hydrating_seeds_the_row_from_the_moved_config_keys() {
+        let state = scratch().await;
+        state
+            .hydrate_instance(&crate::config::Legacy {
+                max_file_size: Some(500 * 1000 * 1000),
+                media_thumbs: Some(false),
+                upload_strategy: None,
+            })
+            .await
+            .expect("hydrate");
+
+        assert_eq!(state.instance().max_file_size, 500 * 1000 * 1000);
+        assert!(!state.instance().media_thumbs);
+        assert_eq!(
+            state.instance().upload_strategy,
+            crate::db::UploadStrategy::Stream,
+            "a key the file never set keeps its default"
+        );
+    }
+
+    /// Seeding happens once. A stale key left in `config.toml` must not
+    /// quietly undo a change the operator made through the API — otherwise
+    /// every restart would re-apply the file and the setting would look
+    /// haunted.
+    #[tokio::test]
+    async fn a_stored_row_outranks_the_config_file() {
+        let state = scratch().await;
+        let file = crate::config::Legacy {
+            max_file_size: Some(500 * 1000 * 1000),
+            media_thumbs: None,
+            upload_strategy: None,
+        };
+        state.hydrate_instance(&file).await.expect("first boot");
+
+        state
+            .set_instance(crate::db::Instance {
+                max_file_size: 3 * 1024 * 1024 * 1024,
+                ..state.instance()
+            })
+            .await
+            .expect("operator raises the cap");
+
+        // Same file, second boot.
+        state.hydrate_instance(&file).await.expect("restart");
+        assert_eq!(state.instance().max_file_size, 3 * 1024 * 1024 * 1024);
+    }
+
+    /// The cache is what every upload reads, so a stored change has to be
+    /// visible without a restart — that is the whole point of moving these
+    /// out of the file.
+    #[tokio::test]
+    async fn setting_an_instance_value_is_visible_immediately_and_persisted() {
+        let state = scratch().await;
+        state
+            .hydrate_instance(&crate::config::Legacy::default())
+            .await
+            .expect("hydrate");
+        assert!(state.instance().media_thumbs);
+
+        let next = crate::db::Instance {
+            media_thumbs: false,
+            upload_strategy: crate::db::UploadStrategy::Spill,
+            ..state.instance()
+        };
+        state.set_instance(next).await.expect("save");
+
+        assert_eq!(state.instance(), next, "the cache is updated in place");
+        assert_eq!(
+            crate::db::get_instance(&state.db).await.expect("read"),
+            Some(next),
+            "and the store agrees, so a restart keeps it"
+        );
     }
 
     /// The point of the epoch: logout has to kill tokens that are still well
