@@ -128,23 +128,35 @@ impl AppState {
         crate::config::get().is_admin_phone(&phone)
     }
 
-    /// Drops the epoch cache, leaving the persisted copy untouched — the
-    /// state a freshly started process is in.
+    /// A standalone state over `db`, for tests that exercise state logic
+    /// rather than a handler: each one gets a store of its own, so nothing
+    /// leaks between them. Production builds exactly one state, lazily, in
+    /// [`STATE`] — this is the only other way to make one.
     #[cfg(test)]
-    pub(crate) async fn forget_epochs(&self) {
-        self.epochs.write().await.clear();
+    pub(crate) fn scratch(db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> Self {
+        let cfg = crate::config::get();
+        AppState {
+            db,
+            tokens: Tokens::new(&cfg.secret, cfg.token_ttl_secs),
+            hub: TgHub::new(cfg),
+            epochs: tokio::sync::RwLock::new(HashMap::new()),
+        }
     }
 }
 
-/// Runs `body` against the process-wide state, database included, on the
-/// one runtime the whole test binary shares.
+/// Runs `body` against the process-wide state, database included, on the one
+/// runtime the whole test binary shares.
 ///
-/// Both halves matter. `#[tokio::test]` builds a runtime per test and drops
-/// it at the end, but the embedded database and the Telegram hub spawn tasks
-/// on whichever runtime first touched the state — under a per-test runtime
-/// the second test to run finds those tasks' channels closed. And since
-/// there is exactly one state, every test shares one store, so each must
-/// scope itself to accounts of its own from [`next_uid`] rather than
+/// This is for **handler** tests: a handler reads [`get`], so there is no
+/// state to hand it and no way to give it a store of its own. Tests of state
+/// logic itself want [`AppState::scratch`] instead, which does isolate.
+///
+/// Both halves of the fixture are load-bearing. `#[tokio::test]` builds a
+/// runtime per test and drops it at the end, but the embedded database and
+/// the Telegram hub spawn tasks on whichever runtime first touched the
+/// state — under a per-test runtime the second test to run finds those
+/// tasks' channels closed. And because every test here shares the one store,
+/// each must scope itself to accounts from [`next_uid`] rather than
 /// hard-coding ids two tests could both pick.
 #[cfg(test)]
 pub(crate) fn with_state<F, Fut>(body: F)
@@ -184,64 +196,66 @@ pub(crate) fn next_uid() -> i64 {
 mod tests {
     use super::*;
 
+    /// A state of this test's own, over a store nothing else can see.
+    async fn scratch() -> AppState {
+        AppState::scratch(crate::db::open_mem().await.expect("open test db"))
+    }
+
     /// The point of the epoch: logout has to kill tokens that are still well
     /// inside their 30-day TTL, and a token minted after the bump must work.
-    #[test]
-    fn bumping_the_epoch_revokes_outstanding_tokens() {
-        with_state(|state| async move {
-            let uid = next_uid();
-            let stale = state
-                .tokens
-                .issue(uid, state.epoch(uid).await.expect("epoch"));
-            assert_eq!(state.session_user(&stale).await, Some(uid));
+    #[tokio::test]
+    async fn bumping_the_epoch_revokes_outstanding_tokens() {
+        let state = scratch().await;
+        let stale = state
+            .tokens
+            .issue(11, state.epoch(11).await.expect("epoch"));
+        assert_eq!(state.session_user(&stale).await, Some(11));
 
-            state.bump_epoch(uid).await.expect("bump");
-            assert_eq!(
-                state.session_user(&stale).await,
-                None,
-                "a token from before the bump is dead even though it has not expired"
-            );
+        state.bump_epoch(11).await.expect("bump");
+        assert_eq!(
+            state.session_user(&stale).await,
+            None,
+            "a token from before the bump is dead even though it has not expired"
+        );
 
-            // Signing back in mints under the new epoch and works again — the
-            // old token stays dead, which is what the pre-epoch design got
-            // wrong.
-            let fresh = state
-                .tokens
-                .issue(uid, state.epoch(uid).await.expect("epoch"));
-            assert_eq!(state.session_user(&fresh).await, Some(uid));
-            assert_eq!(state.session_user(&stale).await, None);
-        });
+        // Signing back in mints under the new epoch and works again — the old
+        // token stays dead, which is what the pre-epoch design got wrong.
+        let fresh = state
+            .tokens
+            .issue(11, state.epoch(11).await.expect("epoch"));
+        assert_eq!(state.session_user(&fresh).await, Some(11));
+        assert_eq!(state.session_user(&stale).await, None);
     }
 
     /// One tenant's logout must not sign everybody else out.
-    #[test]
-    fn revocation_is_per_account() {
-        with_state(|state| async move {
-            let (mine, theirs) = (next_uid(), next_uid());
-            let their_token = state
-                .tokens
-                .issue(theirs, state.epoch(theirs).await.expect("epoch"));
+    #[tokio::test]
+    async fn revocation_is_per_account() {
+        let state = scratch().await;
+        let theirs = state
+            .tokens
+            .issue(22, state.epoch(22).await.expect("epoch"));
 
-            state.bump_epoch(mine).await.expect("bump");
-            assert_eq!(state.session_user(&their_token).await, Some(theirs));
-        });
+        state.bump_epoch(11).await.expect("bump");
+        assert_eq!(state.session_user(&theirs).await, Some(22));
     }
 
     /// The cache is a cache: a fresh process must still honour a logout that
     /// happened before it started, which is why the epoch is persisted.
-    #[test]
-    fn a_bump_survives_a_restart() {
-        with_state(|state| async move {
-            let uid = next_uid();
-            let stale = state
-                .tokens
-                .issue(uid, state.epoch(uid).await.expect("epoch"));
-            state.bump_epoch(uid).await.expect("bump");
+    #[tokio::test]
+    async fn a_bump_survives_a_restart() {
+        let db = crate::db::open_mem().await.expect("open test db");
+        let state = AppState::scratch(db.clone());
+        let stale = state
+            .tokens
+            .issue(11, state.epoch(11).await.expect("epoch"));
+        state.bump_epoch(11).await.expect("bump");
 
-            // Same store, empty cache — as after a restart.
-            state.forget_epochs().await;
-            assert_eq!(state.session_user(&stale).await, None);
-            assert_eq!(state.epoch(uid).await.expect("epoch"), 1);
-        });
+        // A second state over the same store: a cold cache reading the
+        // persisted epoch, which is what a restarted process is. The token
+        // still verifies against it because the signing secret outlives the
+        // process too.
+        let restarted = AppState::scratch(db);
+        assert_eq!(restarted.session_user(&stale).await, None);
+        assert_eq!(restarted.epoch(11).await.expect("epoch"), 1);
     }
 }
