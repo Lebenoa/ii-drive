@@ -30,7 +30,7 @@ pub struct FileRow {
     /// (header or ?token=) unless the user marks the file public.
     #[serde(default)]
     pub public: bool,
-    /// Normalized preview (≤320px JPEG, base64); None for files without one.
+    /// Normalized preview (≤320px AVIF, base64); None for files without one.
     #[serde(default)]
     pub thumb: Option<String>,
 }
