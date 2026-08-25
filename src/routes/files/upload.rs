@@ -361,11 +361,10 @@ pub async fn upload_file(
             .and_then(|r| r);
         match res {
             Ok((message_id, _, _, thumb)) => {
-                if thumb_b64.is_none()
-                    && let Some(jpeg) = thumb
+                if let Some(raw) = thumb
+                    && thumb_b64.is_none()
                 {
-                    use base64::Engine as _;
-                    thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(jpeg));
+                    thumb_b64 = super::thumbs::thumb_b64(raw).await;
                 }
                 parts.push(crate::db::FilePart {
                     message_id,
@@ -736,8 +735,7 @@ async fn spill_upload(
             .then(|| crate::art::extract(&head))
             .flatten()
     }) {
-        use base64::Engine as _;
-        thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(jpeg));
+        thumb_b64 = super::thumbs::thumb_b64(jpeg).await;
     }
     tracing::info!(%name, parts = plan.nparts, %declared, "uploaded file");
     persist_row(
@@ -867,8 +865,7 @@ pub(crate) async fn store_from_file(
             .then(|| crate::art::extract(head))
             .flatten()
     }) {
-        use base64::Engine as _;
-        thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(jpeg));
+        thumb_b64 = super::thumbs::thumb_b64(jpeg).await;
     }
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     persist_row(
@@ -923,9 +920,9 @@ async fn persist_row(
     if thumb_b64.is_none()
         && mime.starts_with("audio/")
         && let Some(img) = crate::art::extract(head)
+        && let Some(b64) = super::thumbs::thumb_b64(img).await
     {
-        use base64::Engine as _;
-        thumb_b64 = Some(base64::engine::general_purpose::STANDARD.encode(img));
+        thumb_b64 = Some(b64);
     }
     let row = FileRow {
         owner: uid,
@@ -949,11 +946,12 @@ async fn persist_row(
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {
         let file_uid = row.uid.clone();
+        let mime = row.mime.clone();
         let part0 = row.parts[0].clone();
         // The state is a `&'static`, so a detached task can borrow it
-        // outright — nothing to clone into the task.
+        // outright — nothing else to clone into the task.
         tokio::spawn(async move {
-            extract_media_thumb(state, uid, &file_uid, part0).await;
+            extract_media_thumb(state, uid, &file_uid, &mime, part0).await;
         });
     }
     Ok(Json(serde_json::json!({ "file": FileDto::from(row) })))

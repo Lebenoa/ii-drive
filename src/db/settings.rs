@@ -273,7 +273,8 @@ pub struct Instance {
     /// Largest accepted upload. Files above Telegram's per-document limit
     /// are chunked transparently, so this can exceed it.
     pub max_file_size: u64,
-    /// Generate thumbnails for videos/images with ffmpeg when available.
+    /// Generate thumbnails for uploaded media: still images in-process,
+    /// videos via one ffmpeg-extracted frame.
     pub media_thumbs: bool,
     pub upload_strategy: UploadStrategy,
 }

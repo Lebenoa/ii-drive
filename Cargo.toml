@@ -14,6 +14,12 @@ grammers-client = "0.10"
 grammers-session = { version = "0.10", features = ["sqlite-storage"] }
 hex = "0.4"
 hmac = "0.13"
+# Still-image decode + JPEG encode in-process. `rayon` is off: thumbnails
+# run on a blocking pool already, a second thread pool would oversubscribe.
+# `webp` is decode-only here (the encoder is lossless-only); bmp/tiff/ico
+# keep thumbnail coverage for camera and scanner formats ffmpeg used to
+# handle. AVIF/HEIC stills are not decodable in-process.
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 mime_guess = "2"
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }

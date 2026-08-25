@@ -1,9 +1,12 @@
+use std::io::Cursor;
 use std::sync::LazyLock;
 
 use axum::body::Body;
 use axum::extract::{Path, Query};
 use axum::http::header;
 use axum::response::Response;
+use image::codecs::jpeg::JpegEncoder;
+use image::{ImageReader, Limits};
 
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
@@ -12,62 +15,81 @@ use crate::state::AppState;
 /// MP4s with the index at the end (no faststart) simply fail past this.
 const VIDEO_PEEK_CAP: u64 = 128 * 1024 * 1024;
 
-/// Which thumbnail encoder this ffmpeg build supports; probed once at
-/// first use. AVIF (libaom) when present — smallest — else WebP.
-#[derive(Clone, Copy, PartialEq)]
-enum ThumbEncoder {
-    None,
-    Webp,
-    Avif,
-}
+/// Long edge of generated thumbnails; aspect-preserving fit, matching
+/// the old ffmpeg `scale=320:-2` intent.
+const THUMB_EDGE: u32 = 320;
 
-/// Probed once on first touch. The probe shells out to ffmpeg twice, so
-/// every reader forces it inside `block_in_place`.
-static FFMPEG_ENCODER: LazyLock<ThumbEncoder> = LazyLock::new(|| {
-    let runs = std::process::Command::new("ffmpeg")
+/// JPEG quality for stored thumbnails; carried over from the ffmpeg
+/// `-quality 78` the previous pipeline used.
+const THUMB_QUALITY: u8 = 78;
+
+/// Refusal bound for decoder-declared dimensions. Anything a real camera
+/// or scanner produces fits far below this; the `Limits` default
+/// `max_alloc` (512 MiB) still backstops the true memory ceiling.
+const MAX_INPUT_EDGE: u32 = 16384;
+
+/// ffmpeg presence, probed once. Still images are decoded in-process by
+/// the `image` crate; only video frame extraction shells out.
+static FFMPEG: LazyLock<bool> = LazyLock::new(|| {
+    std::process::Command::new("ffmpeg")
         .arg("-version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
-        .is_ok_and(|o| !o.stdout.is_empty());
-    if !runs {
-        return ThumbEncoder::None;
-    }
-    // -encoders lists on stderr; look for the AV1 still-image encoder.
-    let has_aom = std::process::Command::new("ffmpeg")
-        .arg("-encoders")
-        .output()
-        .is_ok_and(|o| {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let err = String::from_utf8_lossy(&o.stderr);
-            text.contains("libaom-av1") || err.contains("libaom-av1")
-        });
-    if has_aom {
-        ThumbEncoder::Avif
-    } else {
-        ThumbEncoder::Webp
-    }
+        .is_ok_and(|o| !o.stdout.is_empty())
 });
 
-/// Downloads the first part of a freshly uploaded video or image (bounded),
-/// extracts a 320px WebP thumbnail with ffmpeg (first frame for video,
-/// downscale for images), and stores it on the row. Runs in the background;
-/// failures are logged and simply leave no thumb.
+/// Decodes arbitrary still-image bytes and re-encodes them as a base64
+/// JPEG thumbnail (aspect-preserving fit in [`THUMB_EDGE`]).
 ///
-/// `owner` is the account that holds the part message: this runs detached
-/// from the request, so the client is resolved here rather than borrowed
-/// from the caller.
+/// Pure CPU — callers keep it off the async workers via
+/// `spawn_blocking`. Decode limits are explicit: the bytes are untrusted
+/// uploads, so declared dimensions are capped rather than trusted.
+fn encode_thumb_b64(bytes: &[u8]) -> Result<String, String> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_INPUT_EDGE);
+    limits.max_image_height = Some(MAX_INPUT_EDGE);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| e.to_string())?;
+    let rgb = img.thumbnail(THUMB_EDGE, THUMB_EDGE).to_rgb8();
+    let mut buf = Vec::new();
+    JpegEncoder::new_with_quality(&mut buf, THUMB_QUALITY)
+        .encode_image(&rgb)
+        .map_err(|e| e.to_string())?;
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf))
+}
+
+/// Normalizes ad-hoc still-image sources (Telegram stripped previews,
+/// embedded cover art) into the stored thumbnail form: base64 JPEG.
+/// `None` when the bytes do not parse as a decodable still image.
+pub(crate) async fn thumb_b64(bytes: Vec<u8>) -> Option<String> {
+    tokio::task::spawn_blocking(move || encode_thumb_b64(&bytes))
+        .await
+        .ok()?
+        .ok()
+}
+
+/// Extracts and stores a thumbnail for a freshly uploaded file.
+///
+/// Images are decoded in-process from the first part; videos get one
+/// frame extracted by ffmpeg and share the same downscale + JPEG encode.
+/// Runs detached in the background; failures are logged and simply leave
+/// no thumb.
+///
+/// `owner` is the account that holds the part message: this runs
+/// detached from the request, so the client is resolved here rather
+/// than borrowed from the caller.
 pub async fn extract_media_thumb(
     state: &AppState,
     owner: i64,
     uid: &str,
+    mime: &str,
     part0: crate::db::FilePart,
 ) {
-    let encoder = tokio::task::block_in_place(|| *FFMPEG_ENCODER);
-    if encoder == ThumbEncoder::None {
-        tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
-        return;
-    }
     if part0.size as u64 > VIDEO_PEEK_CAP {
         tracing::info!("file {uid} too large for thumbnail extraction, skipping");
         return;
@@ -118,86 +140,59 @@ pub async fn extract_media_thumb(
         }
     }
 
-    // 320px, one frame. AVIF first when the build has libaom (smallest);
-    // WebP is the everywhere-fallback. On AVIF failure retry once as WebP
-    // in case the encoder exists but the muxer does not.
-    let common = ["-v", "error", "-i"];
-    let tail_webp = [
-        "-frames:v",
-        "1",
-        "-vf",
-        "scale=320:-2",
-        "-f",
-        "webp",
-        "-lossless",
-        "0",
-        "-compression_level",
-        "6",
-        "-quality",
-        "78",
-        "pipe:1",
-    ];
-    let tail_avif = [
-        "-frames:v",
-        "1",
-        "-vf",
-        "scale=320:-2",
-        "-c:v",
-        "libaom-av1",
-        "-crf",
-        "42",
-        "-cpu-used",
-        "8",
-        "-still-picture",
-        "1",
-        "-f",
-        "avif",
-        "pipe:1",
-    ];
-    let attempt = |tail: &[&str]| {
-        tokio::process::Command::new("ffmpeg")
-            .args(common)
+    // One raw source image: the part itself for stills, a single
+    // PNG-encoded frame from ffmpeg for video. Every failure branch logs
+    // its own reason before returning.
+    let raw: Option<Vec<u8>> = if mime.starts_with("image/") {
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::warn!("thumb read failed for {uid}: {e}");
+                None
+            }
+        }
+    } else if !*FFMPEG {
+        tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
+        None
+    } else {
+        // One frame, PNG on the pipe — `image` owns scaling and encoding.
+        match tokio::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
             .arg(&path)
-            .args(tail)
+            .args(["-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()
-    };
-
-    let out = match if encoder == ThumbEncoder::Avif {
-        attempt(&tail_avif).await
-    } else {
-        attempt(&tail_webp).await
-    } {
-        Ok(o) if o.status.success() && !o.stdout.is_empty() => o.stdout,
-        Ok(_) if encoder == ThumbEncoder::Avif => {
-            tracing::info!("avif encode failed for {uid}; falling back to webp");
-            match attempt(&tail_webp).await {
-                Ok(o) if o.status.success() && !o.stdout.is_empty() => o.stdout,
-                _ => {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    tracing::info!("no thumbnail produced for {uid}");
-                    return;
-                }
+            .await
+        {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => Some(o.stdout),
+            Ok(o) => {
+                tracing::info!(
+                    "ffmpeg produced no thumbnail for {uid} (status {:?})",
+                    o.status.code()
+                );
+                None
             }
-        }
-        Ok(o) => {
-            let _ = tokio::fs::remove_file(&path).await;
-            tracing::info!(
-                "ffmpeg produced no thumbnail for {uid} (status {:?})",
-                o.status.code()
-            );
-            return;
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&path).await;
-            tracing::warn!("ffmpeg failed for {uid}: {e}");
-            return;
+            Err(e) => {
+                tracing::warn!("ffmpeg failed for {uid}: {e}");
+                None
+            }
         }
     };
     let _ = tokio::fs::remove_file(&path).await;
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(out);
+    let Some(raw) = raw else { return };
+
+    let b64 = match tokio::task::spawn_blocking(move || encode_thumb_b64(&raw)).await {
+        Ok(Ok(b64)) => b64,
+        Ok(Err(e)) => {
+            tracing::info!("thumbnail encode failed for {uid}: {e}");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("thumbnail task failed for {uid}: {e}");
+            return;
+        }
+    };
     match crate::db::set_thumb(&state.db, uid, &b64).await {
         Ok(true) => tracing::info!("thumbnail stored for {uid}"),
         Ok(false) => tracing::warn!("row {uid} vanished before thumb stored"),
@@ -235,6 +230,8 @@ pub async fn file_thumb(
         .decode(b64)
         .map_err(|e| ApiError::internal(format!("thumb decode: {e}")))?;
 
+    // New rows always hold JPEG; the extra sniff branches serve rows
+    // written by the previous ffmpeg WebP/AVIF pipeline.
     let ctype = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         "image/png"
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
@@ -252,4 +249,39 @@ pub async fn file_thumb(
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("response build: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    /// A real still image round-trips: PNG in, JPEG out, downscaled to
+    /// the thumb edge. Guards the decode-limits and RGB-encode wiring
+    /// the whole thumbnail pipeline now leans on.
+    #[test]
+    fn png_becomes_jpeg_thumb() {
+        let src = image::DynamicImage::new_rgb8(1024, 512);
+        let mut png = Vec::new();
+        src.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let b64 = encode_thumb_b64(&png).unwrap();
+        let jpeg = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
+        assert!(jpeg.starts_with(&[0xFF, 0xD8, 0xFF]));
+
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        let (w, h) = (decoded.width(), decoded.height());
+        assert_eq!(w, 320);
+        assert_eq!(h, 160); // aspect preserved
+    }
+
+    /// Garbage yields a clean failure, not a panic.
+    #[test]
+    fn garbage_fails_cleanly() {
+        assert!(encode_thumb_b64(b"not an image at all").is_err());
+        assert!(encode_thumb_b64(&[]).is_err());
+    }
 }
