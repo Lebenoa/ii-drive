@@ -29,7 +29,9 @@
 </script>
 
 {#if i18nReady()}
-	{#if page.url.pathname !== '/login'}
+	<!-- No chrome on the pages that exist before an account does: the bar's
+	     links all lead somewhere unreachable there. -->
+	{#if page.url.pathname !== '/login' && page.url.pathname !== '/setup'}
 		<Navbar />
 	{/if}
 

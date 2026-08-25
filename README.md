@@ -69,6 +69,15 @@ Keep the files together — relative paths resolve beside the executable.
 
 ### 2. Configure
 
+Just run it (step 3) with no `config.toml` present: the server opens a
+first-run wizard in your browser, takes the two Telegram credentials and your
+phone number, writes `config.toml`, and exits. Start it again and you have a
+drive. Nothing below is needed unless you would rather write the file
+yourself.
+
+<details>
+<summary>Writing config.toml by hand</summary>
+
 ```sh
 cp config.example.toml config.toml
 ```
@@ -86,6 +95,8 @@ the database, which works fine but is one more file to back up.
 
 Everything else has sane defaults. The full option table is under
 [Configuration reference](#configuration-reference).
+
+</details>
 
 ### 3. Run
 
@@ -279,6 +290,7 @@ just log in again through the web UI.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
+| GET/POST | `/api/setup` | — | **First-run wizard only** — probe whether setup is pending / write `config.toml` and exit. Absent once configured, which is how the `/setup` page knows to step aside |
 | POST | `/api/auth/phone` | — | Start Telegram login (phone must be in `allowed_phones`); returns a `login_id` |
 | POST | `/api/auth/code` | — | Submit `{login_id, code}`; returns token or `password_required` |
 | POST | `/api/auth/password` | — | Submit `{login_id, password}` (2FA); returns token |

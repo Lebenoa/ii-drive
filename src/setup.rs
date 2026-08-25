@@ -1,15 +1,22 @@
-//! First-run setup wizard: when no config file exists, the server boots a
-//! minimal web form instead of the drive. The user pastes their Telegram app
-//! credentials and phone number; the wizard validates them, generates the
-//! session secret, writes `config.toml`, and exits — the operator then starts
-//! ii-drive normally. Exiting (rather than hot-swapping the config) keeps
-//! behavior identical on every platform and supervisor.
+//! First-run setup wizard: when no config file exists, the server boots the
+//! web UI's `/setup` route instead of the drive. The user pastes their
+//! Telegram app credentials and phone number; the wizard validates them,
+//! generates the session secret, writes `config.toml`, and exits — the
+//! operator then starts ii-drive normally. Exiting (rather than hot-swapping
+//! the config) keeps behavior identical on every platform and supervisor.
+//!
+//! The form itself lives in the frontend (`web/src/routes/setup`), so it
+//! looks like the rest of the app and gets its translations for free. This
+//! module only serves that bundle and owns the two endpoints behind it.
 
 use axum::extract::State;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::get;
 use axum::{Json, Router};
+use serde_json::json;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use tower_http::services::{ServeDir, ServeFile};
 
 /// Runs when `config_path` does not exist. Serves the wizard until a valid
 /// submission lands, writes the file, then returns — main() exits with a
@@ -22,14 +29,40 @@ pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid host/port from defaults: {e}"))?;
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("no config found — setup wizard running on http://{addr}");
+    // `config::init` has not run — there is no file to load yet — so the
+    // default paths are still CWD-relative. Anchor them to where the config
+    // is about to be written, matching how every later boot resolves them:
+    // starting the binary from another directory must not hide the web UI.
+    let path_str = config_path.to_string_lossy().into_owned();
+    let web_dist = crate::config::anchored(&path_str, &cfg.web_dist);
+    let locales_dir = crate::config::anchored(&path_str, &cfg.locales_dir);
 
-    let state = SetupState { config_path };
+    // Unlike the running server, which degrades to API-only, the wizard *is*
+    // the web UI: without a build there is no form to fill in.
+    let dist = Path::new(&web_dist);
+    if !dist.is_dir() {
+        anyhow::bail!(
+            "web UI not found at `{}`, so there is no setup form to serve — \
+             run `nub install && nub run build` in web/, or use a release bundle",
+            dist.display()
+        );
+    }
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("no config found — setup wizard running on http://{addr}/setup");
+
+    let spa = ServeDir::new(dist).fallback(ServeFile::new(dist.join("index.html")));
     let app = Router::new()
-        .route("/", axum::routing::get(page))
-        .route("/api/setup", axum::routing::post(submit))
-        .with_state(state);
+        // Land the operator on the wizard rather than the drive shell, which
+        // would only bounce off endpoints that do not exist yet.
+        .route("/", get(|| async { Redirect::temporary("/setup") }))
+        .route("/api/setup", get(probe).post(submit))
+        // The SPA blocks its first paint on a dictionary. A plain static
+        // serve is enough here: the wizard only ever asks for one file, and
+        // the language picker it would filter for is not on this page.
+        .nest_service("/locales", ServeDir::new(locales_dir))
+        .fallback_service(spa)
+        .with_state(SetupState { config_path });
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -39,8 +72,10 @@ struct SetupState {
     config_path: PathBuf,
 }
 
-async fn page() -> Html<&'static str> {
-    Html(PAGE)
+/// GET /api/setup — present only while the wizard is running, so the page can
+/// tell "first run" from someone typing /setup at a configured server.
+async fn probe(State(state): State<SetupState>) -> Json<serde_json::Value> {
+    Json(json!({ "config_path": state.config_path.display().to_string() }))
 }
 
 #[derive(serde::Deserialize)]
@@ -51,17 +86,25 @@ struct SetupBody {
     phones: String,
 }
 
+/// POST /api/setup — validates, writes `config.toml`, then exits the process.
+///
+/// The error string is what the form shows the user, so it names the field and
+/// what a valid value looks like rather than just refusing.
 async fn submit(State(state): State<SetupState>, Json(body): Json<SetupBody>) -> Response {
     match validate_and_write(&state.config_path, body) {
-        Ok(msg) => {
+        Ok(written) => {
             // Let the response reach the browser before exiting.
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                 std::process::exit(0);
             });
-            ([(axum::http::header::CONTENT_TYPE, "text/html")], msg).into_response()
+            Json(json!({ "ok": true, "config_path": written })).into_response()
         }
-        Err(e) => (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
     }
 }
 
@@ -125,62 +168,10 @@ admin_phones = [
     std::fs::write(config_path, toml)
         .map_err(|e| format!("could not write {}: {e}", config_path.display()))?;
 
-    Ok(format!(
-        "<html><body style=\"font-family:sans-serif;background:#0d1117;color:#e6edf3;\
-         display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">\
-         <div style=\"text-align:center\"><h1>✓ Setup complete</h1>\
-         <p>Configuration written to <code>{}</code>.</p>\
-         <p>Start ii-drive again, then sign in.</p></div></body></html>",
-        config_path.display()
-    ))
+    // The path, not a rendered page: the frontend owns what success looks
+    // like, and it wants the path to tell the operator what was written.
+    Ok(config_path.display().to_string())
 }
-
-const PAGE: &str = r##"<!doctype html>
-<html><head><meta charset="utf-8"><title>ii-drive setup</title>
-<style>
-body{font-family:sans-serif;background:#0d1117;color:#e6edf3;display:flex;
-align-items:center;justify-content:center;min-height:100vh;margin:0}
-.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:28px;
-width:min(480px,90vw)}
-h1{margin-top:0;font-size:1.2rem}
-label{display:block;margin:14px 0 4px;font-size:.85rem;color:#8b949e}
-input{width:100%;box-sizing:border-box;padding:8px;border-radius:6px;
-border:1px solid #30363d;background:#0d1117;color:#e6edf3}
-button{margin-top:18px;width:100%;padding:10px;border:0;border-radius:6px;
-background:#238636;color:white;font-size:1rem;cursor:pointer}
-button:disabled{opacity:.6}
-.hint{font-size:.75rem;color:#8b949e;margin-top:4px}
-a{color:#58a6ff}
-#msg{color:#f85149;margin-top:12px;font-size:.85rem;white-space:pre-wrap}
-</style></head><body><div class="card">
-<h1>Welcome to ii-drive</h1>
-<p class="hint">First run: paste your Telegram app credentials. Create them at
-<a href="https://my.telegram.org/apps" target="_blank">my.telegram.org/apps</a>
-— takes two minutes.</p>
-<label>api_id</label><input id="api_id" placeholder="1234567">
-<label>api_hash</label><input id="api_hash" placeholder="32-character hex string">
-<label>Your phone number(s)</label>
-<input id="phones" placeholder="+15551234567">
-<p class="hint">Comma-separate several. Only these numbers can sign in.</p>
-<button id="go">Save &amp; finish</button>
-<div id="msg"></div>
-</div>
-<script>
-const b=document.getElementById('go');
-b.onclick=async()=>{
- b.disabled=true;document.getElementById('msg').textContent='';
- try{
-  const res=await fetch('/api/setup',{method:'POST',
-   headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({api_id:+document.getElementById('api_id').value,
-    api_hash:document.getElementById('api_hash').value.trim(),
-    phones:document.getElementById('phones').value})});
-  const t=await res.text();
-  if(res.ok){document.querySelector('.card').innerHTML=t;}
-  else{document.getElementById('msg').textContent=t;b.disabled=false;}
- }catch(e){document.getElementById('msg').textContent=e.message;b.disabled=false;}
-};
-</script></body></html>"##;
 
 #[cfg(test)]
 mod tests {
@@ -193,7 +184,7 @@ mod tests {
         let path = dir.join("config.toml");
         let _ = std::fs::remove_file(&path);
 
-        let msg = validate_and_write(
+        let written = validate_and_write(
             &path,
             SetupBody {
                 api_id: 12345,
@@ -203,7 +194,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(msg.contains("Setup complete"));
+        assert_eq!(written, path.display().to_string());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("api_id = 12345"));
         assert!(text.contains("+15551234567"));

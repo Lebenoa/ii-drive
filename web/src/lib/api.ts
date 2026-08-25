@@ -51,9 +51,9 @@ export interface Me {
   /** true once the user picked storage channels */
   channel_selected?: boolean;
   /**
-   * True when this account may reach operator-only endpoints (config reload,
-   * the internal-DB browser). Those answer 404 for everyone else, so the UI
-   * must not offer them at all.
+   * True when this account may reach operator-only endpoints (the instance
+   * settings, the internal-DB browser). Those answer 404 for everyone else,
+   * so the UI must not offer them at all.
    */
   admin: boolean;
 }
@@ -93,6 +93,26 @@ function errMessage(body: unknown, fallback: string): string {
     if (typeof e === 'string' && e.length > 0) return e;
   }
   return fallback;
+}
+
+/**
+ * GET /api/setup — served only by the first-run wizard, so a rejection means
+ * the server is already configured. `auth: false`: there is no account yet.
+ */
+export function getSetupState(): Promise<{ config_path: string }> {
+  return request('/api/setup', { auth: false });
+}
+
+/**
+ * POST /api/setup — writes config.toml and exits the server, so this is the
+ * last request the wizard can make.
+ */
+export function submitSetup(body: {
+  api_id: number;
+  api_hash: string;
+  phones: string;
+}): Promise<{ ok: true; config_path: string }> {
+  return request('/api/setup', { method: 'POST', body, auth: false });
 }
 
 /** fetch wrapper; attaches bearer token unless `auth:false`. Rejects ApiError on !ok. */

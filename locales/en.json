@@ -43,6 +43,24 @@
     "searchCountry": "Search country or code…",
     "noCountry": "No country matches “{query}”."
   },
+  "setup": {
+    "title": "Setup",
+    "tagline": "First run — paste your Telegram app credentials to finish setup.",
+    "openTelegram": "Create an app at my.telegram.org/apps — it takes two minutes.",
+    "apiId": "api_id",
+    "apiHash": "api_hash",
+    "phones": "Your phone number(s)",
+    "phonesHint": "One per line, or comma-separated. Only these numbers will be able to sign in.",
+    "write": "Save & finish",
+    "writing": "Saving…",
+    "credentialsHint": "Written to config.toml on this machine, and sent nowhere else.",
+    "willWrite": "Destination:",
+    "doneTitle": "Setup complete",
+    "wrote": "Configuration written to",
+    "restart": "Start ii-drive again, then sign in.",
+    "alreadyConfigured": "This server is already configured — nothing to set up here.",
+    "toDrive": "Go to the drive"
+  },
   "channels": {
     "title": "Channels",
     "tagline": "Choose where your files are stored",

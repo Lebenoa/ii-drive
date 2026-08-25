@@ -194,25 +194,30 @@ pub fn get() -> &'static Config {
     CONFIG.get().unwrap_or(&DEFAULTS)
 }
 
-/// Resolves the config's relative filesystem paths against the config
-/// file's directory so the server behaves identically regardless of the
-/// working directory it was started from.
-fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
-    let base = std::path::Path::new(config_path);
-    let Some(dir) = base.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return cfg; // config in the CWD — nothing to anchor
-    };
-    let anchor = |p: String| -> String {
-        if std::path::Path::new(&p).is_absolute() {
-            p
-        } else {
+/// Resolves one relative path against the config file's directory, so the
+/// server finds the same files regardless of the working directory it was
+/// started from. Absolute paths and a config in the CWD pass through.
+///
+/// Public because the setup wizard needs the same rule before there is a
+/// config to anchor: it serves the web UI, which is one of these paths.
+pub(crate) fn anchored(config_path: &str, p: &str) -> String {
+    let dir = std::path::Path::new(config_path)
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty());
+    match dir {
+        Some(dir) if !std::path::Path::new(p).is_absolute() => {
             dir.join(p).to_string_lossy().into_owned()
         }
-    };
-    cfg.session_path = anchor(cfg.session_path);
-    cfg.web_dist = anchor(cfg.web_dist);
-    cfg.locales_dir = anchor(cfg.locales_dir);
-    cfg.spill_dir = anchor(cfg.spill_dir);
+        _ => p.to_string(),
+    }
+}
+
+/// Applies [`anchored`] to every path the config carries.
+fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
+    cfg.session_path = anchored(config_path, &cfg.session_path);
+    cfg.web_dist = anchored(config_path, &cfg.web_dist);
+    cfg.locales_dir = anchored(config_path, &cfg.locales_dir);
+    cfg.spill_dir = anchored(config_path, &cfg.spill_dir);
     cfg
 }
 
