@@ -593,11 +593,21 @@ mod tests {
 #[cfg(test)]
 mod legacy_keys {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Parallel tests share this module; keying the scratch file by content
+    /// length collided once two tests wrote the same length (55) and raced
+    /// on one file. A counter keeps every call on its own path.
+    static CALLS: AtomicU64 = AtomicU64::new(0);
 
     fn load(text: &str) -> Config {
         let dir = std::env::temp_dir().join("iidrive-legacy-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join(format!("{}.toml", text.len()));
+        let p = dir.join(format!(
+            "{}-{}.toml",
+            text.len(),
+            CALLS.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&p, text).unwrap();
         let cfg = Config::load(p.to_str().unwrap()).unwrap();
         std::fs::remove_file(&p).ok();
