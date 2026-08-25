@@ -1,5 +1,5 @@
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::header;
 use axum::response::Response as AxumResponse;
 use axum::{Extension, Json};
@@ -28,10 +28,8 @@ pub struct PhoneBody {
 /// Step 1: request the Telegram login code. The returned `login_id` names
 /// this attempt; the code and password steps quote it back, so two people
 /// signing in at the same time never land in each other's login.
-pub async fn auth_phone(
-    State(state): State<AppState>,
-    Json(body): Json<PhoneBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn auth_phone(Json(body): Json<PhoneBody>) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let phone = body.phone.trim();
     if !crate::config::get().phone_allowed(phone) {
         return Err(ApiError::unauthorized(
@@ -70,17 +68,15 @@ async fn signed_in(state: &AppState, user_id: i64) -> ApiResult<Json<serde_json:
 }
 
 /// Step 2: confirm the code. Returns a token when no 2FA is configured.
-pub async fn auth_code(
-    State(state): State<AppState>,
-    Json(body): Json<CodeBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn auth_code(Json(body): Json<CodeBody>) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let step = state
         .hub
         .submit_code(body.login_id.trim(), body.code.trim())
         .await
         .map_err(tg_err)?;
     match step {
-        crate::tg::LoginStep::Done(user_id) => signed_in(&state, user_id).await,
+        crate::tg::LoginStep::Done(user_id) => signed_in(state, user_id).await,
         crate::tg::LoginStep::PasswordRequired { hint } => {
             Ok(Json(json!({ "status": "password_required", "hint": hint })))
         }
@@ -101,9 +97,9 @@ pub struct SelectBody {
 /// Lists candidate storage channels (dialogs + Saved Messages) and the
 /// caller's current selection.
 pub async fn list_channels(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let available = state.tg(uid).await?.list_channels().await.map_err(tg_err)?;
     let selected = crate::db::get_channels(&state.db, &uid.to_string()).await?;
     Ok(Json(serde_json::json!({
@@ -114,10 +110,10 @@ pub async fn list_channels(
 
 /// Persists the storage-channel selection; uploads round-robin across it.
 pub async fn select_channels(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<SelectBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let tg = state.tg(uid).await?;
     if body.channels.len() > 20 {
         return Err(ApiError::bad_request("at most 20 storage channels"));
@@ -160,10 +156,10 @@ pub struct CreateBody {
 /// Creates a brand-new Telegram channel for storage use. The channel is NOT
 /// auto-selected; the client adds it to the selection and saves explicitly.
 pub async fn create_channel(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<CreateBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let title = body.title.trim();
     if title.is_empty() || title.len() > 128 {
         return Err(ApiError::bad_request(
@@ -185,9 +181,9 @@ pub async fn create_channel(
 
 /// GET /api/bot — the caller's configured download bots (no tokens).
 pub async fn list_bots(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let bots = state.tg(uid).await?.bot_list().await;
     let items: Vec<serde_json::Value> = bots
         .into_iter()
@@ -205,10 +201,10 @@ pub struct AddBotBody {
 /// persist it, then invite/promote every pooled bot into all of the
 /// caller's selected storage channels.
 pub async fn add_bot(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<AddBotBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let token = body.token.trim();
     if token.is_empty() || !token.contains(':') {
         return Err(ApiError::bad_request(
@@ -266,26 +262,24 @@ pub async fn add_bot(
 
 /// DELETE /api/bot/{id} — remove a bot from the caller's pool.
 pub async fn remove_bot(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     state.tg(uid).await?.drop_bot(id).await;
     crate::db::remove_bot(&state.db, uid, id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Step 3 (only when 2FA is enabled): confirm and hand out the token.
-pub async fn auth_password(
-    State(state): State<AppState>,
-    Json(body): Json<PasswordBody>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn auth_password(Json(body): Json<PasswordBody>) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let user_id = state
         .hub
         .submit_password(body.login_id.trim(), &body.password)
         .await
         .map_err(tg_err)?;
-    signed_in(&state, user_id).await
+    signed_in(state, user_id).await
 }
 
 /// POST /api/auth/logout — retire the caller's session tokens, then sign its
@@ -299,9 +293,9 @@ pub async fn auth_password(
 /// error. Media tokens are deliberately not epoch-covered — they are
 /// minutes-lived, so expiry already closes that window.
 pub async fn auth_logout(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     state.bump_epoch(uid).await?;
     state.hub.logout(uid).await.map_err(tg_err)?;
     Ok(Json(json!({ "ok": true })))
@@ -310,12 +304,10 @@ pub async fn auth_logout(
 /// GET /api/me — connection status, whether storage channels are set up, and
 /// whether the caller may reach operator-only endpoints (the UI hides those
 /// surfaces; the endpoints themselves still check).
-pub async fn me(
-    State(state): State<AppState>,
-    Extension(Caller(uid)): Extension<Caller>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn me(Extension(Caller(uid)): Extension<Caller>) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let status = state.tg(uid).await?.status().await;
-    let channel_selected = status.authorized && channel_ready(&state, uid).await;
+    let channel_selected = status.authorized && channel_ready(state, uid).await;
     // The phone is already in hand here, so the operator check costs nothing
     // extra; `state.is_admin` exists for callers without a status.
     let admin = status
@@ -335,10 +327,8 @@ pub async fn me(
 }
 
 /// GET /api/avatar — the caller's profile photo as image bytes.
-pub async fn avatar(
-    State(state): State<AppState>,
-    Extension(Caller(uid)): Extension<Caller>,
-) -> ApiResult<AxumResponse> {
+pub async fn avatar(Extension(Caller(uid)): Extension<Caller>) -> ApiResult<AxumResponse> {
+    let state = crate::state::get();
     let Some(bytes) = state.tg(uid).await?.avatar().await else {
         return Err(ApiError::not_found("no profile photo"));
     };
@@ -357,9 +347,9 @@ pub struct RulesBody {
 
 /// GET /api/rules — the caller's auto-upload routing rules (ordered).
 pub async fn get_rules(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let rules = crate::db::get_rules(&state.db, &uid.to_string()).await?;
     Ok(Json(json!({ "rules": rules })))
 }
@@ -368,10 +358,10 @@ pub async fn get_rules(
 /// exist and belong to the caller, so neither a stale folder nor somebody
 /// else's folder can silently eat uploads.
 pub async fn save_rules(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<RulesBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     if body.rules.len() > 32 {
         return Err(ApiError::bad_request("at most 32 routing rules"));
     }
@@ -399,9 +389,9 @@ const MB: u64 = 1024 * 1024;
 /// GET /api/settings — the caller's upload-split threshold in MiB
 /// (0 = never split).
 pub async fn get_settings(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let bytes = crate::db::get_split(&state.db, &uid.to_string()).await?;
     Ok(Json(json!({ "split_mb": bytes / MB })))
 }
@@ -418,10 +408,10 @@ pub struct SettingsBody {
 /// Values above Telegram's 2 GiB per-document cap are rejected too — parts
 /// must fit in one document.
 pub async fn save_settings(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<SettingsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     const TG_DOC_CAP_MB: u64 = 2048;
     let bytes = body
         .split_mb
@@ -450,9 +440,9 @@ pub async fn save_settings(
 /// phone allowlist for every tenant at once: operators only. 404 rather than
 /// 403 so a non-admin cannot even confirm the endpoint exists.
 pub async fn reload_config(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     if !state.is_admin(uid).await {
         return Err(ApiError::not_found("not found"));
     }
@@ -471,108 +461,108 @@ pub async fn reload_config(
 mod tests {
     use super::*;
 
-    /// Scratch state on an in-memory store, so a handler test needs no temp
-    /// directory (see `db::open_mem`).
-    async fn temp_state() -> AppState {
-        let db = crate::db::open_mem().await.expect("open test db");
-        crate::app::shared_state(db)
-    }
+    use crate::state::{next_uid, with_state};
 
     /// The split threshold is one tenant's tuning knob: saving it must not
     /// move anybody else's, which is exactly what the old global row did.
-    #[tokio::test]
-    async fn settings_are_scoped_to_the_caller() {
-        let state = temp_state().await;
+    #[test]
+    fn settings_are_scoped_to_the_caller() {
+        with_state(|_state| async move {
+            let (mine_uid, other_uid) = (next_uid(), next_uid());
 
-        let saved = save_settings(
-            State(state.clone()),
-            Extension(Caller(11)),
-            Json(SettingsBody { split_mb: 64 }),
-        )
-        .await
-        .expect("save");
-        assert_eq!(saved.0["ok"], true);
-
-        let mine = get_settings(State(state.clone()), Extension(Caller(11)))
+            let saved = save_settings(
+                Extension(Caller(mine_uid)),
+                Json(SettingsBody { split_mb: 64 }),
+            )
             .await
-            .expect("read own");
-        assert_eq!(mine.0["split_mb"], 64);
+            .expect("save");
+            assert_eq!(saved.0["ok"], true);
 
-        let theirs = get_settings(State(state), Extension(Caller(22)))
-            .await
-            .expect("read other");
-        assert_eq!(theirs.0["split_mb"], 0, "another tenant keeps its default");
+            let mine = get_settings(Extension(Caller(mine_uid)))
+                .await
+                .expect("read own");
+            assert_eq!(mine.0["split_mb"], 64);
+
+            let theirs = get_settings(Extension(Caller(other_uid)))
+                .await
+                .expect("read other");
+            assert_eq!(theirs.0["split_mb"], 0, "another tenant keeps its default");
+        });
     }
 
     /// A rule may only target a folder the caller owns — otherwise one
     /// tenant could route their uploads into another tenant's folder.
-    #[tokio::test]
-    async fn rules_reject_a_foreign_folder() {
-        let state = temp_state().await;
-        crate::db::create_folder(&state.db, 11, "fold-11", "mine", "")
+    #[test]
+    fn rules_reject_a_foreign_folder() {
+        with_state(|state| async move {
+            let (owner, stranger) = (next_uid(), next_uid());
+            let folder = format!("fold-{owner}");
+            crate::db::create_folder(&state.db, owner, &folder, "mine", "")
+                .await
+                .expect("folder");
+
+            let rule = crate::db::RouteRule {
+                mime: "image/".to_string(),
+                folder: folder.clone(),
+            };
+            let accepted = save_rules(
+                Extension(Caller(owner)),
+                Json(RulesBody {
+                    rules: vec![rule.clone()],
+                }),
+            )
             .await
-            .expect("folder");
+            .expect("own folder is accepted");
+            assert_eq!(accepted.0["ok"], true);
 
-        let rule = crate::db::RouteRule {
-            mime: "image/".to_string(),
-            folder: "fold-11".to_string(),
-        };
-        let accepted = save_rules(
-            State(state.clone()),
-            Extension(Caller(11)),
-            Json(RulesBody {
-                rules: vec![rule.clone()],
-            }),
-        )
-        .await
-        .expect("own folder is accepted");
-        assert_eq!(accepted.0["ok"], true);
+            let err = save_rules(
+                Extension(Caller(stranger)),
+                Json(RulesBody { rules: vec![rule] }),
+            )
+            .await
+            .expect_err("a foreign folder must not be routable");
+            assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
 
-        let err = save_rules(
-            State(state.clone()),
-            Extension(Caller(22)),
-            Json(RulesBody { rules: vec![rule] }),
-        )
-        .await
-        .expect_err("a foreign folder must not be routable");
-        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
-
-        let stored = crate::db::get_rules(&state.db, "22").await.expect("rules");
-        assert!(stored.is_empty(), "the rejected rule set is not persisted");
+            let stored = crate::db::get_rules(&state.db, &stranger.to_string())
+                .await
+                .expect("rules");
+            assert!(stored.is_empty(), "the rejected rule set is not persisted");
+        });
     }
 
     /// `config.toml` is process-wide, so a reload changes the upload cap and
     /// the phone allowlist for every tenant. The caller here has no Telegram
     /// session, so no phone can be resolved for it and it cannot be an
     /// operator — the endpoint must not even admit to existing.
-    #[tokio::test]
-    async fn config_reload_is_operator_only() {
-        let state = temp_state().await;
-        let err = reload_config(State(state), Extension(Caller(11)))
-            .await
-            .expect_err("a non-admin tenant cannot reload global config");
-        assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+    #[test]
+    fn config_reload_is_operator_only() {
+        with_state(|_state| async move {
+            let err = reload_config(Extension(Caller(next_uid())))
+                .await
+                .expect_err("a non-admin tenant cannot reload global config");
+            assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
+        });
     }
 
     /// Logout has to revoke, not just forget: before the epoch existed, a
     /// token stolen from this account resumed working as soon as the account
     /// signed back in.
-    #[tokio::test]
-    async fn logout_revokes_outstanding_tokens() {
-        let state = temp_state().await;
-        let epoch = state.epoch(11).await.expect("epoch");
-        let stolen = state.tokens.issue(11, epoch);
-        assert_eq!(state.session_user(&stolen).await, Some(11));
+    #[test]
+    fn logout_revokes_outstanding_tokens() {
+        with_state(|state| async move {
+            let uid = next_uid();
+            let epoch = state.epoch(uid).await.expect("epoch");
+            let stolen = state.tokens.issue(uid, epoch);
+            assert_eq!(state.session_user(&stolen).await, Some(uid));
 
-        let body = auth_logout(State(state.clone()), Extension(Caller(11)))
-            .await
-            .expect("logout");
-        assert_eq!(body.0["ok"], serde_json::json!(true));
+            let body = auth_logout(Extension(Caller(uid))).await.expect("logout");
+            assert_eq!(body.0["ok"], serde_json::json!(true));
 
-        assert_eq!(state.session_user(&stolen).await, None);
-        assert!(
-            state.epoch(11).await.expect("epoch") > epoch,
-            "logout advances the account's epoch"
-        );
+            assert_eq!(state.session_user(&stolen).await, None);
+            assert!(
+                state.epoch(uid).await.expect("epoch") > epoch,
+                "logout advances the account's epoch"
+            );
+        });
     }
 }

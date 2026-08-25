@@ -1,7 +1,6 @@
 use std::io;
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::extract::multipart::Multipart;
 use axum::{Extension, Json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -61,11 +60,11 @@ struct StoredFile {
 }
 
 pub async fn upload_file(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     // Everything below runs on the caller's own account: their client posts
     // the parts, into their channels, under their routing rules.
     let tg = state.tg(uid).await?;
@@ -395,7 +394,7 @@ pub async fn upload_file(
     }
     let (name, mime) = meta_rx.borrow().clone().unwrap_or_default();
     persist_row(
-        &state,
+        state,
         tg,
         uid,
         StoredFile {
@@ -484,7 +483,7 @@ impl PartPlan {
 }
 
 async fn spill_upload(
-    state: AppState,
+    state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
     mut multipart: Multipart,
@@ -492,7 +491,7 @@ async fn spill_upload(
     max: u64,
     folder: String,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let plan = PartPlan::new(&state, uid, declared).await?;
+    let plan = PartPlan::new(state, uid, declared).await?;
     let dir = std::path::PathBuf::from(&crate::config::get().spill_dir);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -738,7 +737,7 @@ async fn spill_upload(
     }
     tracing::info!(%name, parts = plan.nparts, %declared, "uploaded file");
     persist_row(
-        &state,
+        state,
         tg,
         uid,
         StoredFile {
@@ -806,7 +805,7 @@ pub(crate) struct FileInput<'a> {
 }
 
 pub(crate) async fn store_from_file(
-    state: &AppState,
+    state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
     file: FileInput<'_>,
@@ -886,7 +885,7 @@ pub(crate) async fn store_from_file(
 }
 
 async fn persist_row(
-    state: &AppState,
+    state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
     file: StoredFile,
@@ -947,11 +946,12 @@ async fn persist_row(
         && row.thumb.is_none()
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {
-        let st = state.clone();
         let file_uid = row.uid.clone();
         let part0 = row.parts[0].clone();
+        // The state is a `&'static`, so a detached task can borrow it
+        // outright — nothing to clone into the task.
         tokio::spawn(async move {
-            extract_media_thumb(&st, uid, &file_uid, part0).await;
+            extract_media_thumb(state, uid, &file_uid, part0).await;
         });
     }
     Ok(Json(serde_json::json!({ "file": FileDto::from(row) })))

@@ -1,4 +1,3 @@
-use axum::extract::State;
 use axum::{Extension, Json};
 
 use crate::auth::Caller;
@@ -22,11 +21,11 @@ pub struct BenchBody {
 }
 
 pub async fn bench(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<BenchBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    admin_only(&state, uid).await?;
+    let state = crate::state::get();
+    admin_only(state, uid).await?;
     if body.size_mb == 0 || body.size_mb > 512 {
         return Err(ApiError::bad_request("size_mb must be 1..=512"));
     }

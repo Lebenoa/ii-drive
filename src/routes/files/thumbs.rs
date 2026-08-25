@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::header;
 use axum::response::Response;
 
@@ -207,11 +207,11 @@ pub async fn extract_media_thumb(
 
 /// GET /api/files/{id}/thumb — tiny cached JPEG; same auth rules as raw.
 pub async fn file_thumb(
-    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> ApiResult<Response> {
+    let state = crate::state::get();
     let row = crate::db::get(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;

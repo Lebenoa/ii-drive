@@ -179,11 +179,8 @@ pub struct Caller(pub i64);
 ///
 /// Revocation lives in [`crate::state::AppState::session_user`] so the public
 /// routes, which never run this middleware, decide it identically.
-pub async fn guard(
-    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
-    mut req: axum::http::Request<axum::body::Body>,
-    next: Next,
-) -> Response {
+pub async fn guard(mut req: axum::http::Request<axum::body::Body>, next: Next) -> Response {
+    let state = crate::state::get();
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)

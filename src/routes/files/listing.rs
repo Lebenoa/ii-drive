@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::{Extension, Json};
 
 use crate::auth::Caller;
@@ -18,12 +18,12 @@ async fn owned(state: &AppState, uid: i64, id: &str) -> ApiResult<crate::db::Fil
 
 /// PATCH /api/files/{id}/move — cut/paste target.
 pub async fn move_file(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    owned(&state, uid, &id).await?;
+    let state = crate::state::get();
+    owned(state, uid, &id).await?;
     // The destination must be the caller's own folder — a foreign folder id
     // is indistinguishable from a nonexistent one from here.
     if !body.folder.is_empty()
@@ -41,12 +41,12 @@ pub async fn move_file(
 
 /// PATCH /api/files/{id}/visibility — flip private/public.
 pub async fn set_visibility(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
     Json(body): Json<VisibilityBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    owned(&state, uid, &id).await?;
+    let state = crate::state::get();
+    owned(state, uid, &id).await?;
     if !crate::db::set_public(&state.db, &id, body.public).await? {
         return Err(ApiError::not_found("file not found"));
     }
@@ -56,10 +56,10 @@ pub async fn set_visibility(
 }
 
 pub async fn list_files(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let rows = crate::db::list(
         &state.db,
         uid,
@@ -74,11 +74,11 @@ pub async fn list_files(
 }
 
 pub async fn delete_file(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let row = owned(&state, uid, &id).await?;
+    let state = crate::state::get();
+    let row = owned(state, uid, &id).await?;
     // The messages live in the owner's chats, so only the owner's client can
     // remove them — here that is the caller.
     let tg = state.tg(uid).await?;

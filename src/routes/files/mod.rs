@@ -200,40 +200,38 @@ mod tests {
     /// The public read endpoints must not become an existence oracle: with
     /// several accounts behind one URL space, a "forbidden" that differs from
     /// "not found" would let anybody enumerate another account's file ids.
-    #[tokio::test]
-    async fn a_foreign_file_is_indistinguishable_from_a_missing_one() {
-        let db = crate::db::open_mem().await.expect("open test db");
-        let state = crate::app::shared_state(db);
-        crate::db::insert(&state.db, &row(B, false))
-            .await
-            .expect("plant B's private row");
-
-        let probe = |id: &str| {
-            let state = state.clone();
-            let id = id.to_string();
-            async move {
-                let req = axum::http::Request::builder()
-                    .uri("/")
-                    .body(axum::body::Body::empty())
-                    .expect("request");
-                let err = super::raw_file(
-                    axum::extract::State(state),
-                    axum::extract::Path(id),
-                    axum::extract::Query(std::collections::HashMap::new()),
-                    req,
-                )
+    #[test]
+    fn a_foreign_file_is_indistinguishable_from_a_missing_one() {
+        crate::state::with_state(|state| async move {
+            crate::db::insert(&state.db, &row(B, false))
                 .await
-                .expect_err("anonymous read is refused");
-                (err.0, err.1)
-            }
-        };
+                .expect("plant B's private row");
 
-        let foreign = probe("01FILE").await;
-        let missing = probe("01NOSUCHFILE").await;
-        assert_eq!(
-            foreign, missing,
-            "status and body must not disclose existence"
-        );
-        assert_eq!(foreign.0, axum::http::StatusCode::NOT_FOUND);
+            let probe = |id: &str| {
+                let id = id.to_string();
+                async move {
+                    let req = axum::http::Request::builder()
+                        .uri("/")
+                        .body(axum::body::Body::empty())
+                        .expect("request");
+                    let err = super::raw_file(
+                        axum::extract::Path(id),
+                        axum::extract::Query(std::collections::HashMap::new()),
+                        req,
+                    )
+                    .await
+                    .expect_err("anonymous read is refused");
+                    (err.0, err.1)
+                }
+            };
+
+            let foreign = probe("01FILE").await;
+            let missing = probe("01NOSUCHFILE").await;
+            assert_eq!(
+                foreign, missing,
+                "status and body must not disclose existence"
+            );
+            assert_eq!(foreign.0, axum::http::StatusCode::NOT_FOUND);
+        });
     }
 }

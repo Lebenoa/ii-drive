@@ -49,14 +49,15 @@ async fn main() {
         }
     };
 
-    let database = match db::open(&cfg.db_path).await {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("failed to open database {}: {e}", cfg.db_path);
-            std::process::exit(1);
-        }
-    };
-    match db::counts(&database).await {
+    // First touch of the process-wide state: after `config::init`, because
+    // the token signer and the Telegram hub read their settings out of it,
+    // and inside the runtime, because the hub spawns its login pruner.
+    let state = state::get();
+    if let Err(e) = db::connect(&state.db, &cfg.db_path).await {
+        eprintln!("failed to open database {}: {e}", cfg.db_path);
+        std::process::exit(1);
+    }
+    match db::counts(&state.db).await {
         Ok((files, folders)) => {
             tracing::info!(
                 "database {} loaded: {files} files, {folders} folders",
@@ -68,8 +69,7 @@ async fn main() {
         Err(e) => tracing::warn!("could not count database rows: {e}"),
     }
 
-    let state = app::shared_state(database);
-    if let Err(e) = app::run(state).await {
+    if let Err(e) = app::run().await {
         eprintln!("server error: {e}");
         std::process::exit(1);
     }

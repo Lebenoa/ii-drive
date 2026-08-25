@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::{Extension, Json};
 use tokio::sync::Mutex;
 
 use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
-use crate::state::AppState;
 
 /// In-flight resumable uploads. Process-local on purpose: a restart
 /// invalidates the spill files anyway, so durability would only preserve
@@ -91,10 +90,10 @@ pub struct InitReq {
 }
 
 pub async fn init(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(req): Json<InitReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     if req.size == 0 {
         return Err(ApiError::bad_request("size must be positive"));
     }
@@ -188,7 +187,6 @@ pub async fn status(
 /// the spill file byte-identical to the original without any sparse-hole
 /// bookkeeping, so a retry can never interleave.
 pub async fn chunk(
-    State(_state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
@@ -251,10 +249,10 @@ pub async fn abort(
 }
 
 pub async fn complete(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let tg = state.tg(uid).await?;
     let s = owned_session(uid, &id).await?;
     if s.received != s.declared {
@@ -299,7 +297,7 @@ pub async fn complete(
         mime: s.mime.clone(),
         folder: s.folder.clone(),
     };
-    match super::upload::store_from_file(&state, tg, uid, file, &head).await {
+    match super::upload::store_from_file(state, tg, uid, file, &head).await {
         Ok(v) => {
             let _guard = SpillFile(s.path.clone());
             SESSIONS.lock().await.remove(&id);

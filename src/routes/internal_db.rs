@@ -1,4 +1,3 @@
-use axum::extract::State;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
@@ -23,10 +22,10 @@ async fn admin_only(state: &AppState, uid: i64) -> Result<(), ApiError> {
 /// Operator-only, gated on `admin_phones`: the schema is process-wide, so
 /// it names every tenant's tables regardless of who asks.
 pub async fn tables(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    admin_only(&state, uid).await?;
+    let state = crate::state::get();
+    admin_only(state, uid).await?;
     let mut res = state
         .db
         .query("INFO FOR DB")
@@ -57,11 +56,11 @@ pub struct QueryBody {
 /// sufficient boundary — it only proves *some* account is signed in — so
 /// this is operator-only, gated on `admin_phones`.
 pub async fn query(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<QueryBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    admin_only(&state, uid).await?;
+    let state = crate::state::get();
+    admin_only(state, uid).await?;
     let sql = body.sql.trim();
     if sql.is_empty() {
         return Err(ApiError::bad_request("query must not be empty"));

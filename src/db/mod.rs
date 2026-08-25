@@ -36,22 +36,36 @@ pub enum DbError {
     #[error("{0}")]
     Shape(String),
 }
-pub async fn open(path: &str) -> Result<surrealdb::Surreal<Conn>, DbError> {
+/// Points `db` — the unconnected handle held by [`crate::state`] — at the
+/// store under `path` and brings its schema up to date. Separate from
+/// creating the handle so the state can be a plain `LazyLock`: making the
+/// client is sync, only wiring it up is not.
+pub async fn connect(db: &surrealdb::Surreal<Conn>, path: &str) -> Result<(), DbError> {
     if let Some(parent) = std::path::Path::new(path)
         .parent()
         .filter(|p| !p.is_empty())
     {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let db = surrealdb::Surreal::new::<surrealdb::engine::local::SurrealKv>(path).await?;
-    bootstrap(&db).await?;
-    Ok(db)
+    db.connect::<surrealdb::engine::local::SurrealKv>(path)
+        .await?;
+    bootstrap(db).await?;
+    Ok(())
 }
 
-/// Scratch store for tests. Same `local::Db` client as [`open`], so every
-/// query behaves identically, with no filesystem to set up or clean out.
-/// Measured: the suite runs in ~1.5s on this engine versus ~6.5s
-/// file-backed, and a test can never see another's leftover files.
+/// [`connect`] against a scratch in-memory store, for the process-wide state
+/// under test. Same `local::Db` client, so every query behaves identically.
+#[cfg(test)]
+pub(crate) async fn connect_mem(db: &surrealdb::Surreal<Conn>) -> Result<(), DbError> {
+    db.connect::<surrealdb::engine::local::Mem>(()).await?;
+    bootstrap(db).await?;
+    Ok(())
+}
+
+/// Standalone scratch store for tests that want one of their own rather than
+/// the shared process-wide state. Measured: the suite runs in ~1.5s on this
+/// engine versus ~6.5s file-backed, and a test can never see another's
+/// leftover files.
 #[cfg(test)]
 pub(crate) async fn open_mem() -> Result<surrealdb::Surreal<Conn>, DbError> {
     let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(()).await?;
@@ -487,7 +501,8 @@ mod persist_tests {
         let path_str = path.to_str().expect("utf8").to_string();
 
         {
-            let db = open(&path_str).await.expect("open");
+            let db = surrealdb::Surreal::init();
+            connect(&db, &path_str).await.expect("open");
             insert(&db, &row("01P", "persist.bin", 5))
                 .await
                 .expect("insert");
@@ -496,7 +511,8 @@ mod persist_tests {
         // background tasks time to release the file lock.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         // SurrealDB flushes on drop/close; simulate a server restart.
-        let db = open(&path_str).await.expect("reopen");
+        let db = surrealdb::Surreal::init();
+        connect(&db, &path_str).await.expect("reopen");
         let got = get(&db, "01P").await.expect("get");
         assert!(got.is_some(), "row must survive reopen");
     }

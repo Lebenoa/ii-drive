@@ -1,4 +1,3 @@
-use axum::extract::State;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
@@ -6,7 +5,6 @@ use serde_json::json;
 use crate::auth::Caller;
 use crate::db::{BotDraft, DraftMsg};
 use crate::error::{ApiError, ApiResult};
-use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct BotFatherBody {
@@ -63,10 +61,10 @@ fn draft_json(draft: &BotDraft) -> serde_json::Value {
 /// conversation instead of firing a second `/newbot` into it. The draft row
 /// is keyed by the caller, so each account resumes its own conversation.
 pub async fn send(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<BotFatherBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let text = body.text.trim();
     if text.is_empty() {
         return Err(ApiError::bad_request("message must not be empty"));
@@ -115,9 +113,9 @@ pub async fn send(
 /// GET /api/botfather/draft — the caller's pending `/newbot` conversation,
 /// so the wizard can pick up where it left off after a reload or restart.
 pub async fn draft(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     match crate::db::get_bot_draft(&state.db, &uid.to_string()).await? {
         Some(d) => Ok(Json(draft_json(&d))),
         None => Ok(Json(json!({ "active": false }))),
@@ -128,9 +126,9 @@ pub async fn draft(
 /// question and forget the draft. Without this an abandoned wizard leaves
 /// BotFather waiting for an answer indefinitely.
 pub async fn cancel_draft(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let key = uid.to_string();
     let Some(draft) = crate::db::get_bot_draft(&state.db, &key).await? else {
         return Ok(Json(json!({ "ok": true, "cancelled": false })));
@@ -158,10 +156,8 @@ pub struct BotTokenBody {
 /// GET /api/botfather/bots — ask @BotFather for /mybots and return the
 /// owned-bot names parsed from its inline menu button labels. Bots already
 /// configured in the caller's drive are filtered out.
-pub async fn bots(
-    State(state): State<AppState>,
-    Extension(Caller(uid)): Extension<Caller>,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn bots(Extension(Caller(uid)): Extension<Caller>) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let tg = state.tg(uid).await?;
     let names = tg
         .botfather_my_bots()
@@ -183,10 +179,10 @@ pub async fn bots(
 /// POST /api/botfather/token {bot} — walk the BotFather menus to fetch one
 /// owned bot's API token, so it can be imported without copy-paste.
 pub async fn token(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<BotTokenBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let bot = body.bot.trim();
     if bot.is_empty() {
         return Err(ApiError::bad_request("bot name must not be empty"));

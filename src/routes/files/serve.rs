@@ -1,22 +1,21 @@
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::header;
 use axum::response::Response;
 use axum::{Extension, Json};
 
 use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
-use crate::state::AppState;
 
 use super::{bearer, may_read, parse_range, percent_encode};
 
 /// Public (shareable) endpoint: streams the stored Telegram document.
 pub async fn raw_file(
-    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<std::collections::HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> ApiResult<Response> {
+    let state = crate::state::get();
     let row = crate::db::get(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
@@ -101,10 +100,10 @@ const FILE_LINK_TTL_SECS: u64 = 7 * 24 * 3600;
 /// GET /api/files/{id}/link — minted share URL for a private file
 /// (single-file scope, unlike the session token).
 pub async fn file_link(
-    State(state): State<AppState>,
     Path(id): Path<String>,
     req_headers: axum::http::HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     let row = crate::db::get(&state.db, &id)
         .await?
         .ok_or_else(|| ApiError::not_found("file not found"))?;
@@ -136,9 +135,9 @@ const MEDIA_TTL_SECS: u64 = 3600;
 /// long-lived session token (which would leak via logs/history/Referer).
 /// The token names its account, so it only opens that account's files.
 pub async fn media_token(
-    State(state): State<AppState>,
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
     Ok(Json(serde_json::json!({
         "token": state.tokens.sign_media(uid, MEDIA_TTL_SECS),
         "expires_in": MEDIA_TTL_SECS,

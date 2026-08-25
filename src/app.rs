@@ -2,9 +2,7 @@ use axum::Router;
 use axum::routing::{delete, get, post};
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::state::AppState;
-
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router() -> Router {
     let public = Router::new()
         .route("/health", get(crate::routes::health))
         .route("/api/limits", get(crate::routes::limits))
@@ -100,13 +98,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::patch(crate::routes::move_file),
         )
         .route("/api/files/upload-bench", post(crate::routes::upload_bench))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::guard,
-        ));
+        .layer(axum::middleware::from_fn(crate::auth::guard));
 
     let web_dist = crate::config::get().web_dist;
-    let app: Router<()> = public.merge(protected).with_state(state);
+    let app: Router = public.merge(protected);
     let dist = std::path::Path::new(&web_dist);
     if dist.is_dir() {
         let index = dist.join("index.html");
@@ -125,7 +120,8 @@ pub fn build_router(state: AppState) -> Router {
     }
 }
 
-pub async fn run(state: AppState) -> std::io::Result<()> {
+pub async fn run() -> std::io::Result<()> {
+    let state = crate::state::get();
     let accounts = state.hub.restore().await;
     tracing::info!("{} signed-in account(s)", accounts.len());
     for uid in &accounts {
@@ -154,19 +150,10 @@ pub async fn run(state: AppState) -> std::io::Result<()> {
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on http://{addr}");
-    axum::serve(listener, build_router(state))
+    axum::serve(listener, build_router())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");
         })
         .await
-}
-
-pub fn shared_state(db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> AppState {
-    let cfg = crate::config::get();
-    AppState::new(
-        db,
-        crate::auth::Tokens::new(&cfg.secret, cfg.token_ttl_secs),
-        crate::tg::TgHub::new(cfg),
-    )
 }
