@@ -19,9 +19,12 @@ async fn main() {
         )
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .filter(|a| !a.starts_with('-'))
+    // Config location comes from the environment, not an argument: a service
+    // manager sets it once for both the wizard and the server, and there is
+    // no other flag to justify an argument parser.
+    let config_path = std::env::var("II_DRIVE_CONFIG")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| "config.toml".to_string());
 
     // First run on this data directory: no config yet — serve the setup

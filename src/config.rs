@@ -30,9 +30,12 @@ pub struct Config {
     pub token_ttl_secs: u64,
     pub db_path: String,
     pub session_path: String,
+    /// Built SPA folder. Ships with the binary rather than the config, so it
+    /// is located by [`asset_root`] and is not a config key.
     pub web_dist: String,
     /// Folder of translation files (`{lang}.json`) served to the web UI,
-    /// which downloads a language only after the user picks it.
+    /// which downloads a language only after the user picks it. Located
+    /// beside the binary, like [`Self::web_dist`].
     pub locales_dir: String,
     pub allowed_phones: Vec<String>,
     /// Phone numbers allowed to reach operator-only endpoints (raw-SQL
@@ -96,6 +99,8 @@ struct RawConfig {
     db_path: Option<String>,
     session_path: Option<String>,
     max_file_size: Option<SizeRepr>,
+    // Removed keys, still parsed so a config that sets them gets told why
+    // they stopped having an effect instead of silently losing them.
     web_dist: Option<String>,
     locales_dir: Option<String>,
     allowed_phones: Option<Vec<String>>,
@@ -116,8 +121,8 @@ impl Default for Config {
             token_ttl_secs: 30 * 24 * 3600,
             db_path: "data/drive.surrealkv".into(),
             session_path: "data/session.db".into(),
-            web_dist: "web/dist".into(),
-            locales_dir: "locales".into(),
+            web_dist: asset_path("web/dist"),
+            locales_dir: asset_path("locales"),
             allowed_phones: Vec::new(),
             admin_phones: Vec::new(),
             spill_dir: "data/spill".into(),
@@ -197,10 +202,7 @@ pub fn get() -> &'static Config {
 /// Resolves one relative path against the config file's directory, so the
 /// server finds the same files regardless of the working directory it was
 /// started from. Absolute paths and a config in the CWD pass through.
-///
-/// Public because the setup wizard needs the same rule before there is a
-/// config to anchor: it serves the web UI, which is one of these paths.
-pub(crate) fn anchored(config_path: &str, p: &str) -> String {
+fn anchored(config_path: &str, p: &str) -> String {
     let dir = std::path::Path::new(config_path)
         .parent()
         .filter(|d| !d.as_os_str().is_empty());
@@ -212,7 +214,9 @@ pub(crate) fn anchored(config_path: &str, p: &str) -> String {
     }
 }
 
-/// Applies [`anchored`] to every path the config carries.
+/// Applies [`anchored`] to the data paths the config carries. The shipped
+/// assets are deliberately absent: they travel with the binary, not with the
+/// operator's data, and [`asset_root`] locates them.
 fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
     // `db_path` matters most: unanchored, starting the binary from another
     // directory creates a fresh empty store there and every existing file
@@ -220,10 +224,34 @@ fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
     // followed the same wrong directory.
     cfg.db_path = anchored(config_path, &cfg.db_path);
     cfg.session_path = anchored(config_path, &cfg.session_path);
-    cfg.web_dist = anchored(config_path, &cfg.web_dist);
-    cfg.locales_dir = anchored(config_path, &cfg.locales_dir);
     cfg.spill_dir = anchored(config_path, &cfg.spill_dir);
     cfg
+}
+
+/// Directory holding the assets that ship with the server: the built SPA and
+/// the translation files. A release bundle is the executable with both
+/// folders beside it, so they are found from the executable and need no
+/// configuring — unlike the data paths, they are not the operator's files.
+///
+/// Debug builds answer with the source tree instead: `target/debug` has no
+/// `web/dist` next to it, so `cargo run` would otherwise serve nothing.
+fn asset_root() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .unwrap_or_else(|| ".".into())
+    }
+}
+
+/// One shipped asset folder, resolved against [`asset_root`].
+fn asset_path(rel: &str) -> String {
+    asset_root().join(rel).to_string_lossy().into_owned()
 }
 
 /// A byte size written either as a plain number of bytes or as a human
@@ -283,6 +311,21 @@ impl Config {
             },
         };
 
+        // Not moved into the database like the keys above — gone. Warn per
+        // key so an operator who pointed one somewhere custom learns that
+        // the server stopped reading it.
+        for (key, set) in [
+            ("web_dist", raw.web_dist.is_some()),
+            ("locales_dir", raw.locales_dir.is_some()),
+        ] {
+            if set {
+                tracing::warn!(
+                    "ignoring config key `{key}`: the web UI and translations ship with the \
+                     binary and are located beside it — delete this key"
+                );
+            }
+        }
+
         Ok(Config {
             host: raw.host.unwrap_or_else(|| "127.0.0.1".into()),
             port: raw.port.unwrap_or(8080),
@@ -294,8 +337,8 @@ impl Config {
             token_ttl_secs: raw.token_ttl_secs.unwrap_or(30 * 24 * 3600),
             db_path: raw.db_path.unwrap_or_else(|| "data/drive.surrealkv".into()),
             session_path: raw.session_path.unwrap_or_else(|| "data/session.db".into()),
-            web_dist: raw.web_dist.unwrap_or_else(|| "web/dist".into()),
-            locales_dir: raw.locales_dir.unwrap_or_else(|| "locales".into()),
+            web_dist: asset_path("web/dist"),
+            locales_dir: asset_path("locales"),
             allowed_phones: raw
                 .allowed_phones
                 .unwrap_or_default()
@@ -443,8 +486,6 @@ mod tests {
         for (name, got) in [
             ("db_path", &cfg.db_path),
             ("session_path", &cfg.session_path),
-            ("web_dist", &cfg.web_dist),
-            ("locales_dir", &cfg.locales_dir),
             ("spill_dir", &cfg.spill_dir),
         ] {
             assert!(
@@ -452,6 +493,45 @@ mod tests {
                 "{name} was left relative to the working directory: {got}"
             );
         }
+
+        // The assets are the binary's, not the operator's. Moving a config
+        // must not move the UI out from under a running install.
+        for (name, got) in [
+            ("web_dist", &cfg.web_dist),
+            ("locales_dir", &cfg.locales_dir),
+        ] {
+            assert!(
+                !std::path::Path::new(got).starts_with(base),
+                "{name} followed the config file: {got}"
+            );
+        }
+    }
+
+    /// The assets are found with no config key and no working directory: a
+    /// release bundle carries them beside the executable, and this build
+    /// carries them in the source tree.
+    #[test]
+    fn shipped_assets_are_located_from_the_binary() {
+        let cfg = Config::load("definitely-missing-config.toml").unwrap();
+        for (name, got) in [
+            ("web_dist", &cfg.web_dist),
+            ("locales_dir", &cfg.locales_dir),
+        ] {
+            let p = std::path::Path::new(got);
+            assert!(p.is_absolute(), "{name} is not absolute: {got}");
+            assert!(
+                p.starts_with(asset_root()),
+                "{name} escaped the asset root: {got}"
+            );
+        }
+        // `cargo test` is a debug build, so the root is this repository and
+        // the dictionary that ships with it must really be there.
+        assert!(
+            std::path::Path::new(&cfg.locales_dir)
+                .join("en.json")
+                .is_file(),
+            "debug builds must resolve assets to the source tree"
+        );
     }
 
     /// An absolute path is the operator being explicit; a config in the
@@ -549,5 +629,16 @@ mod legacy_keys {
         assert_eq!(cfg.legacy.upload_strategy, None);
         assert_eq!(cfg.legacy.max_file_size, None);
         assert!(cfg.legacy.present_keys().is_empty());
+    }
+
+    /// `web_dist` and `locales_dir` were removed rather than moved. A file
+    /// that still points them somewhere custom is warned about and ignored —
+    /// it must not be able to send the server looking for a UI that the
+    /// bundle never puts there.
+    #[test]
+    fn removed_asset_keys_do_not_move_the_assets() {
+        let cfg = load("web_dist = \"/nowhere/ui\"\nlocales_dir = \"/nowhere/i18n\"\n");
+        assert_eq!(cfg.web_dist, asset_path("web/dist"));
+        assert_eq!(cfg.locales_dir, asset_path("locales"));
     }
 }

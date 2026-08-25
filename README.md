@@ -65,7 +65,10 @@ locales/en.json         English dictionary
 README.md
 ```
 
-Keep the files together — relative paths resolve beside the executable.
+Keep `web/dist` and `locales` beside the executable — that is where the
+server looks for them, whatever directory you start it from. `config.toml`
+and `data/` may live anywhere; see [Configuration
+reference](#configuration-reference).
 
 ### 2. Configure
 
@@ -152,12 +155,21 @@ That's it — drag files into the drive to upload them.
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
    | `session_path` | `data/session.db` | Legacy session path kept for compatibility; per-account sessions live in `sessions/` beside it |
-   | `web_dist` | `web/dist` | Built SPA folder; API-only if missing |
-   | `locales_dir` | `locales` | Web-UI translation files, served under `/locales/`; downloaded on demand |
    | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (`spill` strategy + resumable uploads) |
 
    Every key above is set once and read only at startup — there is no config
    reload, because there is nothing here worth re-reading.
+
+   The server reads `./config.toml`. Point it elsewhere with
+   `II_DRIVE_CONFIG=/etc/ii-drive/config.toml`; there are no command-line
+   arguments. Relative paths in the file resolve **beside the file**, not
+   beside the working directory, so a service manager can start the binary
+   from anywhere without the drive appearing empty.
+
+   The web UI and the translation files are deliberately not configurable:
+   they ship with the executable and are found beside it (in a source
+   checkout, in the repository). A config that still sets `web_dist` or
+   `locales_dir` is warned about and ignored.
 
    The settings you actually revisit live in the database instead, editable
    under **Settings → Uploads** (operator only) or through `PUT /api/instance`.
@@ -265,10 +277,10 @@ ones appear without rebuilding or re-releasing anything.
 Adding a language = two commits: `locales/th.json` (copy of `en.json`,
 translated) plus an entry in `locales/manifest.json`. No rebuild.
 
-The server still serves whatever sits in `locales_dir` under
-`/locales/…` — that is how the bundled `en.json` reaches the UI, and it
-works as an offline override point (`manifest.json` there is reserved and
-never listed as a language).
+The server still serves whatever sits in the `locales` folder beside the
+executable under `/locales/…` — that is how the bundled `en.json` reaches the
+UI, and it works as an offline override point (`manifest.json` there is
+reserved and never listed as a language).
 
 ### Troubleshooting login
 
@@ -315,7 +327,7 @@ just log in again through the web UI.
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
 | GET/PUT | `/api/instance` | token + admin | Instance-wide upload cap, thumbnail switch and strategy; non-admins get 404 |
 | GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
-| GET | `/locales/manifest.json` | — | Languages available in `locales_dir`, with display names |
+| GET | `/locales/manifest.json` | — | Languages available beside the binary, with display names |
 | GET | `/locales/{lang}.json` | — | One translation dictionary; the UI downloads it on language change |
 | GET/POST | `/api/internal-db/tables` `/query` | token + admin | Developer mode: list tables / run raw SurrealQL. Unrestricted, cross-tenant — callers outside `admin_phones` get 404 |
 | GET | `/health` | — | Liveness probe |
@@ -334,13 +346,22 @@ just log in again through the web UI.
 
 ```sh
 cd web && nub install && nub run build && cd ..   # or: npm/pnpm/bun run build
+cargo run                                          # debug: assets resolve to this repo
+```
+
+A **debug** build finds `web/dist` and `locales` in the source tree, so
+`cargo run` works from any directory. A **release** build looks beside the
+executable, exactly like the shipped bundle — so assemble one:
+
+```sh
 cargo build --release
+cp -r web/dist locales target/release/
 ./target/release/ii-drive
 ```
 
-The release bundle layout matches the repo defaults, so a source build runs
-the same way: keep `web/dist` and `locales/en.json` beside the binary, or
-point `web_dist`/`locales_dir` in config.toml at them.
+That is what the release workflow does; `config.toml` and `data/` still go
+wherever you point `II_DRIVE_CONFIG`.
+
 ### Commands
 
 ```sh
@@ -355,7 +376,8 @@ cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `n
   [grammers](https://github.com/Lonami/grammers) (MTProto), embedded
   [SurrealDB](https://surrealdb.com) (SurrealKv) for metadata.
 - **Frontend:** [SvelteKit](https://kit.svelte.dev) (Svelte 5) with
-  `adapter-static` — a pure-SPA build served by the Rust server from `web_dist`.
+  `adapter-static` — a pure-SPA build served by the Rust server from the
+  `web/dist` folder beside the executable.
 - **Max file size:** 2 GiB default (Telegram free-account per-file limit);
   configurable, larger files upload via transparent chunking.
 - **Thumbnails:** ffmpeg (optional, on `PATH`) for video/images; audio cover art parsed from ID3/FLAC.

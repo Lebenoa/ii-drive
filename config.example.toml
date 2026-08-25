@@ -4,6 +4,12 @@
 # Every key below is optional — the server starts with these defaults if
 # config.toml is missing or a key is omitted. Only api_id/api_hash are
 # needed before the drive is usable.
+#
+# The server reads ./config.toml. Set II_DRIVE_CONFIG to point it elsewhere:
+#   II_DRIVE_CONFIG=/etc/ii-drive/config.toml ii-drive
+# Relative paths below resolve beside that file, whatever the working
+# directory is. The web UI and translations are not configurable: they ship
+# with the executable and are found beside it.
 
 # HTTP server bind address
 host = "127.0.0.1"
@@ -72,14 +78,8 @@ session_path = "data/session.db"
 # chunked uploads, which always buffer). Created automatically.
 spill_dir = "data/spill"
 
-# Folder containing the built web UI (svelte app). Served at "/".
-web_dist = "web/dist"
-
-# Folder of web-UI translation files served under /locales/. Only English
-# ("en.json") is required — it ships as the bundled fallback. Every other
-# language is downloaded by the UI from this repository's locales/ folder on
-# GitHub, so the catalog (locales/manifest.json in the repo) and dictionaries
-# update without rebuilding or re-releasing the server.
-# The file "manifest.json" here is reserved and never offered as a language.
-locales_dir = "locales"
-
+# The built web UI and the translation files are not configured here. They
+# ship with the executable — a release bundle is the binary with web/dist and
+# locales beside it — and are found from it, so moving this file cannot hide
+# the UI. An older config.toml setting web_dist or locales_dir is warned
+# about and ignored.

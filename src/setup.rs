@@ -29,17 +29,13 @@ pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid host/port from defaults: {e}"))?;
 
-    // `config::init` has not run — there is no file to load yet — so the
-    // default paths are still CWD-relative. Anchor them to where the config
-    // is about to be written, matching how every later boot resolves them:
-    // starting the binary from another directory must not hide the web UI.
-    let path_str = config_path.to_string_lossy().into_owned();
-    let web_dist = crate::config::anchored(&path_str, &cfg.web_dist);
-    let locales_dir = crate::config::anchored(&path_str, &cfg.locales_dir);
+    // `config::init` has not run — there is no file to load yet — but these
+    // two paths never came from the file: they are located from the binary,
+    // so they already resolve exactly as they will on every later boot.
 
     // Unlike the running server, which degrades to API-only, the wizard *is*
     // the web UI: without a build there is no form to fill in.
-    let dist = Path::new(&web_dist);
+    let dist = Path::new(&cfg.web_dist);
     if !dist.is_dir() {
         anyhow::bail!(
             "web UI not found at `{}`, so there is no setup form to serve — \
@@ -60,7 +56,7 @@ pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
         // The SPA blocks its first paint on a dictionary. A plain static
         // serve is enough here: the wizard only ever asks for one file, and
         // the language picker it would filter for is not on this page.
-        .nest_service("/locales", ServeDir::new(locales_dir))
+        .nest_service("/locales", ServeDir::new(&cfg.locales_dir))
         .fallback_service(spa)
         .with_state(SetupState { config_path });
     axum::serve(listener, app).await?;
