@@ -139,8 +139,6 @@ mod tests {
             name: name.to_string(),
             mime: "application/octet-stream".to_string(),
             size: 42,
-            message_id: 7,
-            chat: "me".to_string(),
             created_at,
             folder: String::new(),
             parts: vec![FilePart {
@@ -315,14 +313,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_part_row_and_legacy_compat() {
+    async fn multi_part_row_roundtrip() {
         let (db, _dir) = temp_db().await;
 
         // A split file: two parts across two chats.
         let mut row = row("01S", "big.bin", 300);
         row.size = 300;
-        row.message_id = 11;
-        row.chat = "-1001".into();
         row.parts = vec![
             FilePart {
                 message_id: 11,
@@ -339,21 +335,7 @@ mod tests {
         let got = get(&db, "01S").await.unwrap().unwrap();
         assert_eq!(got.parts.len(), 2);
         assert_eq!(got.parts[1].chat, "-1002");
-        assert_eq!(got.message_id, 11);
-
-        // A pre-split row (no parts_json) reads back as a single part.
-        db.query(
-            "CREATE file SET uid = 'old', name = 'legacy', mime = 'm', size = 5, \
-             message_id = 9, chat = 'me', created_at = 1",
-        )
-        .await
-        .unwrap();
-        let old = get(&db, "old").await.unwrap().unwrap();
-        assert_eq!(old.parts.len(), 1);
-        assert_eq!(old.parts[0].message_id, 9);
-        assert_eq!(old.parts[0].size, 5);
-        // Legacy rows also land in the root folder.
-        assert_eq!(old.folder, "");
+        assert_eq!(got.size, 300);
     }
 
     #[tokio::test]

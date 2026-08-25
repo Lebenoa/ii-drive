@@ -56,10 +56,8 @@ token_ttl_secs = 2592000
 # Embedded SurrealDB storage folder (created automatically)
 db_path = "data/drive.surrealkv"
 
-# Telegram MTProto session file. Each signed-in account keeps its own session
-# at "<this folder>/sessions/<telegram-user-id>.db"; the path below is only
-# read once, to migrate an install that predates multi-account support (its
-# files and folders are then assigned to that account).
+# Telegram MTProto sessions live at "<this folder>/sessions/<telegram-user-id>.db";
+# the path below only names that folder.
 session_path = "data/session.db"
 
 # --- Moved to the database ---
@@ -69,10 +67,8 @@ session_path = "data/session.db"
 # now live in the database and are edited under Settings -> Uploads (or via
 # PUT /api/instance) — effective immediately, no restart.
 #
-# If an older config.toml still sets max_file_size, media_thumbs or
-# upload_strategy, the first startup after upgrading copies those values into
-# the database once and logs which keys to delete. They are ignored after
-# that, so keeping them will only mislead the next person to read this file.
+# No migration window: an older config.toml that still sets those keys is
+# simply ignored — change them under Settings -> Uploads instead.
 
 # Directory for in-flight upload buffers ("spill" strategy and resumable
 # chunked uploads, which always buffer). Created automatically.

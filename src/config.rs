@@ -3,8 +3,6 @@ use std::sync::{LazyLock, OnceLock};
 
 use serde::Deserialize;
 
-use crate::db::UploadStrategy;
-
 /// Process-wide configuration, loaded once by [`init`] and read through
 /// [`get`] for the rest of the process' life.
 ///
@@ -52,40 +50,6 @@ pub struct Config {
     /// Directory for in-flight upload buffers (upload strategy `spill`, and
     /// the resumable-upload sessions, which always spill by design).
     pub spill_dir: String,
-    /// Values that used to be configured here; see [`Legacy`].
-    pub legacy: Legacy,
-}
-
-/// Tunables that lived in `config.toml` before they moved into the database.
-///
-/// Read once so an existing install's values are not silently dropped: when
-/// the database has no instance row yet, startup seeds it from these and logs
-/// what to delete from the file. Nothing consults them afterwards, and a
-/// malformed one is a warning rather than a failed boot — refusing to start
-/// over a key that no longer configures anything would be absurd.
-#[derive(Debug, Clone, Default)]
-pub struct Legacy {
-    pub max_file_size: Option<u64>,
-    pub media_thumbs: Option<bool>,
-    pub upload_strategy: Option<UploadStrategy>,
-}
-
-impl Legacy {
-    /// The moved keys this file still sets, named so the seeding warning can
-    /// tell the operator exactly what to delete.
-    pub fn present_keys(&self) -> Vec<&'static str> {
-        let mut keys = Vec::new();
-        if self.max_file_size.is_some() {
-            keys.push("max_file_size");
-        }
-        if self.media_thumbs.is_some() {
-            keys.push("media_thumbs");
-        }
-        if self.upload_strategy.is_some() {
-            keys.push("upload_strategy");
-        }
-        keys
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,15 +62,12 @@ struct RawConfig {
     token_ttl_secs: Option<u64>,
     db_path: Option<String>,
     session_path: Option<String>,
-    max_file_size: Option<SizeRepr>,
     // Removed keys, still parsed so a config that sets them gets told why
     // they stopped having an effect instead of silently losing them.
     web_dist: Option<String>,
     locales_dir: Option<String>,
     allowed_phones: Option<Vec<String>>,
     admin_phones: Option<Vec<String>>,
-    media_thumbs: Option<bool>,
-    upload_strategy: Option<String>,
     spill_dir: Option<String>,
 }
 
@@ -126,7 +87,6 @@ impl Default for Config {
             allowed_phones: Vec::new(),
             admin_phones: Vec::new(),
             spill_dir: "data/spill".into(),
-            legacy: Legacy::default(),
         }
     }
 }
@@ -287,33 +247,8 @@ impl Config {
         // `resolve_secret` (init/reload); user-set secrets pass through and
         // only get a warning there if they look weak.
 
-        // These three moved into the database. They are still parsed so an
-        // existing install can seed that row once, at startup.
-        let legacy = Legacy {
-            max_file_size: raw.max_file_size.and_then(|r| match r.bytes() {
-                Ok(n) => Some(n),
-                Err(e) => {
-                    tracing::warn!("ignoring config key `max_file_size`: {e}");
-                    None
-                }
-            }),
-            media_thumbs: raw.media_thumbs,
-            upload_strategy: match raw.upload_strategy.as_deref() {
-                None => None,
-                Some("stream") => Some(UploadStrategy::Stream),
-                Some("spill") => Some(UploadStrategy::Spill),
-                Some(other) => {
-                    tracing::warn!(
-                        "ignoring config key `upload_strategy`: expected \"stream\" or \"spill\", got `{other}`"
-                    );
-                    None
-                }
-            },
-        };
-
-        // Not moved into the database like the keys above — gone. Warn per
-        // key so an operator who pointed one somewhere custom learns that
-        // the server stopped reading it.
+        // Removed keys, still parsed so a config that sets them gets told
+        // why they stopped having an effect instead of silently losing them.
         for (key, set) in [
             ("web_dist", raw.web_dist.is_some()),
             ("locales_dir", raw.locales_dir.is_some()),
@@ -354,7 +289,6 @@ impl Config {
                 .filter(|p| !p.is_empty())
                 .collect(),
             spill_dir: raw.spill_dir.unwrap_or_else(|| "data/spill".into()),
-            legacy,
         })
     }
 
@@ -468,10 +402,6 @@ mod tests {
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 8080);
         assert!(!cfg.tg_configured());
-        assert!(
-            cfg.legacy.present_keys().is_empty(),
-            "a file without the moved keys has nothing to seed"
-        );
     }
 
     /// Every relative data path follows the config file, not the working
@@ -589,65 +519,22 @@ mod tests {
         assert!(none.admin_phones.is_empty());
         assert!(!none.is_admin_phone("+15550102030"));
     }
-}
-#[cfg(test)]
-mod legacy_keys {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Parallel tests share this module; keying the scratch file by content
-    /// length collided once two tests wrote the same length (55) and raced
-    /// on one file. A counter keeps every call on its own path.
-    static CALLS: AtomicU64 = AtomicU64::new(0);
-
-    fn load(text: &str) -> Config {
-        let dir = std::env::temp_dir().join("iidrive-legacy-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join(format!(
-            "{}-{}.toml",
-            text.len(),
-            CALLS.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&p, text).unwrap();
-        let cfg = Config::load(p.to_str().unwrap()).unwrap();
-        std::fs::remove_file(&p).ok();
-        cfg
-    }
-
-    /// The keys no longer configure anything directly, but they are what an
-    /// upgrading install's values arrive in — dropping them would silently
-    /// reset that install's upload cap.
-    #[test]
-    fn moved_keys_are_captured_for_seeding() {
-        let cfg =
-            load("max_file_size = \"500MB\"\nmedia_thumbs = false\nupload_strategy = \"spill\"\n");
-        assert_eq!(cfg.legacy.max_file_size, Some(500 * 1000 * 1000));
-        assert_eq!(cfg.legacy.media_thumbs, Some(false));
-        assert_eq!(cfg.legacy.upload_strategy, Some(UploadStrategy::Spill));
-        assert_eq!(
-            cfg.legacy.present_keys(),
-            vec!["max_file_size", "media_thumbs", "upload_strategy"]
-        );
-    }
-
-    /// These keys used to be validated hard enough to abort startup. They no
-    /// longer configure anything, so a stale typo must not keep the server
-    /// from booting — it is dropped with a warning instead.
-    #[test]
-    fn a_malformed_moved_key_is_ignored_rather_than_fatal() {
-        let cfg = load("upload_strategy = \"turbo\"\nmax_file_size = \"2 potatoes\"\n");
-        assert_eq!(cfg.legacy.upload_strategy, None);
-        assert_eq!(cfg.legacy.max_file_size, None);
-        assert!(cfg.legacy.present_keys().is_empty());
-    }
-
-    /// `web_dist` and `locales_dir` were removed rather than moved. A file
-    /// that still points them somewhere custom is warned about and ignored —
-    /// it must not be able to send the server looking for a UI that the
-    /// bundle never puts there.
+    /// A file that still points `web_dist`/`locales_dir` somewhere custom is
+    /// warned about and ignored — it must not send the server looking for a
+    /// UI the bundle never puts there.
     #[test]
     fn removed_asset_keys_do_not_move_the_assets() {
-        let cfg = load("web_dist = \"/nowhere/ui\"\nlocales_dir = \"/nowhere/i18n\"\n");
+        let dir = std::env::temp_dir().join("iidrive-asset-key-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("stale-assets.toml");
+        std::fs::write(
+            &p,
+            "web_dist = \"/nowhere/ui\"\nlocales_dir = \"/nowhere/i18n\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(p.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&p).ok();
         assert_eq!(cfg.web_dist, asset_path("web/dist"));
         assert_eq!(cfg.locales_dir, asset_path("locales"));
     }

@@ -62,7 +62,7 @@ async fn main() {
     }
     // Before anything can serve a request, so no upload is ever checked
     // against the placeholder cap the lazy state had to start with.
-    if let Err(e) = state.hydrate_instance(&cfg.legacy).await {
+    if let Err(e) = state.hydrate_instance().await {
         eprintln!("failed to load instance settings: {e}");
         std::process::exit(1);
     }

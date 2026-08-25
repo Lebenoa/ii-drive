@@ -21,17 +21,10 @@ pub struct FileRow {
     pub mime: String,
     /// Total size across all parts.
     pub size: i64,
-    /// First part's message id — kept for compatibility with old rows/tools.
-    pub message_id: i32,
-    /// First part's storage chat key.
-    pub chat: String,
     pub created_at: i64,
-    /// Parent folder id, "" = root. Legacy rows default to root.
-    #[serde(default)]
+    /// Parent folder id, "" = root.
     pub folder: String,
     /// One entry per uploaded message; single-part files have exactly one.
-    /// Legacy rows without `parts_json` synthesize one part from the columns.
-    #[serde(default)]
     pub parts: Vec<FilePart>,
     /// Private by default: the raw endpoint requires a session token
     /// (header or ?token=) unless the user marks the file public.
@@ -45,7 +38,7 @@ pub struct FileRow {
 const TABLE: &str = "file";
 
 const ROW_COLS: &str =
-    "uid, name, mime, size, message_id, chat, created_at, parts_json, folder, public, thumb, owner";
+    "uid, name, mime, size, created_at, parts_json, folder, public, thumb, owner";
 
 /// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
 /// unset fields as null) into "" instead of failing.
@@ -81,13 +74,9 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         name: String,
         mime: String,
         size: i64,
-        message_id: i32,
-        chat: String,
         created_at: i64,
-        #[serde(default)]
-        parts_json: Option<String>,
-        // Older rows have no folder at all; SurrealDB may also project an
-        // unset field as null, so map both to "" (root).
+        parts_json: String,
+        // SurrealDB may project an unset field as null; map that to "" (root).
         #[serde(default, deserialize_with = "null_as_empty")]
         folder: String,
         #[serde(default, deserialize_with = "null_as_false")]
@@ -100,24 +89,14 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
     }
     let raw: Raw = serde_json::from_value(v)
         .map_err(|e| DbError::Shape(format!("file row shape mismatch: {e}")))?;
-    let parts = match &raw.parts_json {
-        Some(s) => serde_json::from_str(s)
-            .map_err(|e| DbError::Shape(format!("parts shape mismatch: {e}")))?,
-        // Pre-split rows: the whole file is one message.
-        None => vec![FilePart {
-            message_id: raw.message_id,
-            chat: raw.chat.clone(),
-            size: raw.size,
-        }],
-    };
+    let parts = serde_json::from_str(&raw.parts_json)
+        .map_err(|e| DbError::Shape(format!("parts shape mismatch: {e}")))?;
     Ok(FileRow {
         owner: raw.owner,
         uid: raw.uid,
         name: raw.name,
         mime: raw.mime,
         size: raw.size,
-        message_id: raw.message_id,
-        chat: raw.chat,
         created_at: raw.created_at,
         folder: raw.folder,
         parts,
@@ -136,8 +115,6 @@ pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), 
             "name": row.name,
             "mime": row.mime,
             "size": row.size,
-            "message_id": row.message_id,
-            "chat": row.chat,
             "created_at": row.created_at,
             "parts_json": parts_json,
             "folder": row.folder,

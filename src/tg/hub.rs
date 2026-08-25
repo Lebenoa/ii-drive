@@ -489,8 +489,7 @@ fn prune_throttles(throttles: &mut HashMap<String, Throttle>) {
 }
 
 /// Per-account session files live in a `sessions/` directory beside the
-/// configured session path, so the legacy single-user file can sit next to
-/// them until it is adopted.
+/// configured session path.
 fn sessions_dir(session_path: &str) -> PathBuf {
     match Path::new(session_path)
         .parent()

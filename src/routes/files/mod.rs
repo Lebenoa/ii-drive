@@ -146,8 +146,6 @@ mod tests {
             name: "x.bin".to_string(),
             mime: "application/octet-stream".to_string(),
             size: 1,
-            message_id: 1,
-            chat: "c".to_string(),
             created_at: 0,
             folder: String::new(),
             parts: Vec::new(),

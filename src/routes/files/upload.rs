@@ -933,8 +933,6 @@ async fn persist_row(
         name,
         mime,
         size: declared as i64,
-        message_id: parts[0].message_id,
-        chat: parts[0].chat.clone(),
         created_at: now_unix(),
         folder,
         parts,

@@ -162,43 +162,20 @@ impl AppState {
         Ok(())
     }
 
-    /// Fills the tunable cache from the database, creating the row on first
-    /// run from whatever the moved `config.toml` keys in `legacy` still say.
+    /// Fills the tunable cache from the database, creating the row from the
+    /// defaults on first run.
     ///
     /// `main` calls this after [`crate::db::connect`] and before the listener
     /// binds, so no request can read the placeholder defaults the lazy
-    /// initializer had to start with.
-    ///
-    /// Seeding is what keeps an upgrade honest: an install that had
-    /// `max_file_size = "500MB"` in its file would otherwise come back up
-    /// silently accepting 2 GiB. It happens exactly once — once the row
-    /// exists it is the only source, so an operator's later change is never
-    /// undone by a key they forgot to delete.
-    pub async fn hydrate_instance(
-        &self,
-        legacy: &crate::config::Legacy,
-    ) -> Result<(), crate::db::DbError> {
+    /// initializer had to start with. Once the row exists it is the only
+    /// source; the database owns these values outright.
+    pub async fn hydrate_instance(&self) -> Result<(), crate::db::DbError> {
         let stored = match crate::db::get_instance(&self.db).await? {
             Some(stored) => stored,
             None => {
-                let base = crate::db::Instance::default();
-                let seeded = crate::db::Instance {
-                    max_file_size: legacy.max_file_size.unwrap_or(base.max_file_size),
-                    media_thumbs: legacy.media_thumbs.unwrap_or(base.media_thumbs),
-                    upload_strategy: legacy.upload_strategy.unwrap_or(base.upload_strategy),
-                };
+                let seeded = crate::db::Instance::default();
                 crate::db::set_instance(&self.db, &seeded).await?;
-                let moved = legacy.present_keys();
-                if moved.is_empty() {
-                    tracing::info!("instance settings initialized at their defaults");
-                } else {
-                    tracing::warn!(
-                        "instance settings seeded from config.toml: {} — these keys now live \
-                         in the database and the file copies are ignored, so delete them and \
-                         change these under Settings -> Uploads",
-                        moved.join(", ")
-                    );
-                }
+                tracing::info!("instance settings initialized at their defaults");
                 seeded
             }
         };
@@ -283,55 +260,17 @@ mod tests {
         AppState::scratch(crate::db::open_mem().await.expect("open test db"))
     }
 
-    /// An upgrade must carry the operator's old file values into the store,
-    /// or an install that capped uploads at 500 MB comes back up accepting
-    /// 2 GiB. Keys the file never set keep their default.
+    /// A fresh store gets the defaults row on first boot.
     #[tokio::test]
-    async fn hydrating_seeds_the_row_from_the_moved_config_keys() {
+    async fn hydrating_seeds_the_row_from_the_defaults() {
         let state = scratch().await;
-        state
-            .hydrate_instance(&crate::config::Legacy {
-                max_file_size: Some(500 * 1000 * 1000),
-                media_thumbs: Some(false),
-                upload_strategy: None,
-            })
-            .await
-            .expect("hydrate");
+        state.hydrate_instance().await.expect("hydrate");
 
-        assert_eq!(state.instance().max_file_size, 500 * 1000 * 1000);
-        assert!(!state.instance().media_thumbs);
         assert_eq!(
-            state.instance().upload_strategy,
-            crate::db::UploadStrategy::Stream,
-            "a key the file never set keeps its default"
+            state.instance(),
+            crate::db::Instance::default(),
+            "a fresh install runs on the defaults"
         );
-    }
-
-    /// Seeding happens once. A stale key left in `config.toml` must not
-    /// quietly undo a change the operator made through the API — otherwise
-    /// every restart would re-apply the file and the setting would look
-    /// haunted.
-    #[tokio::test]
-    async fn a_stored_row_outranks_the_config_file() {
-        let state = scratch().await;
-        let file = crate::config::Legacy {
-            max_file_size: Some(500 * 1000 * 1000),
-            media_thumbs: None,
-            upload_strategy: None,
-        };
-        state.hydrate_instance(&file).await.expect("first boot");
-
-        state
-            .set_instance(crate::db::Instance {
-                max_file_size: 3 * 1024 * 1024 * 1024,
-                ..state.instance()
-            })
-            .await
-            .expect("operator raises the cap");
-
-        // Same file, second boot.
-        state.hydrate_instance(&file).await.expect("restart");
-        assert_eq!(state.instance().max_file_size, 3 * 1024 * 1024 * 1024);
     }
 
     /// The cache is what every upload reads, so a stored change has to be
@@ -340,10 +279,7 @@ mod tests {
     #[tokio::test]
     async fn setting_an_instance_value_is_visible_immediately_and_persisted() {
         let state = scratch().await;
-        state
-            .hydrate_instance(&crate::config::Legacy::default())
-            .await
-            .expect("hydrate");
+        state.hydrate_instance().await.expect("hydrate");
         assert!(state.instance().media_thumbs);
 
         let next = crate::db::Instance {
@@ -353,7 +289,6 @@ mod tests {
         };
         state.set_instance(next).await.expect("save");
 
-        assert_eq!(state.instance(), next, "the cache is updated in place");
         assert_eq!(
             crate::db::get_instance(&state.db).await.expect("read"),
             Some(next),
@@ -364,8 +299,9 @@ mod tests {
     /// The point of the epoch: logout has to kill tokens that are still well
     /// inside their 30-day TTL, and a token minted after the bump must work.
     #[tokio::test]
-    async fn bumping_the_epoch_revokes_outstanding_tokens() {
+    async fn bumping_the_epoch_kills_earlier_tokens() {
         let state = scratch().await;
+        state.hydrate_instance().await.expect("hydrate");
         let stale = state
             .tokens
             .issue(11, state.epoch(11).await.expect("epoch"));
