@@ -45,8 +45,14 @@ function flatten(node: unknown, prefix = '', out: Record<string, string> = {}) {
 async function fetchDict(code: string): Promise<Record<string, string>> {
 	// English ships beside the app; other languages come from the repo,
 	// with the local server as a last-resort override point.
+	//
+	// Server paths are absolute on purpose: the server mounts them at
+	// `/locales/`, and a relative URL resolves against the current route, so
+	// a hard load of /settings/upload would ask for /settings/locales/en.json
+	// — which the SPA fallback answers with index.html, leaving the whole UI
+	// showing raw keys.
 	if (code === FALLBACK) {
-		return flatten(await (await fetch(`locales/${code}.json`)).json());
+		return flatten(await (await fetch(`/locales/${code}.json`)).json());
 	}
 	for (const base of REPO_BASES) {
 		try {
@@ -56,7 +62,7 @@ async function fetchDict(code: string): Promise<Record<string, string>> {
 			// try the next mirror
 		}
 	}
-	const res = await fetch(`locales/${encodeURIComponent(code)}.json`);
+	const res = await fetch(`/locales/${encodeURIComponent(code)}.json`);
 	if (!res.ok) throw new Error(`locale "${code}" not available`);
 	return flatten(await res.json());
 }
@@ -106,7 +112,7 @@ export async function listLocales(): Promise<LocaleMeta[]> {
 		}
 	}
 	try {
-		const res = await fetch('locales/manifest.json');
+		const res = await fetch('/locales/manifest.json');
 		if (res.ok) return parse(await res.json());
 	} catch {
 		// Server without a locales folder — degrade to English only.
