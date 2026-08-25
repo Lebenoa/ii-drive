@@ -214,6 +214,11 @@ pub(crate) fn anchored(config_path: &str, p: &str) -> String {
 
 /// Applies [`anchored`] to every path the config carries.
 fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
+    // `db_path` matters most: unanchored, starting the binary from another
+    // directory creates a fresh empty store there and every existing file
+    // appears to vanish. `secret.key` is written beside it, so sessions
+    // followed the same wrong directory.
+    cfg.db_path = anchored(config_path, &cfg.db_path);
     cfg.session_path = anchored(config_path, &cfg.session_path);
     cfg.web_dist = anchored(config_path, &cfg.web_dist);
     cfg.locales_dir = anchored(config_path, &cfg.locales_dir);
@@ -423,6 +428,43 @@ mod tests {
         assert!(
             cfg.legacy.present_keys().is_empty(),
             "a file without the moved keys has nothing to seed"
+        );
+    }
+
+    /// Every relative data path follows the config file, not the working
+    /// directory. `db_path` was the one omission, and it is the expensive
+    /// one: launching from elsewhere silently created a second, empty store
+    /// and the drive looked wiped.
+    #[test]
+    fn relative_data_paths_follow_the_config_file() {
+        let cfg = anchor_paths(Config::default(), "/srv/ii-drive/config.toml");
+        let base = std::path::Path::new("/srv/ii-drive");
+
+        for (name, got) in [
+            ("db_path", &cfg.db_path),
+            ("session_path", &cfg.session_path),
+            ("web_dist", &cfg.web_dist),
+            ("locales_dir", &cfg.locales_dir),
+            ("spill_dir", &cfg.spill_dir),
+        ] {
+            assert!(
+                std::path::Path::new(got).starts_with(base),
+                "{name} was left relative to the working directory: {got}"
+            );
+        }
+    }
+
+    /// An absolute path is the operator being explicit; a config in the
+    /// working directory has nothing to anchor against.
+    #[test]
+    fn anchoring_leaves_absolute_paths_and_bare_config_names_alone() {
+        assert_eq!(
+            anchored("/srv/ii-drive/config.toml", "/var/lib/ii-drive/db"),
+            "/var/lib/ii-drive/db"
+        );
+        assert_eq!(
+            anchored("config.toml", "data/drive.surrealkv"),
+            "data/drive.surrealkv"
         );
     }
 
