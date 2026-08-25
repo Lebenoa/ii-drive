@@ -386,6 +386,22 @@ pub async fn save_rules(
 
 const MB: u64 = 1024 * 1024;
 
+/// POST /api/thumbs/sweep — removes preview files whose row is gone.
+/// Operator-only, same reasoning as the instance endpoints. Also runs once
+/// at startup, so this is for cleaning up after a mid-session crash.
+pub async fn sweep_thumbs(
+    Extension(Caller(uid)): Extension<Caller>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let state = crate::state::get();
+    if !state.is_admin(uid).await {
+        return Err(ApiError::not_found("not found"));
+    }
+    let removed = crate::routes::files::sweep(state)
+        .await
+        .map_err(|e| ApiError::internal(e))?;
+    Ok(Json(json!({ "removed": removed })))
+}
+
 /// GET /api/settings — the caller's upload-split threshold in MiB
 /// (0 = never split).
 pub async fn get_settings(

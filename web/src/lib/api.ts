@@ -264,6 +264,11 @@ export interface Instance {
   upload_strategy: 'stream' | 'spill';
 }
 
+/** POST /api/thumbs/sweep — delete preview files whose row is gone. */
+export function sweepThumbs(): Promise<{ removed: number }> {
+  return request('/api/thumbs/sweep', { method: 'POST' });
+}
+
 /** GET /api/instance — the instance-wide upload settings. */
 export function getInstance(): Promise<Instance> {
   return request('/api/instance');

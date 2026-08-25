@@ -5,7 +5,9 @@ mod schema;
 mod settings;
 
 pub use bots::{BotInfo, get_bots, remove_bot, set_bots};
-pub use files::{FilePart, FileRow, counts, delete, get, insert, list, set_folder, set_public};
+pub use files::{
+    FilePart, FileRow, counts, delete, get, insert, list, set_folder, set_public, uids,
+};
 pub use folders::{
     FolderRow, create_folder, delete_folder, folder_is_empty, get_folder, list_folders,
 };

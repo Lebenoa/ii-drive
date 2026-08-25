@@ -48,6 +48,7 @@ pub fn build_router() -> Router {
             "/api/instance",
             get(crate::routes::get_instance).put(crate::routes::save_instance),
         )
+        .route("/api/thumbs/sweep", post(crate::routes::sweep_thumbs))
         .route(
             "/api/internal-db/tables",
             get(crate::routes::internal_db_tables),

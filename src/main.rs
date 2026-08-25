@@ -78,6 +78,22 @@ async fn main() {
         Err(e) => tracing::warn!("could not count database rows: {e}"),
     }
 
+    // Orphaned previews (crash between row delete and file unlink) are
+    // swept at startup and then hourly: a long-running server never gets
+    // the boot-time cleanup for free.
+    tokio::spawn(async {
+        let state = crate::state::get();
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+        loop {
+            ticker.tick().await;
+            match crate::routes::sweep(state).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("thumbnail sweep removed {n} orphans"),
+                Err(e) => tracing::warn!("thumbnail sweep failed: {e}"),
+            }
+        }
+    });
+
     if let Err(e) = app::run().await {
         eprintln!("server error: {e}");
         std::process::exit(1);

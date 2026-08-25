@@ -88,6 +88,29 @@ pub(crate) async fn remove(dir: &std::path::Path, uid: &str) {
     let _ = tokio::fs::remove_file(thumb_path(dir, uid)).await;
 }
 
+/// Deletes preview files whose row is gone (a crash between row delete
+/// and preview unlink leaves these behind). Returns how many went away.
+pub async fn sweep(state: &AppState) -> Result<usize, String> {
+    let live = crate::db::uids(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut rd = tokio::fs::read_dir(&state.thumbs_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut removed = 0;
+    while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "avif")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && !live.contains(stem)
+            && tokio::fs::remove_file(&path).await.is_ok()
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Normalizes ad-hoc still-image sources (Telegram stripped previews,
 /// embedded cover art) into the stored thumbnail form: raw AVIF bytes.
 /// `None` when the bytes do not parse as a decodable still image.

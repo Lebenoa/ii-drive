@@ -17,8 +17,11 @@ pub use botfather::{
 pub use session::{
     add_bot, auth_code, auth_logout, auth_password, auth_phone, avatar, create_channel,
     get_instance, get_rules, get_settings, list_bots, list_channels, me, remove_bot, save_instance,
-    save_rules, save_settings, select_channels,
+    save_rules, save_settings, select_channels, sweep_thumbs,
 };
 
+/// The thumbnail sweeper is also driven by the startup/interval loop in
+/// `main`, not just the operator endpoint.
+pub use files::sweep;
 pub use internal_db::{query as internal_db_query, tables as internal_db_tables};
 pub use locales::{locale as locale_file, manifest as locale_manifest};

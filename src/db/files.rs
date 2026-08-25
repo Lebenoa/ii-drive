@@ -198,6 +198,19 @@ pub async fn delete(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u64, DbE
     Ok(deleted.len() as u64)
 }
 
+/// Every file uid; the thumbnail sweeper diffs the thumbs directory
+/// against this set.
+pub async fn uids(
+    db: &surrealdb::Surreal<Conn>,
+) -> Result<std::collections::HashSet<String>, DbError> {
+    let mut res = db.query("SELECT uid FROM file").await?;
+    let rows: Vec<serde_json::Value> = res.take(0)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.get("uid").and_then(|u| u.as_str().map(str::to_string)))
+        .collect())
+}
+
 /// (files, folders) row counts for the startup log.
 pub async fn counts(db: &surrealdb::Surreal<Conn>) -> Result<(u64, u64), DbError> {
     let mut res = db

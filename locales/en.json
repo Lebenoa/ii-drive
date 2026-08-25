@@ -121,10 +121,12 @@
     "title": "Instance settings",
     "hint": "Server-wide upload behaviour, shared by every account. Stored in the database and applied immediately — no restart, no config.toml edit.",
     "cap": "Upload limit",
-    "thumbs": "Generate video and image thumbnails with ffmpeg",
+    "thumbs": "Generate thumbnails (in-process for images, ffmpeg for videos)",
     "strategy": "Strategy",
     "strategyStream": "Stream — relay straight to Telegram, no disk use",
-    "strategySpill": "Spill — buffer to disk first, faster on fast links"
+    "strategySpill": "Spill — buffer to disk first, faster on fast links",
+    "sweepThumbs": "Clear orphan thumbnails",
+    "swept": "Removed {count} orphan thumbnail{s}"
   },
   "other": {
     "language": "Language",

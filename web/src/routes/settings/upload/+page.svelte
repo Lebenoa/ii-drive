@@ -3,6 +3,7 @@
 </svelte:head>
 
 <script lang="ts">
+  import { sweepThumbs as apiSweepThumbs } from '$lib/api';
   import {
     getInstance,
     getRules,
@@ -66,6 +67,26 @@
       instanceError = err instanceof Error ? err.message : String(err);
     } finally {
       instanceSaving = false;
+    }
+  }
+
+  // --- Orphan thumbnail sweep (operator-only) ---
+  let sweeping = $state(false);
+  let sweepMsg = $state('');
+  let sweepError = $state('');
+
+  async function sweepThumbs(): Promise<void> {
+    if (sweeping) return;
+    sweeping = true;
+    sweepMsg = '';
+    sweepError = '';
+    try {
+      const { removed } = await apiSweepThumbs();
+      sweepMsg = t('instance.swept', { count: removed, s: removed === 1 ? '' : 's' });
+    } catch (err) {
+      sweepError = err instanceof Error ? err.message : String(err);
+    } finally {
+      sweeping = false;
     }
   }
 
@@ -182,6 +203,19 @@
           <input type="checkbox" bind:checked={instance.media_thumbs} />
           <span>{t('instance.thumbs')}</span>
         </label>
+        <div class="split-row">
+          <button
+            class="btn ghost busy-btn"
+            type="button"
+            disabled={sweeping}
+            onclick={() => void sweepThumbs()}
+          >
+            {#if sweeping}<span class="spinner btn-spin"></span>{/if}
+            {t('instance.sweepThumbs')}
+          </button>
+          {#if sweepMsg}<span class="ok-text">{sweepMsg}</span>{/if}
+        </div>
+        {#if sweepError}<p class="error-text">{sweepError}</p>{/if}
         <div class="split-row">
           <label class="cap-label" for="strategy">{t('instance.strategy')}</label>
           <select id="strategy" class="field" bind:value={instance.upload_strategy}>
