@@ -346,5 +346,5 @@ Telegram) and logs you out of MTProto.
 - Bot tokens added through the settings UI are stored **plaintext** in the
   embedded SurrealDB — treat `data/` like any other secret store.
 - Uploads are streamed: memory use stays constant regardless of file size.
-- Telegram free-account limits apply (2 GiB/file, ~4 GiB/day for free
-  accounts); premium accounts raise both but this server caps at 2 GiB.
+- Telegram free-account hard limit: 2 GiB per file. No published daily cap —
+  abuse triggers flood wait errors. This server caps at 2 GiB.
