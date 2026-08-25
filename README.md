@@ -11,7 +11,7 @@ the interface.
 - **Multi-account concurrent sessions** — every allowed phone number signs in simultaneously, with isolated files, folders, bots, routing rules and settings.
 - **Download bot pool** — add several bots to spread upload and download load across separate MTProto connections for higher throughput.
 - **Split uploads** — files above a threshold are cut into parts (at most 64) and uploaded in parallel, round-robin across storage channels.
-- **Transparent chunking** — files above Telegram's per-document cap are always chunked; parts are re-joined on stream/download and deleted together.
+- **Transparent chunking** — `max_file_size` above Telegram's per-document cap is honored by splitting into parts (≤64); parts are re-joined on download and deleted together.
 - **Thumbnail extraction** — audio cover art is parsed straight from ID3/FLAC bytes (no ffmpeg); videos and images get background ffmpeg thumbnails.
 - **On-demand i18n** — only English ships; other languages download at runtime from GitHub, so translations improve without rebuilding.
 - **Guided @BotFather chat** — create or import download bots through a resumable in-app conversation with @BotFather.
@@ -24,20 +24,18 @@ the interface.
 | Aspect | ii-drive | Teldrive |
 |---|---|---|
 | **Language** | Rust | Go |
-| **Database** | Embedded SurrealDB (SurrealKv) — no external service | PostgreSQL (or BoltDB / memory) |
-| **Frontend** | SvelteKit SPA, served from the binary | Separate web UI (React-based) |
-| **Accounts** | Multi-tenant: several Telegram accounts signed in at once, fully isolated | Single user per session |
-| **Bots** | Built-in @BotFather chat; guided create/import; auto-invite into channels | Manual bot configuration |
+| **Database** | Embedded SurrealDB (SurrealKv) — no external service | PostgreSQL; sessions may use Postgres/Bolt/memory |
+| **Frontend** | SvelteKit SPA, served from the binary | Separate React + Vite UI |
+| **Accounts** | Multi-tenant: several Telegram accounts signed in at once, fully isolated | Multi-user via username allowlist, data isolated per `user_id` |
+| **Bots** | Built-in @BotFather chat; guided create/import; auto-invite into channels | Bot tokens added via UI, no @BotFather flow |
 | **Rclone / WebDAV** | No — pure HTTP API + web UI | Yes — rclone remote integration |
-| **Chunking** | Configurable split threshold, ≤64 parts, round-robin across channels, rotating bot sessions | Chunked with configurable size, threads, retention |
-| **Thumbnails** | Audio cover art from ID3/FLAC; ffmpeg for video/images | Not documented |
-| **Deployment** | One binary: embedded DB + web assets; TOML config | Binary + separate UI + external DB; TOML/YAML config |
+| **Chunking** | Configurable split threshold, ≤64 parts, round-robin across channels, rotating bot sessions | Chunked uploads; configurable threads, retries, retention; optional encryption |
+| **Thumbnails** | Audio cover art from ID3/FLAC; ffmpeg for video/images | Optional imgproxy image resizing/thumbnails |
+| **Deployment** | Single binary + `web/dist` folder + embedded DB file; TOML config | Binary + separate React UI + PostgreSQL; optional Redis, imgproxy |
 | **Config reload** | `POST /api/config/reload` hot-applies runtime fields | Restart required |
-| **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/config/reload` | Admin API / UI |
-| **Max file size** | 2 GiB (Telegram free-account cap) | Same Telegram cap |
+| **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/config/reload` | CLI check/clean utilities |
+| **Max file size** | 2 GiB default, configurable; larger files chunk into parts | 2 GB per Telegram document, chunked |
 | **Upload strategy** | `stream` (relay) or `spill` (disk-buffer) | Stream with configurable buffers |
-
-##
 
 ## Get started
 
@@ -297,8 +295,8 @@ just log in again through the web UI.
 ### Requirements
 
 - Rust 1.85+ (the crate is edition 2024; built with 1.98)
-- Node.js 18+ for the web UI — any package manager/runner works
-  (npm, pnpm, bun, yarn, nub, …); examples use `nub`
+- Node.js 20.19+ (or 22.12+) for the web UI — any package manager/runner
+  works (npm, pnpm, bun, yarn, nub, …); examples use `nub`
 - A Telegram **api_id / api_hash** from <https://my.telegram.org/apps>
 - A Telegram account (user account, not a bot) for uploads
 
@@ -327,11 +325,12 @@ cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `n
   [grammers](https://github.com/Lonami/grammers) (MTProto), embedded
   [SurrealDB](https://surrealdb.com) (SurrealKv) for metadata.
 - **Frontend:** [SvelteKit](https://kit.svelte.dev) (Svelte 5) with
-  `adapter-static` — a pure-SPA build served straight from the Rust binary.
-- **Max file size:** 2 GiB (Telegram bot-free account upload limit).
+  `adapter-static` — a pure-SPA build served by the Rust server from `web_dist`.
+- **Max file size:** 2 GiB default (Telegram free-account per-file limit);
+  configurable, larger files upload via transparent chunking.
 - **Thumbnails:** ffmpeg (optional, on `PATH`) for video/images; audio cover art parsed from ID3/FLAC.
-- **Build:** Rust 1.85+ (edition 2024), Node.js 18+ for the web UI.
-- **Deployment:** single binary with embedded web assets and database — no external dependencies.
+- **Build:** Rust 1.85+ (edition 2024), Node.js 20.19+ (or 22.12+) for the web UI (SvelteKit 2 / Vite 8).
+- **Deployment:** single binary plus a `web/dist` assets folder and an embedded SurrealDB file — no external services.
 
 The database is embedded — no external SurrealDB server. Both `data/` files
 are safe to back up together; deleting them resets metadata (files remain in
@@ -345,6 +344,7 @@ Telegram) and logs you out of MTProto.
   a trusted network or front it with your own auth proxy.
 - Bot tokens added through the settings UI are stored **plaintext** in the
   embedded SurrealDB — treat `data/` like any other secret store.
-- Uploads are streamed: memory use stays constant regardless of file size.
+- Uploads stream in `stream` mode: memory use stays constant regardless of file size; `spill` mode buffers the whole file to disk instead.
 - Telegram free-account hard limit: 2 GiB per file. No published daily cap —
-  abuse triggers flood wait errors. This server caps at 2 GiB.
+  abuse triggers flood wait errors. The server defaults `max_file_size` to
+  2 GiB (configurable); larger files upload via transparent chunking.
