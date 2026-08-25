@@ -30,15 +30,10 @@ pub struct FileRow {
     /// (header or ?token=) unless the user marks the file public.
     #[serde(default)]
     pub public: bool,
-    /// Normalized preview (≤320px AVIF, base64); None for files without one.
-    #[serde(default)]
-    pub thumb: Option<String>,
 }
-
 const TABLE: &str = "file";
 
-const ROW_COLS: &str =
-    "uid, name, mime, size, created_at, parts_json, folder, public, thumb, owner";
+const ROW_COLS: &str = "uid, name, mime, size, created_at, parts_json, folder, public, owner";
 
 /// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
 /// unset fields as null) into "" instead of failing.
@@ -81,8 +76,6 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         folder: String,
         #[serde(default, deserialize_with = "null_as_false")]
         public: bool,
-        #[serde(default)]
-        thumb: Option<String>,
         // Missing owner stays UNOWNED: invisible to every tenant filter.
         #[serde(default, deserialize_with = "null_as_zero")]
         owner: i64,
@@ -101,7 +94,6 @@ fn to_row(v: serde_json::Value) -> Result<FileRow, DbError> {
         folder: raw.folder,
         parts,
         public: raw.public,
-        thumb: raw.thumb,
     })
 }
 
@@ -113,13 +105,12 @@ pub async fn insert(db: &surrealdb::Surreal<Conn>, row: &FileRow) -> Result<(), 
         .content(serde_json::json!({
             "uid": row.uid,
             "name": row.name,
+            "folder": row.folder,
             "mime": row.mime,
             "size": row.size,
             "created_at": row.created_at,
             "parts_json": parts_json,
-            "folder": row.folder,
             "public": row.public,
-            "thumb": row.thumb,
             "owner": row.owner,
         }))
         .await?;
@@ -178,22 +169,6 @@ pub async fn set_folder(
         .query("UPDATE file SET folder = $f WHERE uid = $uid RETURN AFTER")
         .bind(("uid", uid.to_string()))
         .bind(("f", folder.to_string()))
-        .await?;
-    let updated: Vec<serde_json::Value> = res.take(0)?;
-    Ok(!updated.is_empty())
-}
-
-/// Stores a thumbnail after the fact (video first-frame extraction runs
-/// in the background). false when the uid does not exist.
-pub async fn set_thumb(
-    db: &surrealdb::Surreal<Conn>,
-    uid: &str,
-    thumb_b64: &str,
-) -> Result<bool, DbError> {
-    let mut res = db
-        .query("UPDATE file SET thumb = $t WHERE uid = $uid RETURN AFTER")
-        .bind(("uid", uid.to_string()))
-        .bind(("t", thumb_b64.to_string()))
         .await?;
     let updated: Vec<serde_json::Value> = res.take(0)?;
     Ok(!updated.is_empty())

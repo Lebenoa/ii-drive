@@ -150,7 +150,6 @@ mod tests {
             folder: String::new(),
             parts: Vec::new(),
             public,
-            thumb: None,
         }
     }
 

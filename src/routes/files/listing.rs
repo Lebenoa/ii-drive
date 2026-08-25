@@ -69,7 +69,13 @@ pub async fn list_files(
         q.offset.unwrap_or(0),
     )
     .await?;
-    let files: Vec<FileDto> = rows.into_iter().map(Into::into).collect();
+    let files: Vec<FileDto> = rows
+        .into_iter()
+        .map(|r| {
+            let has_thumb = super::thumbs::exists(&state.thumbs_dir, &r.uid);
+            FileDto::new(r, has_thumb)
+        })
+        .collect();
     Ok(Json(serde_json::json!({ "files": files })))
 }
 
@@ -112,5 +118,8 @@ pub async fn delete_file(
         }
         return Err(ApiError::internal(e));
     }
+    // Only after the delete is fully committed: a restore above must keep
+    // the preview so the file stays intact for the retry.
+    super::thumbs::remove(&state.thumbs_dir, &row.uid).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

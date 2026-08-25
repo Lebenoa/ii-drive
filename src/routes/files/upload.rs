@@ -59,7 +59,7 @@ struct StoredFile {
     declared: u64,
     folder: String,
     parts: Vec<crate::db::FilePart>,
-    thumb_b64: Option<String>,
+    thumb: Option<Vec<u8>>,
     head: Vec<u8>,
 }
 
@@ -352,7 +352,7 @@ pub async fn upload_file(
     // Collect one message id per part; on any failure, roll back the parts
     // that did land so no orphan stays behind.
     let mut parts: Vec<crate::db::FilePart> = Vec::with_capacity(nparts);
-    let mut thumb_b64: Option<String> = None;
+    let mut thumb_avif: Option<Vec<u8>> = None;
     let mut first_err: Option<String> = None;
     for (i, u) in uploaders.into_iter().enumerate() {
         let res = u
@@ -362,9 +362,9 @@ pub async fn upload_file(
         match res {
             Ok((message_id, _, _, thumb)) => {
                 if let Some(raw) = thumb
-                    && thumb_b64.is_none()
+                    && thumb_avif.is_none()
                 {
-                    thumb_b64 = super::thumbs::thumb_b64(raw).await;
+                    thumb_avif = super::thumbs::thumb_bytes(raw).await;
                 }
                 parts.push(crate::db::FilePart {
                     message_id,
@@ -406,7 +406,7 @@ pub async fn upload_file(
             declared,
             folder,
             parts,
-            thumb_b64,
+            thumb: thumb_avif,
             head: head.clone(),
         },
     )
@@ -727,7 +727,7 @@ async fn spill_upload(
     } else {
         mime
     };
-    let mut thumb_b64 = None;
+    let mut thumb = None;
     if let Some(jpeg) = tg_thumb.or_else(|| {
         // Telegram makes no stripped thumbnail for audio; fall back to the
         // embedded cover art captured from the stream head.
@@ -735,7 +735,7 @@ async fn spill_upload(
             .then(|| crate::art::extract(&head))
             .flatten()
     }) {
-        thumb_b64 = super::thumbs::thumb_b64(jpeg).await;
+        thumb = super::thumbs::thumb_bytes(jpeg).await;
     }
     tracing::info!(%name, parts = plan.nparts, %declared, "uploaded file");
     persist_row(
@@ -748,7 +748,7 @@ async fn spill_upload(
             declared,
             folder,
             parts,
-            thumb_b64,
+            thumb,
             head: head.clone(),
         },
     )
@@ -857,7 +857,7 @@ pub(crate) async fn store_from_file(
 
     let (parts, tg_thumb) = collect_uploaders(uploaders, &plan, &tg).await?;
 
-    let mut thumb_b64 = None;
+    let mut thumb = None;
     if let Some(jpeg) = tg_thumb.or_else(|| {
         // Telegram makes no stripped thumbnail for audio; fall back to the
         // embedded cover art captured from the buffer head.
@@ -865,7 +865,7 @@ pub(crate) async fn store_from_file(
             .then(|| crate::art::extract(head))
             .flatten()
     }) {
-        thumb_b64 = super::thumbs::thumb_b64(jpeg).await;
+        thumb = super::thumbs::thumb_bytes(jpeg).await;
     }
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     persist_row(
@@ -878,7 +878,7 @@ pub(crate) async fn store_from_file(
             declared,
             folder: file.folder,
             parts,
-            thumb_b64,
+            thumb,
             head: head.to_vec(),
         },
     )
@@ -897,7 +897,7 @@ async fn persist_row(
         declared,
         mut folder,
         parts,
-        mut thumb_b64,
+        mut thumb,
         head,
     } = file;
     let head = head.as_slice();
@@ -917,12 +917,12 @@ async fn persist_row(
     {
         folder = rule.folder.clone();
     }
-    if thumb_b64.is_none()
+    if thumb.is_none()
         && mime.starts_with("audio/")
         && let Some(img) = crate::art::extract(head)
-        && let Some(b64) = super::thumbs::thumb_b64(img).await
+        && let Some(avif) = super::thumbs::thumb_bytes(img).await
     {
-        thumb_b64 = Some(b64);
+        thumb = Some(avif);
     }
     let row = FileRow {
         owner: uid,
@@ -934,15 +934,21 @@ async fn persist_row(
         folder,
         parts,
         public: false,
-        thumb: thumb_b64,
     };
     if let Err(e) = crate::db::insert(&state.db, &row).await {
         // No metadata row means the messages are unmanageable orphans.
         cleanup_parts(&tg, &row.parts).await;
         return Err(e.into());
     }
+    if let Some(avif) = thumb
+        && let Err(e) = super::thumbs::write(&state.thumbs_dir, &row.uid, &avif).await
+    {
+        // The row exists and is served fine; only the preview is missing,
+        // and the regeneration gate below covers it on a later upload.
+        tracing::warn!("thumb write failed for {}: {e}", row.uid);
+    }
     if crate::state::get().instance().media_thumbs
-        && row.thumb.is_none()
+        && !super::thumbs::exists(&state.thumbs_dir, &row.uid)
         && (row.mime.starts_with("video/") || row.mime.starts_with("image/"))
     {
         let file_uid = row.uid.clone();
@@ -954,5 +960,8 @@ async fn persist_row(
             extract_media_thumb(state, uid, &file_uid, &mime, part0).await;
         });
     }
-    Ok(Json(serde_json::json!({ "file": FileDto::from(row) })))
+    let has_thumb = super::thumbs::exists(&state.thumbs_dir, &row.uid);
+    Ok(Json(
+        serde_json::json!({ "file": FileDto::new(row, has_thumb) }),
+    ))
 }

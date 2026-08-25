@@ -40,13 +40,13 @@ static FFMPEG: LazyLock<bool> = LazyLock::new(|| {
         .is_ok_and(|o| !o.stdout.is_empty())
 });
 
-/// Decodes arbitrary still-image bytes and re-encodes them as a base64
-/// AVIF thumbnail (aspect-preserving fit in [`THUMB_EDGE`]).
+/// Decodes arbitrary still-image bytes and re-encodes them as raw AVIF
+/// thumbnail bytes (aspect-preserving fit in [`THUMB_EDGE`]).
 ///
 /// Pure CPU — callers keep it off the async workers via
 /// `spawn_blocking`. Decode limits are explicit: the bytes are untrusted
 /// uploads, so declared dimensions are capped rather than trusted.
-fn encode_thumb_b64(bytes: &[u8]) -> Result<String, String> {
+fn encode_thumb(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
@@ -65,20 +65,38 @@ fn encode_thumb_b64(bytes: &[u8]) -> Result<String, String> {
             ExtendedColorType::Rgb8,
         )
         .map_err(|e| e.to_string())?;
-    use base64::Engine as _;
-    Ok(base64::engine::general_purpose::STANDARD.encode(buf))
+    Ok(buf)
+}
+
+/// Filesystem location of a file uid's stored thumbnail.
+fn thumb_path(dir: &std::path::Path, uid: &str) -> std::path::PathBuf {
+    dir.join(format!("{uid}.avif"))
+}
+
+/// Whether a stored thumbnail exists for the uid.
+pub(crate) fn exists(dir: &std::path::Path, uid: &str) -> bool {
+    thumb_path(dir, uid).is_file()
+}
+
+/// Writes thumbnail bytes for a uid into `dir`.
+pub(crate) async fn write(dir: &std::path::Path, uid: &str, bytes: &[u8]) -> std::io::Result<()> {
+    tokio::fs::write(thumb_path(dir, uid), bytes).await
+}
+
+/// Removes a stored thumbnail, ignoring absence.
+pub(crate) async fn remove(dir: &std::path::Path, uid: &str) {
+    let _ = tokio::fs::remove_file(thumb_path(dir, uid)).await;
 }
 
 /// Normalizes ad-hoc still-image sources (Telegram stripped previews,
-/// embedded cover art) into the stored thumbnail form: base64 AVIF.
+/// embedded cover art) into the stored thumbnail form: raw AVIF bytes.
 /// `None` when the bytes do not parse as a decodable still image.
-pub(crate) async fn thumb_b64(bytes: Vec<u8>) -> Option<String> {
-    tokio::task::spawn_blocking(move || encode_thumb_b64(&bytes))
+pub(crate) async fn thumb_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    tokio::task::spawn_blocking(move || encode_thumb(&bytes))
         .await
         .ok()?
         .ok()
 }
-
 /// Extracts and stores a thumbnail for a freshly uploaded file.
 ///
 /// Images are decoded in-process from the first part; videos get one
@@ -187,9 +205,8 @@ pub async fn extract_media_thumb(
     };
     let _ = tokio::fs::remove_file(&path).await;
     let Some(raw) = raw else { return };
-
-    let b64 = match tokio::task::spawn_blocking(move || encode_thumb_b64(&raw)).await {
-        Ok(Ok(b64)) => b64,
+    let avif = match tokio::task::spawn_blocking(move || encode_thumb(&raw)).await {
+        Ok(Ok(avif)) => avif,
         Ok(Err(e)) => {
             tracing::info!("thumbnail encode failed for {uid}: {e}");
             return;
@@ -199,12 +216,13 @@ pub async fn extract_media_thumb(
             return;
         }
     };
-    match crate::db::set_thumb(&state.db, uid, &b64).await {
-        Ok(true) => tracing::info!("thumbnail stored for {uid}"),
-        Ok(false) => tracing::warn!("row {uid} vanished before thumb stored"),
-        Err(e) => tracing::warn!("thumb store failed for {uid}: {e}"),
+    if let Err(e) = write(&state.thumbs_dir, uid, &avif).await {
+        tracing::warn!("thumb store failed for {uid}: {e}");
+    } else {
+        tracing::info!("thumbnail stored for {uid}");
     }
 }
+
 /// GET /api/files/{id}/thumb — tiny cached AVIF; same auth rules as raw.
 pub async fn file_thumb(
     Path(id): Path<String>,
@@ -226,40 +244,26 @@ pub async fn file_thumb(
     if !super::may_read(&state.tokens, &row, &q, bearer_user) {
         return Err(ApiError::not_found("file not found"));
     }
-
-    let b64 = row
-        .thumb
-        .ok_or_else(|| ApiError::not_found("no thumbnail"))?;
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| ApiError::internal(format!("thumb decode: {e}")))?;
-
-    // New rows hold AVIF; the other branches serve legacy rows written
-    // by the earlier ffmpeg WebP and in-process JPEG pipelines.
-    let ctype = if bytes.get(4..8) == Some(b"ftyp")
-        && bytes.get(8..12).is_some_and(|b| b.starts_with(b"avi"))
-    {
-        "image/avif"
-    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        "image/png"
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        "image/webp"
-    } else {
-        "image/jpeg"
+    // A missing file is the same "no thumbnail" the old absent column
+    // produced; other read failures are genuine server errors.
+    let bytes = match tokio::fs::read(thumb_path(&state.thumbs_dir, &id)).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found("no thumbnail"));
+        }
+        Err(e) => return Err(ApiError::internal(format!("thumb read: {e}"))),
     };
     Response::builder()
-        .header(header::CONTENT_TYPE, ctype)
+        .header(header::CONTENT_TYPE, "image/avif")
         .header(header::CACHE_CONTROL, "private, max-age=86400, immutable")
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("response build: {e}")))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
+
     /// A real still image round-trips: PNG in, AVIF out, downscaled to
     /// the thumb edge. Guards the decode-limits and RGB-encode wiring
     /// the whole thumbnail pipeline now leans on. The result cannot be
@@ -273,10 +277,7 @@ mod tests {
         src.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
 
-        let b64 = encode_thumb_b64(&png).unwrap();
-        let avif = base64::engine::general_purpose::STANDARD
-            .decode(&b64)
-            .unwrap();
+        let avif = encode_thumb(&png).unwrap();
         assert_eq!(avif.get(4..8), Some(b"ftyp" as &[u8]));
         assert!(
             avif.get(8..12).is_some_and(|b| b.starts_with(b"avi")),
@@ -302,7 +303,7 @@ mod tests {
     /// Garbage yields a clean failure, not a panic.
     #[test]
     fn garbage_fails_cleanly() {
-        assert!(encode_thumb_b64(b"not an image at all").is_err());
-        assert!(encode_thumb_b64(&[]).is_err());
+        assert!(encode_thumb(b"not an image at all").is_err());
+        assert!(encode_thumb(&[]).is_err());
     }
 }

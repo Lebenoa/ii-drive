@@ -12,8 +12,10 @@ pub struct FileDto {
     pub has_thumb: bool,
 }
 
-impl From<FileRow> for FileDto {
-    fn from(r: FileRow) -> Self {
+impl FileDto {
+    /// `has_thumb` comes from the thumbnail store on disk, not the row:
+    /// the database no longer carries preview bytes.
+    pub fn new(r: FileRow, has_thumb: bool) -> Self {
         FileDto {
             id: r.uid,
             name: r.name,
@@ -21,7 +23,7 @@ impl From<FileRow> for FileDto {
             size: r.size,
             created_at: r.created_at,
             public: r.public,
-            has_thumb: r.thumb.is_some(),
+            has_thumb,
         }
     }
 }

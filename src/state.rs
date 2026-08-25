@@ -28,12 +28,23 @@ use crate::tg::{TgHub, TgManager};
 /// database this initializer cannot wait for.
 static STATE: LazyLock<AppState> = LazyLock::new(|| {
     let cfg = crate::config::get();
+    let thumbs_dir = std::path::Path::new(&cfg.db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("data"))
+        .join("thumbs");
+    if let Err(e) = std::fs::create_dir_all(&thumbs_dir) {
+        eprintln!(
+            "failed to create thumbnail directory {}: {e}",
+            thumbs_dir.display()
+        );
+    }
     AppState {
         db: surrealdb::Surreal::init(),
         tokens: Tokens::new(&cfg.secret, cfg.token_ttl_secs),
         hub: TgHub::new(cfg.clone()),
         epochs: tokio::sync::RwLock::new(HashMap::new()),
         instance: std::sync::RwLock::new(crate::db::Instance::default()),
+        thumbs_dir,
     }
 });
 
@@ -60,6 +71,8 @@ pub struct AppState {
     /// `RwLock` because the read path (one lookup per request) vastly
     /// outnumbers the write path (one entry per login, one per logout).
     epochs: tokio::sync::RwLock<HashMap<i64, u64>>,
+    /// Directory holding generated thumbnails (`<data dir>/thumbs`).
+    pub thumbs_dir: std::path::PathBuf,
     /// Instance-wide tunables, cached. Every upload reads the cap and the
     /// strategy, so these must not cost a query — the stored row exists to
     /// survive a restart, and [`Self::set_instance`] keeps both in step.
@@ -199,6 +212,13 @@ impl AppState {
             hub: TgHub::new(cfg.clone()),
             epochs: tokio::sync::RwLock::new(HashMap::new()),
             instance: std::sync::RwLock::new(crate::db::Instance::default()),
+            // Each test gets an isolated thumbnail store of its own.
+            thumbs_dir: {
+                let dir = std::env::temp_dir()
+                    .join(format!("ii-drive-test-thumbs-{}", ulid::Ulid::generate()));
+                std::fs::create_dir_all(&dir).expect("create test thumbs dir");
+                dir
+            },
         }
     }
 }
