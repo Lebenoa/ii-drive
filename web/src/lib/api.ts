@@ -521,6 +521,20 @@ export async function thumbUrl(id: string): Promise<string> {
   return fileUrl(id, 'thumb', {}, mt);
 }
 
+/** Public metadata behind a share link (`/s/{id}`). */
+export interface ShareMeta {
+  name: string;
+  mime: string;
+  size: number;
+  /** Uploader display name, absent when their account is unreachable. */
+  owner?: string;
+}
+
+/** GET /api/files/{id}/meta — public metadata; 404 for private files. */
+export function shareMeta(id: string): Promise<ShareMeta> {
+  return request(`/api/files/${encodeURIComponent(id)}/meta`);
+}
+
 /**
  * Absolute shareable URL for a **public** file. Lands on the share page
  * (which previews media and offers the download) and carries no

@@ -31,7 +31,7 @@
 {#if i18nReady()}
 	<!-- No chrome on the pages that exist before an account does: the bar's
 	     links all lead somewhere unreachable there. -->
-	{#if page.url.pathname !== '/login' && page.url.pathname !== '/setup'}
+	{#if page.url.pathname !== '/login' && page.url.pathname !== '/setup' && !page.url.pathname.startsWith('/s/')}
 		<Navbar />
 	{/if}
 

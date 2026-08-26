@@ -144,113 +144,40 @@ pub async fn media_token(
     })))
 }
 
-/// Escapes text for safe interpolation into HTML content.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// Bytes in a short human form for the share page header.
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
-/// GET /s/{id} — landing page for a **public** file: previews images,
-/// video and audio inline and offers everything else for download.
-///
-/// The page itself is static HTML built from row metadata only; the media
-/// is fetched by the browser from the same raw endpoint the SPA uses, so
-/// Range seeking works here too. Private files answer 404 exactly like
-/// `raw_file` — existence must not leak.
-pub async fn share_page(Path(id): Path<String>) -> ApiResult<Response> {
+/// GET /api/files/{id}/meta — public metadata for the share page
+/// (`/s/{id}`, a pure SPA route): name, mime, size and the uploader's
+/// display name when their account is reachable. Private files answer
+/// 404 exactly like `raw_file` — existence must not leak.
+pub async fn share_meta(Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
     let state = crate::state::get();
     let row = crate::db::get(&state.db, &id)
         .await?
         .filter(|row| row.public)
         .ok_or_else(|| ApiError::not_found("file not found"))?;
 
-    let name = html_escape(&row.name);
-    let size = human_size(row.size as u64);
-    let raw = format!("/api/files/{}/raw", id);
-
-    let viewer = if row.mime.starts_with("image/") {
-        format!(r#"<img class="media" src="{raw}" alt="{name}">"#)
-    } else if row.mime.starts_with("video/") {
-        format!(r#"<video class="media" src="{raw}" controls preload="metadata"></video>"#)
-    } else if row.mime.starts_with("audio/") {
-        format!(r#"<audio class="media" src="{raw}" controls></audio>"#)
-    } else {
-        String::new()
+    // Best effort: the name comes from the owner's cached Telegram
+    // profile. A signed-out owner or first-hit RPC failure simply omits
+    // it — the page never blocks on it.
+    let owner = match state.hub.get(row.owner).await {
+        Some(tg) => tg.status().await.user.map(|u| u.name),
+        None => None,
     };
-    let mime_line = html_escape(&row.mime);
-
-    // Static metadata plus same-origin URLs built from ids above; `name`
-    // and `mime` are escaped, so nothing user-controlled reaches the
-    // document unescaped.
-    let html = format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{name}</title>
-<style>
-  :root {{ color-scheme: dark; }}
-  body {{ margin: 0; min-height: 100vh; display: flex; align-items: center;
-         justify-content: center; background: #101014; color: #e8e8ee;
-         font-family: system-ui, sans-serif; }}
-  .card {{ max-width: 960px; width: calc(100% - 2rem); margin: 2rem 0;
-          text-align: center; }}
-  .media {{ max-width: 100%; max-height: 78vh; border-radius: 10px; }}
-  h1 {{ font-size: 1.05rem; font-weight: 600; word-break: break-all;
-       margin: 1rem 0 .25rem; }}
-  p.meta {{ margin: 0 0 1.25rem; color: #9a9aa6; font-size: .85rem; }}
-  a.dl {{ display: inline-block; padding: .55rem 1.4rem; border-radius: 8px;
-         background: #3b82f6; color: #fff; text-decoration: none;
-         font-size: .95rem; }}
-  a.dl:hover {{ background: #2f6fe0; }}
-</style>
-</head>
-<body>
-<main class="card">
-  {viewer}
-  <h1>{name}</h1>
-  <p class="meta">{size} &middot; {mime_line}</p>
-  <a class="dl" href="{raw}?dl=1" download>Download</a>
-</main>
-</body>
-</html>"#,
-    );
-
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from(html))
-        .map_err(|e| ApiError::internal(format!("response build: {e}")))
+    Ok(Json(serde_json::json!({
+        "name": row.name,
+        "mime": row.mime,
+        "size": row.size,
+        "owner": owner,
+    })))
 }
 
 #[cfg(test)]
 mod share_tests {
     use super::*;
 
-    /// The landing page renders for public rows and answers 404 for
-    /// private ones — the same non-leaking contract as `raw_file`.
+    /// The share metadata endpoint serves public rows and answers 404
+    /// for private ones — the same non-leaking contract as `raw_file`.
     #[test]
-    fn share_page_serves_public_and_hides_private() {
+    fn share_meta_serves_public_and_hides_private() {
         crate::state::with_state(|state| async move {
             let row = crate::db::FileRow {
                 owner: 7,
@@ -265,27 +192,22 @@ mod share_tests {
             };
             crate::db::insert(&state.db, &row).await.expect("insert");
 
-            let res = share_page(axum::extract::Path(row.uid.clone()))
+            let meta = share_meta(axum::extract::Path(row.uid.clone()))
                 .await
-                .expect("public page");
-            assert_eq!(res.status(), 200);
-            let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
-                .await
-                .expect("body");
-            let html = String::from_utf8_lossy(&body);
-            assert!(html.contains("pic &amp; &lt;spec&gt;.png"), "name escaped");
-            assert!(html.contains("/api/files/01SHARE/raw"));
-            assert!(html.contains(r#"<img class="media""#));
+                .expect("public meta");
+            assert_eq!(meta.0["name"], "pic & <spec>.png");
+            assert_eq!(meta.0["mime"], "image/png");
+            assert_eq!(meta.0["size"], 1234);
 
-            // Flipping to private must take the page (and thus the share
-            // link) down immediately.
+            // Flipping to private must take the metadata (and thus the
+            // share link) down immediately.
             crate::db::set_public(&state.db, &row.uid, false)
                 .await
                 .expect("unshare");
-            let res = share_page(axum::extract::Path(row.uid)).await;
+            let res = share_meta(axum::extract::Path(row.uid)).await;
             match res {
                 Err(e) => assert_eq!(e.0, axum::http::StatusCode::NOT_FOUND),
-                Ok(_) => panic!("private file must not render a share page"),
+                Ok(_) => panic!("private file must not expose metadata"),
             }
         });
     }

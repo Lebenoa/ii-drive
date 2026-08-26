@@ -5,7 +5,6 @@ use tower_http::services::{ServeDir, ServeFile};
 pub fn build_router() -> Router {
     let public = Router::new()
         .route("/health", get(crate::routes::health))
-        .route("/s/{id}", get(crate::routes::share_page))
         .route("/api/limits", get(crate::routes::limits))
         .route(
             "/locales/manifest.json",
@@ -17,7 +16,8 @@ pub fn build_router() -> Router {
         .route("/api/auth/password", post(crate::routes::auth_password))
         .route("/api/files/{id}/raw", get(crate::routes::raw_file))
         .route("/api/files/{id}/thumb", get(crate::routes::file_thumb))
-        .route("/api/files/{id}/link", get(crate::routes::file_link));
+        .route("/api/files/{id}/link", get(crate::routes::file_link))
+        .route("/api/files/{id}/meta", get(crate::routes::share_meta));
 
     let protected = Router::new()
         .route("/api/me", get(crate::routes::me))

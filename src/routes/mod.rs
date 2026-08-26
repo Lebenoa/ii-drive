@@ -6,7 +6,7 @@ mod session;
 
 pub use files::{
     create_folder, delete_file, delete_folder, file_link, file_thumb, health, limits, list_files,
-    list_folders, media_token, move_file, raw_file, set_visibility, share_page, upload_abort,
+    list_folders, media_token, move_file, raw_file, set_visibility, share_meta, upload_abort,
     upload_bench, upload_chunk, upload_complete, upload_file, upload_init, upload_limit,
     upload_status,
 };

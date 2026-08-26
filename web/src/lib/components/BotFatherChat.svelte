@@ -152,7 +152,7 @@
     {#if busy}<span class="spinner"></span>{/if}
   </div>
 
-  {#if stage && STAGE_HINT[stage]}
+  {#if stage}
     <p class="muted stage-hint">{t(`botfather.stage.${stage}`)}</p>
   {/if}
 
