@@ -9,33 +9,33 @@ pub struct ApiError(pub StatusCode, pub String);
 
 impl ApiError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
-        ApiError(StatusCode::BAD_REQUEST, msg.into())
+        Self(StatusCode::BAD_REQUEST, msg.into())
     }
     pub fn unauthorized(msg: impl Into<String>) -> Self {
-        ApiError(StatusCode::UNAUTHORIZED, msg.into())
+        Self(StatusCode::UNAUTHORIZED, msg.into())
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
-        ApiError(StatusCode::NOT_FOUND, msg.into())
+        Self(StatusCode::NOT_FOUND, msg.into())
     }
     pub fn too_large(msg: impl Into<String>) -> Self {
-        ApiError(StatusCode::PAYLOAD_TOO_LARGE, msg.into())
+        Self(StatusCode::PAYLOAD_TOO_LARGE, msg.into())
     }
     pub fn conflict(msg: impl Into<String>) -> Self {
-        ApiError(StatusCode::CONFLICT, msg.into())
+        Self(StatusCode::CONFLICT, msg.into())
     }
     pub fn unavailable(msg: impl Into<String>) -> Self {
-        ApiError(StatusCode::SERVICE_UNAVAILABLE, msg.into())
+        Self(StatusCode::SERVICE_UNAVAILABLE, msg.into())
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         let msg: String = msg.into();
         tracing::error!("internal error: {msg}");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        Self(StatusCode::INTERNAL_SERVER_ERROR, msg)
     }
 }
 
 impl From<crate::db::DbError> for ApiError {
     fn from(e: crate::db::DbError) -> Self {
-        ApiError::internal(format!("database error: {e}"))
+        Self::internal(format!("database error: {e}"))
     }
 }
 
@@ -47,6 +47,6 @@ impl IntoResponse for ApiError {
 
 impl From<std::io::Error> for ApiError {
     fn from(e: std::io::Error) -> Self {
-        ApiError::internal(format!("io error: {e}"))
+        Self::internal(format!("io error: {e}"))
     }
 }

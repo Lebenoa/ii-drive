@@ -370,10 +370,10 @@ pub async fn save_rules(
         if mime.is_empty() || mime.len() > 64 {
             return Err(ApiError::bad_request("rule mime must be 1-64 characters"));
         }
-        let mine = crate::db::get_folder(&state.db, &r.folder)
+        let owned = crate::db::get_folder(&state.db, &r.folder)
             .await?
             .is_some_and(|f| f.owner == uid);
-        if !mine {
+        if !owned {
             return Err(ApiError::bad_request(format!(
                 "folder `{}` not found",
                 r.folder
@@ -427,8 +427,8 @@ pub async fn save_settings(
     Extension(Caller(uid)): Extension<Caller>,
     Json(body): Json<SettingsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let state = crate::state::get();
     const TG_DOC_CAP_MB: u64 = 2048;
+    let state = crate::state::get();
     let bytes = body
         .split_mb
         .checked_mul(MB)

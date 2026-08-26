@@ -69,8 +69,7 @@ async fn main() -> color_eyre::Result<()> {
             tracing::info!(
                 "database {} loaded: {files} files, {folders} folders",
                 std::fs::canonicalize(&cfg.db_path)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| cfg.db_path.clone())
+                    .map_or_else(|_| cfg.db_path.clone(), |p| p.display().to_string())
             );
         }
         Err(e) => tracing::warn!("could not count database rows: {e}"),

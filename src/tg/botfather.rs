@@ -5,10 +5,11 @@ use grammers_client::tl;
 use super::{PeerRef, TgManager, bot_token_regex, friendly};
 
 impl TgManager {
-    /// Sends `text` to @BotFather and returns its reply text. The
-    /// conversation state lives on BotFather's side of this account's chat,
+    /// Sends `text` to @`BotFather` and returns its reply text. The
+    /// conversation state lives on `BotFather`'s side of this account's chat,
     /// so every signed-in account can run its own wizard through this one
     /// relay primitive without any state on our side.
+    #[allow(clippy::large_futures)] // the send_message future is awaited directly; boxing adds no value
     pub async fn botfather_send(&self, text: &str) -> Result<String, String> {
         let client = self.ensure().await?;
         let peer = self.storage_peer("botfather").await?;
@@ -58,7 +59,7 @@ impl TgManager {
     }
 
     /// Callback buttons `(text, data)` of the newest message in the
-    /// BotFather chat, whatever direction it has.
+    /// `BotFather` chat, whatever direction it has.
     async fn last_buttons(
         client: &Client,
         peer_ref: PeerRef,
@@ -71,7 +72,7 @@ impl TgManager {
         Err("BotFather did not answer".into())
     }
 
-    /// Waits for BotFather's first INCOMING message newer than `after_id`
+    /// Waits for `BotFather`'s first INCOMING message newer than `after_id`
     /// and returns its id plus callback buttons — his answer to a command.
     /// Polling is required: the reply arrives asynchronously, and reading
     /// too early would see our own outgoing request (which carries no
@@ -102,7 +103,7 @@ impl TgManager {
     }
 
     /// Presses the callback button matching `needle` on the latest
-    /// BotFather menu.
+    /// `BotFather` menu.
     async fn press_botfather_button(
         &self,
         client: &Client,
@@ -117,7 +118,7 @@ impl TgManager {
         Self::press_callback(client, peer_ref, msg_id, &data).await
     }
 
-    /// Raw TL callback press — grammers has no click helper. BotFather
+    /// Raw TL callback press — grammers has no click helper. `BotFather`
     /// answers by editing the same message, so `msg_id` stays valid across
     /// pages of a paginated menu.
     async fn press_callback(
@@ -138,7 +139,9 @@ impl TgManager {
                         access_hash: usr.access_hash.unwrap_or(0),
                     })
                 }
-                _ => return Err("botfather resolved to an empty account".into()),
+                tl::enums::User::Empty(_) => {
+                    return Err("botfather resolved to an empty account".into());
+                }
             },
             _ => return Err("botfather is not a user".into()),
         };
@@ -156,10 +159,11 @@ impl TgManager {
         Ok(())
     }
 
-    /// Lists the bots this account owns according to @BotFather's `/mybots`
+    /// Lists the bots this account owns according to @`BotFather`'s `/mybots`
     /// menu (the button labels are the bot names). Waits for his reply,
     /// skips menu chrome such as pagination arrows and page counters, and
     /// follows `»` so owners of many bots get every page, not just one.
+    #[allow(clippy::large_futures)] // the send_message future is awaited directly; boxing adds no value
     pub async fn botfather_my_bots(&self) -> Result<Vec<String>, String> {
         const MAX_PAGES: usize = 12;
 
@@ -201,9 +205,10 @@ impl TgManager {
         Ok(names)
     }
 
-    /// Retrieves the API token for `bot` by walking @BotFather's menus:
+    /// Retrieves the API token for `bot` by walking @`BotFather`'s menus:
     /// /mybots → pick the bot → "API Token". The token arrives as plain
     /// text in the follow-up message.
+    #[allow(clippy::large_futures)] // the send_message future is awaited directly; boxing adds no value
     pub async fn botfather_bot_token(&self, bot: &str) -> Result<String, String> {
         let client = self.ensure().await?;
         let peer_ref = self.storage_peer("botfather").await?;
@@ -244,7 +249,7 @@ impl TgManager {
     }
 }
 
-/// True for @BotFather menu chrome rather than a bot entry: pagination
+/// True for @`BotFather` menu chrome rather than a bot entry: pagination
 /// arrows (`«`, `»`, …) and page counters like `2/3` on multi-page lists.
 /// A real entry is always a bot name or @username, so anything made purely
 /// of navigation glyphs, digits, slashes and spaces is chrome.

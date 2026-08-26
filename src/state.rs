@@ -98,7 +98,9 @@ impl AppState {
             .ok_or_else(|| ApiError::unauthorized("that Telegram session is no longer signed in"))
     }
 
-    /// The account's current token epoch, loading it from the DB once.
+    // The write guard must stay alive through the read out of the cache, so
+    // dropping it earlier would change which value is returned.
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn epoch(&self, user_id: i64) -> Result<u64, ApiError> {
         if let Some(&e) = self.epochs.read().await.get(&user_id) {
             return Ok(e);
@@ -116,6 +118,9 @@ impl AppState {
     /// new epoch. Persist first, then cache: a crash in between leaves the
     /// stored epoch ahead of the cached one, which over-revokes (safe),
     /// whereas the reverse order would under-revoke.
+    // The write guard must stay alive through the read out of the cache, so
+    // dropping it earlier would change which value is returned.
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn bump_epoch(&self, user_id: i64) -> Result<u64, ApiError> {
         let next = crate::db::bump_token_epoch(&self.db, &user_id.to_string()).await?;
         let mut cache = self.epochs.write().await;
@@ -183,14 +188,13 @@ impl AppState {
     /// initializer had to start with. Once the row exists it is the only
     /// source; the database owns these values outright.
     pub async fn hydrate_instance(&self) -> Result<(), crate::db::DbError> {
-        let stored = match crate::db::get_instance(&self.db).await? {
-            Some(stored) => stored,
-            None => {
-                let seeded = crate::db::Instance::default();
-                crate::db::set_instance(&self.db, &seeded).await?;
-                tracing::info!("instance settings initialized at their defaults");
-                seeded
-            }
+        let stored = if let Some(stored) = crate::db::get_instance(&self.db).await? {
+            stored
+        } else {
+            let seeded = crate::db::Instance::default();
+            crate::db::set_instance(&self.db, &seeded).await?;
+            tracing::info!("instance settings initialized at their defaults");
+            seeded
         };
         *self
             .instance

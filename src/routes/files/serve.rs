@@ -39,12 +39,17 @@ pub async fn raw_file(
 
     // Single-range HTTP Range support — video seeking needs it. The offset
     // work happens on Telegram's side (skip_chunks) plus a small discard.
+    // File sizes are stored as non-negative i64; safe to widen.
+    #[allow(clippy::as_conversions, clippy::cast_sign_loss)]
     let total = row.size as u64;
     let range = req
         .headers()
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
         .and_then(parse_range);
+    // Bounded: s < total guards the subtractions, and e <= total-1 so
+    // e - s + 1 cannot underflow; the derived offsets cannot overflow u64.
+    #[allow(clippy::arithmetic_side_effects)]
     let (start, len, partial) = match range {
         Some((s, e)) => {
             let Some((s, e)) = (s < total).then_some((s, e.min(total - 1))) else {
@@ -79,9 +84,12 @@ pub async fn raw_file(
         .header(header::CONTENT_TYPE, &row.mime)
         .header(header::CONTENT_LENGTH, len);
     if partial {
+        // end = start + len - 1 is the validated range end (<= total-1).
+        #[allow(clippy::arithmetic_side_effects)]
+        let end = start + len - 1;
         builder = builder.header(
             header::CONTENT_RANGE,
-            format!("bytes {start}-{}/{}", start + len - 1, total),
+            format!("bytes {start}-{end}/{total}"),
         );
         builder = builder.status(axum::http::StatusCode::PARTIAL_CONTENT);
     }

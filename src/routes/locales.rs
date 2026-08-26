@@ -58,7 +58,7 @@ fn read_name(path: &std::path::Path) -> Option<String> {
         .get("_meta")?
         .get("name")?
         .as_str()
-        .map(|s| s.to_string())
+        .map(str::to_string)
 }
 
 /// GET /locales/{file}.json — one translation dictionary (e.g. `th.json`),

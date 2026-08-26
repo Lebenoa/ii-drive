@@ -35,8 +35,9 @@ pub async fn tables(
         .take(0)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let info = rows.into_iter().next().unwrap_or(serde_json::Value::Null);
-    let mut names: Vec<String> = info["tables"]
-        .as_object()
+    let mut names: Vec<String> = info
+        .get("tables")
+        .and_then(serde_json::Value::as_object)
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
     names.sort();
@@ -48,7 +49,7 @@ pub struct QueryBody {
     pub sql: String,
 }
 
-/// POST /api/internal-db/query — run raw SurrealQL against the embedded
+/// POST /api/internal-db/query — run raw `SurrealQL` against the embedded
 /// store and return every statement's result. The queries are unrestricted
 /// by design, which means they read and write across EVERY tenant: `file`
 /// rows with their `chat`/`message_id`, and `setting:bots_*` which holds

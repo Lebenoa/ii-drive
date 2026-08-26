@@ -8,6 +8,8 @@ pub(super) async fn set_schema_version(
     db: &surrealdb::Surreal<Conn>,
     v: u64,
 ) -> Result<(), DbError> {
+    #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
+    // Schema version is a small u64 counter; always fits i64.
     let mut res = db
         .query("UPSERT setting:schema SET version = $v")
         .bind(("v", v as i64))
@@ -17,14 +19,14 @@ pub(super) async fn set_schema_version(
 }
 
 /// Some(version) when `setting:schema` exists, None on a database that has
-/// never been through migrate().
+/// never been through `migrate()`.
 async fn schema_version_recorded(db: &surrealdb::Surreal<Conn>) -> Result<Option<u64>, DbError> {
     let mut res = db.query("SELECT version FROM setting:schema").await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
     Ok(rows
         .first()
         .and_then(|r| r.get("version"))
-        .and_then(|v| v.as_u64()))
+        .and_then(serde_json::Value::as_u64))
 }
 
 pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {

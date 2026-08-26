@@ -21,9 +21,9 @@ pub async fn create_folder(
     // A parent owned by somebody else reads as nonexistent, so a tree can
     // never be grafted onto another tenant's folder.
     if !body.parent.is_empty()
-        && !crate::db::get_folder(&state.db, &body.parent)
+        && crate::db::get_folder(&state.db, &body.parent)
             .await?
-            .is_some_and(|f| f.owner == uid)
+            .is_none_or(|f| f.owner != uid)
     {
         return Err(ApiError::bad_request("parent folder not found"));
     }
@@ -53,9 +53,9 @@ pub async fn delete_folder(
 ) -> ApiResult<Json<serde_json::Value>> {
     let state = crate::state::get();
     // 404 for a foreign folder too — its existence stays private.
-    if !crate::db::get_folder(&state.db, &id)
+    if crate::db::get_folder(&state.db, &id)
         .await?
-        .is_some_and(|f| f.owner == uid)
+        .is_none_or(|f| f.owner != uid)
     {
         return Err(ApiError::not_found("folder not found"));
     }

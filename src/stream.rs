@@ -4,15 +4,22 @@ use futures::stream::{Stream, unfold};
 
 use crate::tg::{PeerRef, is_file_reference_error};
 
-/// Telegram large-file chunk size (512 KiB = MAX_CHUNK_SIZE). Must be a
+/// Telegram large-file chunk size (512 KiB = `MAX_CHUNK_SIZE`). Must be a
 /// multiple of the protocol minimum; used to compute skip offsets on retry.
 const CHUNK: i32 = 512 * 1024;
 
 /// A byte stream backed by `iter_download` that transparently refetches the
-/// message when the stored file_reference expires mid-stream, resuming from
+/// message when the stored `file_reference` expires mid-stream, resuming from
 /// the exact offset already served. Serves from byte `start` (HTTP Range
 /// support): whole chunks are skipped server-side on Telegram, the
 /// sub-chunk remainder is discarded on the wire.
+#[allow(
+    clippy::arithmetic_side_effects, // byte offsets bounded by the file size and cap
+    clippy::as_conversions,          // i32/i64 chunk-offset bridging, bounded offset values
+    clippy::cast_possible_truncation, // chunk indices always fit i32 (Telegram caps docs)
+    clippy::cast_possible_wrap,       // u64 offset to i64: file sizes < i64::MAX
+    clippy::indexing_slicing,         // slice/len arithmetic on the validated chunk buffer
+)]
 pub async fn file_stream_from(
     tg: &crate::tg::TgManager,
     message_id: i32,
@@ -26,7 +33,7 @@ pub async fn file_stream_from(
         peer,
         msg_id: message_id,
         iter: None,
-        pos: start as i64,
+        pos: start.cast_signed(),
         discard: start % CHUNK as u64,
     };
 
@@ -58,7 +65,10 @@ pub async fn file_stream_from(
                     ));
                 };
                 let mut it = st.client.iter_download(&doc).chunk_size(CHUNK);
-                let skipped = (st.pos / CHUNK as i64) as i32;
+                let chunks = st.pos / i64::from(CHUNK);
+                // chunk count = stream position / 512KiB. Telegram caps a
+                // single document at ~2 GiB, so this always fits i32.
+                let skipped = i32::try_from(chunks).unwrap_or(0);
                 if skipped > 0 {
                     it = it.skip_chunks(skipped);
                 }
@@ -75,10 +85,16 @@ pub async fn file_stream_from(
                 Ok(Some(chunk)) => {
                     let mut chunk = Bytes::from(chunk);
                     if st.discard > 0 && !chunk.is_empty() {
-                        let d = (st.discard as usize).min(chunk.len());
+                        let d = usize::try_from(st.discard).unwrap_or(chunk.len());
                         chunk = chunk.slice(d..);
                         st.discard -= d as u64;
                         if chunk.is_empty() {
+                            // The entire chunk was consumed skipping the
+                            // range prefix — read the next one rather than
+                            // yield an empty Bytes (which the caller treats
+                            // as EOF). Not needless: `continue` is followed
+                            // by a `return` below.
+                            #[allow(clippy::needless_continue)]
                             continue;
                         }
                     }
@@ -89,7 +105,6 @@ pub async fn file_stream_from(
                 Err(e) if is_file_reference_error(&e) => {
                     tracing::info!("file reference expired mid-download; refetching");
                     st.iter = None;
-                    continue;
                 }
                 Err(e) => {
                     return Some((
@@ -114,6 +129,11 @@ struct StreamState {
 
 /// Caps a byte stream at `limit` bytes: Range responses must send exactly
 /// the declared Content-Length or browsers abort the transfer.
+#[allow(
+    clippy::arithmetic_side_effects, // left/take math bounded by the u64 limit
+    clippy::as_conversions,          // usize/u64 bridging of byte counts
+    clippy::cast_possible_truncation, // left fits usize (capped by limit, chunk sizes small)
+)]
 pub fn cap<S>(s: S, limit: u64) -> impl Stream<Item = std::io::Result<Bytes>> + use<S>
 where
     S: Stream<Item = std::io::Result<Bytes>>,
@@ -147,6 +167,10 @@ type BoxedPart = std::pin::Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + S
 /// byte `start` across part boundaries (HTTP Range support). Parts are
 /// fetched in order, each through `file_stream` (which itself resumes on
 /// expired file references), so the client sees a seamless download.
+#[allow(
+    clippy::arithmetic_side_effects, // skip/idx math bounded by sum of part sizes
+    clippy::indexing_slicing, // parts[idx] has an explicit idx < parts.len() guard
+)]
 pub async fn parts_stream_from(
     tg: std::sync::Arc<crate::tg::TgManager>,
     parts: Vec<crate::db::FilePart>,
@@ -157,8 +181,8 @@ pub async fn parts_stream_from(
     // whether the part is encrypted.
     let mut skip = start;
     let mut idx = 0usize;
-    while idx < parts.len() && skip >= parts[idx].size as u64 {
-        skip -= parts[idx].size as u64;
+    while idx < parts.len() && skip >= parts[idx].size.cast_unsigned() {
+        skip -= parts[idx].size.cast_unsigned();
         idx += 1;
     }
     if idx >= parts.len() {
@@ -176,19 +200,16 @@ pub async fn parts_stream_from(
     };
     Ok(unfold(st, |mut st| async move {
         loop {
-            let item = match st.cur.as_mut()?.next().await {
-                Some(item) => item,
-                None => {
-                    st.idx += 1;
-                    if st.idx >= st.parts.len() {
-                        return None;
-                    }
-                    match part_stream(&st.tg, &st.parts, st.idx, 0, st.key.as_deref()).await {
-                        Ok(s) => st.cur = Some(s),
-                        Err(e) => return Some((Err(std::io::Error::other(e)), st)),
-                    }
-                    continue;
+            let Some(item) = st.cur.as_mut()?.next().await else {
+                st.idx += 1;
+                if st.idx >= st.parts.len() {
+                    return None;
                 }
+                match part_stream(&st.tg, &st.parts, st.idx, 0, st.key.as_deref()).await {
+                    Ok(s) => st.cur = Some(s),
+                    Err(e) => return Some((Err(std::io::Error::other(e)), st)),
+                }
+                continue;
             };
             return Some((item, st));
         }
@@ -209,8 +230,12 @@ struct PartsState {
 /// - encrypted part at `skip > 0` (range start): resume at the containing
 ///   ciphertext block via `at_block`, discarding the intra-block remainder;
 /// - encrypted part at `skip == 0`: read the whole container header.
-/// Plaintext (no nonce) parts bypass decryption entirely, so files uploaded
-/// before encryption was enabled still download.
+///
+#[allow(
+    clippy::arithmetic_side_effects, // at_block offset math bounded by part size
+    clippy::as_conversions,          // u64 block/size bridging for Telegram offsets
+    clippy::indexing_slicing,        // parts[idx] from a caller-verified index
+)]
 async fn part_stream(
     tg: &crate::tg::TgManager,
     parts: &[crate::db::FilePart],
@@ -219,23 +244,15 @@ async fn part_stream(
     key: Option<&crate::crypt::Key>,
 ) -> Result<BoxedPart, String> {
     let p = &parts[idx];
-    let nonce = match p.nonce.as_deref().and_then(crate::crypt::nonce_from_b64) {
-        Some(n) => n,
-        None => {
-            // Plaintext part: serve the stored bytes as-is.
-            return Ok(Box::pin(file_stream_from(tg, p.message_id, &p.chat, skip).await?));
-        }
+    let Some(nonce) = p.nonce.as_deref().and_then(crate::crypt::nonce_from_b64) else {
+        // Plaintext part: serve the stored bytes as-is.
+        return Ok(Box::pin(file_stream_from(tg, p.message_id, &p.chat, skip).await?));
     };
     // Encrypted part — the stored bytes are a container. Decryption needs a
     // key; without one the operator has disabled or removed the key while
     // leaving encrypted files behind, which must not silently serve garbage.
-    let key = match key {
-        Some(k) => k,
-        None => {
-            return Err(
-                "file is encrypted but no crypt_password is configured".into(),
-            );
-        }
+    let Some(key) = key else {
+        return Err("file is encrypted but no crypt_password is configured".into());
     };
     if skip == 0 {
         let inner = file_stream_from(tg, p.message_id, &p.chat, 0).await?;

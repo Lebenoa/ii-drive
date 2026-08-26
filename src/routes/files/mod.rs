@@ -35,10 +35,19 @@ const HEAD_CAP: usize = 512 * 1024;
 fn bytes_repr(n: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
+    // Display-only: f64 precision loss past 2^52 is irrelevant for a human label.
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    fn gib(n: u64) -> f64 {
+        n as f64 / GIB as f64
+    }
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    fn mib(n: u64) -> f64 {
+        n as f64 / MIB as f64
+    }
     if n >= GIB {
-        format!("{:.1} GiB", n as f64 / GIB as f64)
+        format!("{:.1} GiB", gib(n))
     } else if n >= MIB {
-        format!("{:.1} MiB", n as f64 / MIB as f64)
+        format!("{:.1} MiB", mib(n))
     } else {
         format!("{n} B")
     }
@@ -96,11 +105,12 @@ fn is_message_gone(err: &str) -> bool {
     norm.contains("messageidinvalid") || norm.contains("messageinvalid")
 }
 
+// Epoch seconds fit in i64 until the year 292 billion; safe here.
+#[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn percent_encode(name: &str) -> String {
@@ -108,9 +118,12 @@ fn percent_encode(name: &str) -> String {
     for b in name.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char)
+                out.push(char::from(b));
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out

@@ -1,3 +1,10 @@
+#![allow(
+    clippy::arithmetic_side_effects, // part/size offset math bounded by declared sizes
+    clippy::as_conversions,          // u64/usize bridging of byte counts and offsets
+    clippy::cast_possible_truncation, // offsets fit usize on 64-bit hosts; sizes < 2^32
+    clippy::cast_possible_wrap,       // u64 sizes to i64/i32 for Telegram: < i64::MAX
+    clippy::indexing_slicing,         // part-index slicing guarded by idx < nparts
+)]
 use std::io;
 use std::sync::Arc;
 
@@ -47,11 +54,11 @@ pub async fn upload_limit(
     Ok(next.run(req).await)
 }
 /// One spawned part upload: message id, name echo, mime echo, thumb, and
-/// the base64 per-part crypto nonce (`None` for plaintext parts).
-pub(crate) type UploaderHandle =
+/// the `base64` per-part crypto nonce (`None` for plaintext parts).
+pub type UploaderHandle =
     tokio::task::JoinHandle<Result<(i32, String, String, Option<Vec<u8>>, Option<String>), String>>;
 
-/// A file fully described and already uploaded: everything persist_row
+/// A file fully described and already uploaded: everything `persist_row`
 /// needs to record it.
 struct StoredFile {
     name: String,
@@ -63,11 +70,17 @@ struct StoredFile {
     head: Vec<u8>,
 }
 
+#[allow(clippy::too_many_lines)] // linear multipart-drain + part-fan-out handler; splitting fragments it
 pub async fn upload_file(
     Extension(Caller(uid)): Extension<Caller>,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Telegram stores each document separately and caps its size (2 GiB on
+    // a free account) regardless of the configured drive limit — so a
+    // `max_file_size` above that is honored by transparently chunking the
+    // file into cap-sized documents and re-joining them on download.
+    const TG_DOC_CAP: u64 = 4000 * 512 * 1024; // 2_048_000_000 ≈ 1.91 GiB
     let state = crate::state::get();
     // Everything below runs on the caller's own account: their client posts
     // the parts, into their channels, under their routing rules.
@@ -91,16 +104,12 @@ pub async fn upload_file(
 
     // Telegram stores each document separately and caps its size (2 GiB on
     // a free account) regardless of the configured drive limit — so a
-    // `max_file_size` above that is honored by transparently chunking the
-    // file into cap-sized documents and re-joining them on download.
-    //
     // The real ceiling is PART COUNT, not bytes: big-file uploads may use
     // at most ~4000 parts of 512 KiB each, so a document at the full 2 GiB
     // (exactly 4096 parts) is refused with FILE_PARTS_INVALID — observed on
     // a plain user session, so it is an account-level budget, not a bot
     // quirk. Cap documents at 4000 × 512 KiB; anything larger just becomes
     // more documents, which downloads re-join anyway.
-    const TG_DOC_CAP: u64 = 4000 * 512 * 1024; // 2_048_000_000 ≈ 1.91 GiB
     let over_cap = declared > TG_DOC_CAP;
 
     // Target folder comes from a header ("" = root); multipart bodies cannot
@@ -112,9 +121,9 @@ pub async fn upload_file(
         .trim()
         .to_string();
     if !folder.is_empty()
-        && !crate::db::get_folder(&state.db, &folder)
+        && crate::db::get_folder(&state.db, &folder)
             .await?
-            .is_some_and(|f| f.owner == uid)
+            .is_none_or(|f| f.owner != uid)
     {
         return Err(ApiError::bad_request("folder not found"));
     }
@@ -233,6 +242,7 @@ pub async fn upload_file(
                 }
                 _ => reader = Box::new(base_reader),
             }
+            #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
             let (mid, _, _, thumb) = tg
                 .upload(&mut reader, upload_size, &part_name, &mime, &chat)
                 .await?;
@@ -242,7 +252,7 @@ pub async fn upload_file(
 
     let mut fed: u64 = 0;
     let mut head: Vec<u8> = Vec::new();
-    let feed: Result<(), ApiError> = async {
+    let body_loop: Result<(), ApiError> = async {
         loop {
             let Some(mut f) = multipart
                 .next_field()
@@ -256,11 +266,16 @@ pub async fn upload_file(
             }
 
             let name = f.file_name().unwrap_or("unnamed").to_string();
-            let mime = f.content_type().map(|s| s.to_string()).unwrap_or_else(|| {
-                mime_guess::from_path(&name)
-                    .first_or_octet_stream()
-                    .to_string()
-            });
+            let mime = f
+                .content_type()
+                .map_or_else(
+                    || {
+                        mime_guess::from_path(&name)
+                            .first_or_octet_stream()
+                            .to_string()
+                    },
+                    str::to_string,
+                );
             let _ = meta_tx.send(Some((name, mime)));
 
             loop {
@@ -308,7 +323,7 @@ pub async fn upload_file(
     }
     .await;
 
-    if let Err(err) = feed {
+    if let Err(err) = body_loop {
         // Tell the uploaders the stream is dead so they never finalize
         // truncated uploads on Telegram.
         for tx in &txs {
@@ -394,7 +409,7 @@ pub async fn upload_file(
                         part_size
                     } as i64,
                     nonce,
-                })
+                });
             }
             Err(e) => {
                 first_err = Some(e);
@@ -487,7 +502,7 @@ impl PartPlan {
         })
     }
 
-    fn expected(&self, i: usize) -> u64 {
+    const fn expected(&self, i: usize) -> u64 {
         if i + 1 == self.nparts {
             self.declared - self.part_size * (self.nparts as u64 - 1)
         } else {
@@ -505,6 +520,7 @@ impl PartPlan {
     }
 }
 
+#[allow(clippy::too_many_lines)] // spill fan-out: parallel pumper+uploader wiring is inherently long
 async fn spill_upload(
     state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
@@ -514,6 +530,7 @@ async fn spill_upload(
     max: u64,
     folder: String,
 ) -> ApiResult<Json<serde_json::Value>> {
+    use tokio::io::AsyncWriteExt;
     let plan = PartPlan::new(state, uid, declared).await?;
     let dir = std::path::PathBuf::from(&crate::config::get().spill_dir);
     tokio::fs::create_dir_all(&dir)
@@ -630,6 +647,7 @@ async fn spill_upload(
                 }
                 _ => reader = Box::new(base_r),
             }
+            #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
             let (mid, _, _, thumb) = tg
                 .upload(&mut reader, upload_size, &part_name, &mime, &chat)
                 .await?;
@@ -637,7 +655,6 @@ async fn spill_upload(
         }));
     }
 
-    use tokio::io::AsyncWriteExt;
     let mut name = String::new();
     let mut mime = String::new();
     let mut fed: u64 = 0;
@@ -657,11 +674,16 @@ async fn spill_upload(
                 continue;
             }
             name = f.file_name().unwrap_or("unnamed").to_string();
-            mime = f.content_type().map(|s| s.to_string()).unwrap_or_else(|| {
-                mime_guess::from_path(&name)
-                    .first_or_octet_stream()
-                    .to_string()
-            });
+            mime = f
+                .content_type()
+                .map_or_else(
+                    || {
+                        mime_guess::from_path(&name)
+                            .first_or_octet_stream()
+                            .to_string()
+                    },
+                    str::to_string,
+                );
             let _ = meta_tx.send(Some((name.clone(), mime.clone())));
             loop {
                 match f.chunk().await {
@@ -694,7 +716,7 @@ async fn spill_upload(
                                 })?;
                             off += take;
                         }
-                        for w in writers.iter_mut() {
+                        for w in &mut writers {
                             w.flush().await.map_err(|e| {
                                 ApiError::bad_request(format!("flush upload buffer: {e}"))
                             })?;
@@ -715,7 +737,7 @@ async fn spill_upload(
     // Either way the feed is over: pumpers see EOF as final, uploaders
     // finalize or fail fast, and the writers' last buffers must reach disk
     // before any pumper declares the part truncated.
-    for w in writers.iter_mut() {
+    for w in &mut writers {
         let _ = w.flush().await;
     }
     drop(writers);
@@ -765,16 +787,16 @@ async fn spill_upload(
     } else {
         mime
     };
-    let mut thumb = None;
-    if let Some(jpeg) = tg_thumb.or_else(|| {
-        // Telegram makes no stripped thumbnail for audio; fall back to the
-        // embedded cover art captured from the stream head.
+    // Telegram makes no stripped thumbnail for audio; fall back to the
+    // embedded cover art captured from the stream head.
+    let thumb = match tg_thumb.or_else(|| {
         (mime.starts_with("audio/"))
             .then(|| crate::art::extract(&head))
             .flatten()
     }) {
-        thumb = super::thumbs::thumb_bytes(jpeg).await;
-    }
+        Some(jpeg) => super::thumbs::thumb_bytes(jpeg).await,
+        None => None,
+    };
     tracing::info!(%name, parts = plan.nparts, %declared, "uploaded file");
     persist_row(
         state,
@@ -837,7 +859,7 @@ async fn collect_uploaders(
 /// it. Shared by the `spill` strategy and resumable uploads, which always
 /// buffer by design.
 /// A buffered local file plus its metadata, ready to fan out to Telegram.
-pub(crate) struct FileInput<'a> {
+pub struct FileInput<'a> {
     pub path: &'a std::path::Path,
     pub declared: u64,
     pub name: String,
@@ -845,13 +867,14 @@ pub(crate) struct FileInput<'a> {
     pub folder: String,
 }
 
-pub(crate) async fn store_from_file(
+pub async fn store_from_file(
     state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
     file: FileInput<'_>,
     head: &[u8],
 ) -> ApiResult<Json<serde_json::Value>> {
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
     let declared = file.declared;
     let name = file.name;
     let path = file.path;
@@ -866,7 +889,6 @@ pub(crate) async fn store_from_file(
         file.mime
     };
 
-    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
     let mut uploaders = Vec::with_capacity(plan.nparts);
     for i in 0..plan.nparts {
         let expected = plan.expected(i);
@@ -904,6 +926,7 @@ pub(crate) async fn store_from_file(
                 }
                 _ => reader = Box::new(r),
             }
+            #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
             let (mid, _, _, thumb) = tg
                 .upload(&mut reader, upload_size, &part_name, &mime, &chat)
                 .await?;
@@ -913,16 +936,16 @@ pub(crate) async fn store_from_file(
 
     let (parts, tg_thumb) = collect_uploaders(uploaders, &plan, &tg).await?;
 
-    let mut thumb = None;
-    if let Some(jpeg) = tg_thumb.or_else(|| {
-        // Telegram makes no stripped thumbnail for audio; fall back to the
-        // embedded cover art captured from the buffer head.
+    // Telegram makes no stripped thumbnail for audio; fall back to the
+    // embedded cover art captured from the buffer head.
+    let thumb = match tg_thumb.or_else(|| {
         (mime.starts_with("audio/"))
             .then(|| crate::art::extract(head))
             .flatten()
     }) {
-        thumb = super::thumbs::thumb_bytes(jpeg).await;
-    }
+        Some(jpeg) => super::thumbs::thumb_bytes(jpeg).await,
+        None => None,
+    };
     tracing::info!(%name, parts = nparts, %declared, "uploaded file");
     persist_row(
         state,

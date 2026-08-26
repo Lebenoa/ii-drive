@@ -18,12 +18,11 @@ const MAX_DRAFT_LOG: usize = 40;
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
 /// The stage the conversation is parked at, derived from the transcript so
-/// there is a single source of truth. BotFather asks for a display name
+/// there is a single source of truth. `BotFather` asks for a display name
 /// first, then a username, then issues the token.
 fn stage_of(draft: &BotDraft) -> &'static str {
     if !draft.token.is_empty() {
@@ -52,11 +51,11 @@ fn draft_json(draft: &BotDraft) -> serde_json::Value {
     })
 }
 
-/// POST /api/botfather — relay one message to @BotFather over the caller's
+/// POST /api/botfather — relay one message to @`BotFather` over the caller's
 /// Telegram session and return its reply.
 ///
-/// BotFather owns the conversation state, which is exactly why the exchange
-/// is persisted here: if the wizard is abandoned mid-question, BotFather is
+/// `BotFather` owns the conversation state, which is exactly why the exchange
+/// is persisted here: if the wizard is abandoned mid-question, `BotFather` is
 /// still waiting, and the stored draft is what lets us resume that same
 /// conversation instead of firing a second `/newbot` into it. The draft row
 /// is keyed by the caller, so each account resumes its own conversation.
@@ -78,8 +77,7 @@ pub async fn send(
         .await?
         .unwrap_or_default();
 
-    let reply = tg
-        .botfather_send(text)
+    let reply = Box::pin(tg.botfather_send(text))
         .await
         .map_err(ApiError::bad_request)?;
 
@@ -92,6 +90,8 @@ pub async fn send(
         text: reply.clone(),
     });
     if draft.log.len() > MAX_DRAFT_LOG {
+        // len() > MAX_DRAFT_LOG here (guarded above), so the subtraction is non-negative.
+        #[allow(clippy::arithmetic_side_effects)]
         let cut = draft.log.len() - MAX_DRAFT_LOG;
         draft.log.drain(..cut);
     }
@@ -116,15 +116,15 @@ pub async fn draft(
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let state = crate::state::get();
-    match crate::db::get_bot_draft(&state.db, &uid.to_string()).await? {
-        Some(d) => Ok(Json(draft_json(&d))),
-        None => Ok(Json(json!({ "active": false }))),
-    }
+    crate::db::get_bot_draft(&state.db, &uid.to_string()).await?.map_or_else(
+        || Ok(Json(json!({ "active": false }))),
+        |d| Ok(Json(draft_json(&d))),
+    )
 }
 
-/// DELETE /api/botfather/draft — tell BotFather to drop its pending
+/// DELETE /api/botfather/draft — tell `BotFather` to drop its pending
 /// question and forget the draft. Without this an abandoned wizard leaves
-/// BotFather waiting for an answer indefinitely.
+/// `BotFather` waiting for an answer indefinitely.
 pub async fn cancel_draft(
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -137,7 +137,8 @@ pub async fn cancel_draft(
     // BotFather's side; only an unfinished one needs the /cancel.
     let mut told = false;
     if draft.token.is_empty() {
-        match state.tg(uid).await?.botfather_send("/cancel").await {
+        let tg = state.tg(uid).await?;
+        match Box::pin(tg.botfather_send("/cancel")).await {
             Ok(_) => told = true,
             // The draft is dropped either way: a failed /cancel must not
             // strand the wizard on a conversation it cannot clear.
@@ -153,14 +154,13 @@ pub struct BotTokenBody {
     pub bot: String,
 }
 
-/// GET /api/botfather/bots — ask @BotFather for /mybots and return the
+/// GET /api/botfather/bots — ask @`BotFather` for /mybots and return the
 /// owned-bot names parsed from its inline menu button labels. Bots already
 /// configured in the caller's drive are filtered out.
 pub async fn bots(Extension(Caller(uid)): Extension<Caller>) -> ApiResult<Json<serde_json::Value>> {
     let state = crate::state::get();
     let tg = state.tg(uid).await?;
-    let names = tg
-        .botfather_my_bots()
+    let names = Box::pin(tg.botfather_my_bots())
         .await
         .map_err(ApiError::bad_request)?;
     let configured: std::collections::HashSet<String> = tg
@@ -176,7 +176,7 @@ pub async fn bots(Extension(Caller(uid)): Extension<Caller>) -> ApiResult<Json<s
     Ok(Json(json!({ "bots": bots })))
 }
 
-/// POST /api/botfather/token {bot} — walk the BotFather menus to fetch one
+/// POST /api/botfather/token {bot} — walk the `BotFather` menus to fetch one
 /// owned bot's API token, so it can be imported without copy-paste.
 pub async fn token(
     Extension(Caller(uid)): Extension<Caller>,
@@ -187,10 +187,8 @@ pub async fn token(
     if bot.is_empty() {
         return Err(ApiError::bad_request("bot name must not be empty"));
     }
-    let tok = state
-        .tg(uid)
-        .await?
-        .botfather_bot_token(bot)
+    let tg = state.tg(uid).await?;
+    let tok = Box::pin(tg.botfather_bot_token(bot))
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(json!({ "token": tok })))

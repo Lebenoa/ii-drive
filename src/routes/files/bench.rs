@@ -38,7 +38,8 @@ pub async fn bench(
         .next()
         .map(|c| c.chat)
         .ok_or_else(|| ApiError::bad_request("no storage channels selected"))?;
-    tg.bench_upload(body.size_mb, &chat)
+    // The upload future is large; pinning keeps it off the stack.
+    Box::pin(tg.bench_upload(body.size_mb, &chat))
         .await
         .map_err(ApiError::bad_request)
         .map(Json)

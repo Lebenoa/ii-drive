@@ -41,14 +41,14 @@ pub(super) struct LoginFailure {
 
 impl LoginFailure {
     fn wrong(message: impl Into<String>) -> Self {
-        LoginFailure {
+        Self {
             message: message.into(),
             wrong_secret: true,
         }
     }
 
     fn misuse(message: impl Into<String>) -> Self {
-        LoginFailure {
+        Self {
             message: message.into(),
             wrong_secret: false,
         }
@@ -73,7 +73,7 @@ impl Pending {
             session_path.to_string_lossy().into_owned(),
             UNKNOWN_USER,
         );
-        Pending {
+        Self {
             manager: Arc::new(manager),
             session_path,
             flow: Flow::Idle,
@@ -114,7 +114,7 @@ impl Pending {
                 )),
             },
             Err(grammers_client::SignInError::PasswordRequired(pt)) => {
-                let hint = pt.hint().map(|h| h.to_string());
+                let hint = pt.hint().map(ToString::to_string);
                 self.flow = Flow::PasswordNeeded {
                     token: Box::new(pt),
                 };

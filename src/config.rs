@@ -42,7 +42,7 @@ pub struct Config {
     /// would be a setting nobody can fill in unaided.
     ///
     /// Deliberately a file setting and not a database one: `/internal-db`
-    /// runs unrestricted SurrealQL, so an admin list living in the store
+    /// runs unrestricted `SurrealQL`, so an admin list living in the store
     /// would be a list admins can extend. Keeping it in a file the server
     /// only ever reads means granting operator rights takes filesystem
     /// access, not a session.
@@ -91,7 +91,7 @@ struct RawConfig {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             host: "127.0.0.1".into(),
             port: 8080,
             api_id: 0,
@@ -144,7 +144,7 @@ fn resolve_secret(cfg: &mut Config) {
 
     let dir = std::path::Path::new(&cfg.db_path)
         .parent()
-        .unwrap_or(std::path::Path::new("."));
+        .unwrap_or_else(|| std::path::Path::new("."));
     let file = dir.join("secret.key");
     if let Ok(existing) = std::fs::read_to_string(&file) {
         let trimmed = existing.trim();
@@ -239,7 +239,7 @@ fn asset_path(rel: &str) -> String {
 /// string like `"2GiB"`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum SizeRepr {
+pub enum SizeRepr {
     Num(u64),
     Str(String),
 }
@@ -247,8 +247,8 @@ pub(crate) enum SizeRepr {
 impl SizeRepr {
     pub(crate) fn bytes(&self) -> Result<u64, String> {
         match self {
-            SizeRepr::Num(n) => Ok(*n),
-            SizeRepr::Str(s) => parse_size(s),
+            Self::Num(n) => Ok(*n),
+            Self::Str(s) => parse_size(s),
         }
     }
 }
@@ -282,7 +282,7 @@ impl Config {
             }
         }
 
-        Ok(Config {
+        Ok(Self {
             host: raw.host.unwrap_or_else(|| "127.0.0.1".into()),
             port: raw.port.unwrap_or(8080),
             api_id: raw.api_id.unwrap_or(0),
@@ -372,13 +372,19 @@ impl Config {
 }
 
 /// Strips everything but ASCII digits: "+1 (555) 010-2030" -> "15550102030".
-pub(crate) fn normalize_phone(phone: &str) -> String {
-    phone.chars().filter(|c| c.is_ascii_digit()).collect()
+pub fn normalize_phone(phone: &str) -> String {
+    phone.chars().filter(char::is_ascii_digit).collect()
 }
 
 /// Parse a human byte size like "2GiB", "500MB", "1024KiB", "42".
 /// Binary (1024-based): KiB MiB GiB TiB and bare K M G T.
 /// Decimal (1000-based): KB MB GB TB.
+#[allow(
+    clippy::as_conversions,           // f64 size math: fractional inputs like "2.5GiB"
+    clippy::cast_sign_loss,           // total is range-checked > u64::MAX before the cast
+    clippy::cast_precision_loss,      // mult max ~2^40 fits f64's 52-bit mantissa exactly
+    clippy::cast_possible_truncation, // guarded by the fract() and > u64::MAX checks
+)]
 pub fn parse_size(input: &str) -> Result<u64, String> {
     let s = input.trim();
     let num_end = s
@@ -395,21 +401,16 @@ pub fn parse_size(input: &str) -> Result<u64, String> {
 
     let mult: u64 = match suffix_part.trim().to_ascii_lowercase().as_str() {
         "" | "b" => 1,
-        // Bare letters: 1024-based (common drive-usage convention).
-        "k" => 1024,
-        "m" => 1024 * 1024,
-        "g" => 1024 * 1024 * 1024,
-        "t" => 1024u64 * 1024 * 1024 * 1024,
+        // Bare letters and IEC units are 1024-based; the "b" forms are SI.
+        "k" | "kib" => 1024,
+        "m" | "mib" => 1024 * 1024,
+        "g" | "gib" => 1024 * 1024 * 1024,
+        "t" | "tib" => 1024u64 * 1024 * 1024 * 1024,
         // Explicit "b" suffixes: SI, 1000-based.
         "kb" => 1000,
         "mb" => 1000 * 1000,
         "gb" => 1000 * 1000 * 1000,
         "tb" => 1000 * 1000 * 1000 * 1000,
-        // Explicit IEC units: 1024-based.
-        "kib" => 1024,
-        "mib" => 1024 * 1024,
-        "gib" => 1024 * 1024 * 1024,
-        "tib" => 1024u64 * 1024 * 1024 * 1024,
         other => return Err(format!("unknown size unit `{other}` in `{input}`")),
     };
 

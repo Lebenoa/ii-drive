@@ -24,7 +24,7 @@ pub struct Tokens {
 
 impl Tokens {
     pub fn new(secret: &str, ttl_secs: u64) -> Self {
-        Tokens {
+        Self {
             key: secret.as_bytes().to_vec(),
             ttl_secs,
         }
@@ -35,19 +35,16 @@ impl Tokens {
         // fail today; the zeroed-key fallback keeps the server alive and
         // signing (all tokens share the fallback) if that ever changes.
         // An invariant breach here is logged loudly — see below.
-        let mut mac = match HmacSha256::new_from_slice(&self.key) {
-            Ok(mac) => mac,
+        let mut mac = HmacSha256::new_from_slice(&self.key).unwrap_or_else(|_| {
             // HMAC-SHA256 accepts every key length, so this arm cannot fire
             // today; a zeroed key keeps the server signing (all tokens share
             // it) instead of taking the process down — but it is a security
             // downgrade, so scream into the logs if it ever happens.
-            Err(_) => {
-                tracing::error!(
-                    "HMAC key rejected by new_from_slice; signing with public fallback key"
-                );
-                HmacSha256::new(&Default::default())
-            }
-        };
+            tracing::error!(
+                "HMAC key rejected by new_from_slice; signing with public fallback key"
+            );
+            HmacSha256::new(&[0u8; 64].into())
+        });
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -58,6 +55,8 @@ impl Tokens {
     /// The epoch is inside the MAC, so a stolen token cannot be rewound to an
     /// epoch that is still current.
     pub fn issue(&self, user_id: i64, epoch: u64) -> String {
+        // Expiry = unix now + bounded TTL from config; cannot overflow in practice.
+        #[allow(clippy::arithmetic_side_effects)]
         let exp = now_unix() + self.ttl_secs;
         let nonce: [u8; 8] = rand::random();
         let nonce_hex = hex::encode(nonce);
@@ -101,6 +100,8 @@ impl Tokens {
     /// Signs a share link for one file: `<expiry>.<hex sig over "f/{uid}/{exp}">`.
     /// Unlike session tokens, this grants access to a single file only.
     pub fn sign_file(&self, uid: &str, ttl_secs: u64) -> String {
+        // Expiry = unix now + bounded TTL; cannot overflow in practice.
+        #[allow(clippy::arithmetic_side_effects)]
         let exp = now_unix() + ttl_secs;
         let payload = format!("f/{uid}/{exp}");
         format!("{exp}.{}", self.sign(&payload))
@@ -137,6 +138,8 @@ impl Tokens {
     /// loads need no revocation lookup. The asymmetry is a decision, not an
     /// oversight — widen it only if media TTLs ever grow.
     pub fn sign_media(&self, user_id: i64, ttl_secs: u64) -> String {
+        // Expiry = unix now + bounded TTL; cannot overflow in practice.
+        #[allow(clippy::arithmetic_side_effects)]
         let exp = now_unix() + ttl_secs;
         let sig = self.sign(&format!("m/{user_id}/{exp}"));
         format!("{user_id}.{exp}.{sig}")
@@ -166,8 +169,7 @@ impl Tokens {
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// The authenticated Telegram user id behind the current request, published to

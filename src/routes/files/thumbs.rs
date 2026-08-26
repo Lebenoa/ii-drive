@@ -70,17 +70,17 @@ fn thumb_path(dir: &std::path::Path, uid: &str) -> std::path::PathBuf {
 }
 
 /// Whether a stored thumbnail exists for the uid.
-pub(crate) fn exists(dir: &std::path::Path, uid: &str) -> bool {
+pub fn exists(dir: &std::path::Path, uid: &str) -> bool {
     thumb_path(dir, uid).is_file()
 }
 
 /// Writes thumbnail bytes for a uid into `dir`.
-pub(crate) async fn write(dir: &std::path::Path, uid: &str, bytes: &[u8]) -> std::io::Result<()> {
+pub async fn write(dir: &std::path::Path, uid: &str, bytes: &[u8]) -> std::io::Result<()> {
     tokio::fs::write(thumb_path(dir, uid), bytes).await
 }
 
 /// Removes a stored thumbnail, ignoring absence.
-pub(crate) async fn remove(dir: &std::path::Path, uid: &str) {
+pub async fn remove(dir: &std::path::Path, uid: &str) {
     let _ = tokio::fs::remove_file(thumb_path(dir, uid)).await;
 }
 
@@ -104,23 +104,23 @@ pub fn parse_sweep_time(s: &str) -> Result<(u8, u8), String> {
 /// `HH:MM`, repeating every `hours` hours across days. `None` when the
 /// periodic sweep is disabled or the anchor does not parse.
 pub fn next_sweep_in(anchor: &str, hours: u64) -> Option<std::time::Duration> {
+    use time::{OffsetDateTime, Time};
     let (h, m) = parse_sweep_time(anchor).ok()?;
     if hours == 0 {
         return None;
     }
-    use time::{OffsetDateTime, Time};
     let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     // The grid starts at today's anchor and steps forward every `hours`
     // hours, rolling over into following days as needed — DST shifts are
     // absorbed by the fixed-offset arithmetic rather than re-anchoring.
     let today_anchor = now.replace_time(Time::from_hms(h, m, 0).ok()?);
-    let step = (hours * 3600) as i64;
+    let step = i64::try_from(hours.saturating_mul(3600)).ok()?;
     let mut cand = today_anchor.unix_timestamp();
     while cand <= now.unix_timestamp() {
-        cand += step;
+        cand = cand.saturating_add(step);
     }
     Some(std::time::Duration::from_secs(
-        (cand - now.unix_timestamp()) as u64,
+        u64::try_from(cand.saturating_sub(now.unix_timestamp())).ok()?,
     ))
 }
 
@@ -133,7 +133,7 @@ pub async fn sweep(state: &AppState) -> Result<usize, String> {
     let mut rd = tokio::fs::read_dir(&state.thumbs_dir)
         .await
         .map_err(|e| e.to_string())?;
-    let mut removed = 0;
+    let mut removed: usize = 0;
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "avif")
@@ -141,7 +141,7 @@ pub async fn sweep(state: &AppState) -> Result<usize, String> {
             && !live.contains(stem)
             && tokio::fs::remove_file(&path).await.is_ok()
         {
-            removed += 1;
+            removed = removed.saturating_add(1);
         }
     }
     Ok(removed)
@@ -150,7 +150,7 @@ pub async fn sweep(state: &AppState) -> Result<usize, String> {
 /// Normalizes ad-hoc still-image sources (Telegram stripped previews,
 /// embedded cover art) into the stored thumbnail form: raw AVIF bytes.
 /// `None` when the bytes do not parse as a decodable still image.
-pub(crate) async fn thumb_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
+pub async fn thumb_bytes(bytes: Vec<u8>) -> Option<Vec<u8>> {
     tokio::task::spawn_blocking(move || encode_thumb(&bytes))
         .await
         .ok()?
@@ -179,15 +179,12 @@ pub async fn extract_media_thumb(
         return;
     }
     let path = dir.join(uid);
-    let tg = match state.hub.get(owner).await {
-        Some(tg) => tg,
-        None => {
-            tracing::info!("account {owner} signed out — skipping thumbnail for {uid}");
-            return;
-        }
+    let Some(tg) = state.hub.get(owner).await else {
+        tracing::info!("account {owner} signed out — skipping thumbnail for {uid}");
+        return;
     };
 
-    let size = part0.size as u64;
+    let size = u64::try_from(part0.size).unwrap_or(0);
 
     // One raw source image: the part itself for stills, a single
     // PNG-encoded frame from ffmpeg for video. Every failure branch logs
@@ -195,15 +192,19 @@ pub async fn extract_media_thumb(
     let raw: Option<Vec<u8>> = if mime.starts_with("image/") {
         // Still images decode from the complete part; they are rarely
         // large enough for the transfer to matter.
-        match download_bounded(&tg, uid, &part0, 0, size, &path).await {
-            Ok(_) => match tokio::fs::read(&path).await {
+        if download_bounded(&tg, uid, &part0, 0, size, &path)
+            .await
+            .is_err()
+        {
+            None
+        } else {
+            match tokio::fs::read(&path).await {
                 Ok(bytes) => Some(bytes),
                 Err(e) => {
                     tracing::warn!("thumb read failed for {uid}: {e}");
                     None
                 }
-            },
-            Err(()) => None,
+            }
         }
     } else if !*FFMPEG {
         tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
@@ -293,7 +294,11 @@ async fn download_bounded(
     path: &std::path::Path,
 ) -> Result<(), ()> {
     use futures::StreamExt;
-    let mut stream =
+    // The part may be an at-rest-encrypted container. When it carries a
+    // nonce, the stored bytes are ciphertext: wrap the stream in the
+    // decryptor so the thumbnail decoder sees plaintext. Without a key the
+    // file is unreadable — fail loudly rather than emit a garbage image.
+    let mut stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send>> =
         match crate::stream::file_stream_from(tg, part0.message_id, &part0.chat, start).await {
             Ok(s) => Box::pin(s),
             Err(e) => {
@@ -301,6 +306,14 @@ async fn download_bounded(
                 return Err(());
             }
         };
+    if part0.nonce.as_deref().and_then(crate::crypt::nonce_from_b64).is_some() {
+        let Some(key) = crate::config::get().crypt_key_unconditional() else {
+            tracing::warn!("thumb download needs crypt_password for encrypted part of {uid}");
+            return Err(());
+        };
+        let dec = crate::crypt::DecryptingStream::from_header(stream, &key);
+        stream = Box::pin(dec);
+    }
     let mut out = match tokio::fs::File::create(path).await {
         Ok(f) => f,
         Err(e) => {
@@ -315,7 +328,7 @@ async fn download_bounded(
             tracing::warn!("thumb write failed for {uid}: {e}");
             return Err(());
         }
-        written += chunk.len() as u64;
+        written = written.saturating_add(u64::try_from(chunk.len()).unwrap_or(0));
         if written >= cap {
             break;
         }

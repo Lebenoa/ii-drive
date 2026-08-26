@@ -21,10 +21,12 @@ pub async fn get_rules(
     let Some(row) = rows.into_iter().next() else {
         return Ok(Vec::new());
     };
-    match row.get("rules_json").and_then(|v| v.as_str()) {
-        Some(s) => serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}"))),
-        None => Ok(Vec::new()),
-    }
+    row.get("rules_json")
+        .and_then(|v| v.as_str())
+        .map_or_else(
+            || Ok(Vec::new()),
+            |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}"))),
+        )
 }
 
 pub async fn set_rules(
@@ -69,6 +71,8 @@ pub async fn set_split(
     user_key: &str,
     bytes: u64,
 ) -> Result<(), DbError> {
+    #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
+    // Split threshold is an operator-set byte count; always fits i64.
     let mut res = db
         .query(format!(
             "UPSERT {} SET split_bytes = $b",
@@ -106,12 +110,12 @@ pub async fn get_channels(
     let Some(row) = rows.into_iter().next() else {
         return Ok(Vec::new());
     };
-    match row.get("chats_json").and_then(|v| v.as_str()) {
-        Some(s) => {
-            serde_json::from_str(s).map_err(|e| DbError::Shape(format!("channels shape: {e}")))
-        }
-        None => Ok(Vec::new()),
-    }
+    row.get("chats_json")
+        .and_then(|v| v.as_str())
+        .map_or_else(
+            || Ok(Vec::new()),
+            |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("channels shape: {e}"))),
+        )
 }
 
 pub async fn set_channels(
@@ -132,16 +136,16 @@ pub async fn set_channels(
     Ok(())
 }
 
-/// A half-finished @BotFather `/newbot` conversation. BotFather keeps its
-/// own pending question, so abandoning the wizard leaves it waiting for an
-/// answer forever. Persisting the transcript lets the wizard resume that
+/// A half-finished @`BotFather` `/newbot` conversation. `BotFather` keeps
+/// its own pending question, so abandoning the wizard leaves it waiting for
+/// an answer forever. Persisting the transcript lets the wizard resume that
 /// same conversation instead of firing a second `/newbot` at it — and keeps
 /// an issued token from being lost before the bot joins the pool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BotDraft {
     /// Transcript, oldest first.
     pub log: Vec<DraftMsg>,
-    /// Token once BotFather issued one; empty until then.
+    /// Token once `BotFather` issued one; empty until then.
     pub token: String,
     /// Unix seconds of the last exchange, for staleness display.
     pub updated_at: i64,
@@ -170,12 +174,13 @@ pub async fn get_bot_draft(
     let Some(row) = rows.into_iter().next() else {
         return Ok(None);
     };
-    match row.get("draft_json").and_then(|v| v.as_str()) {
-        Some(s) => serde_json::from_str(s)
-            .map(Some)
-            .map_err(|e| DbError::Shape(format!("bot draft shape: {e}"))),
-        None => Ok(None),
-    }
+    row.get("draft_json")
+        .and_then(|v| v.as_str())
+        .map_or(Ok(None), |s| {
+            serde_json::from_str(s)
+                .map(Some)
+                .map_err(|e| DbError::Shape(format!("bot draft shape: {e}")))
+        })
 }
 
 pub async fn set_bot_draft(
@@ -238,7 +243,11 @@ pub async fn bump_token_epoch(
     db: &surrealdb::Surreal<Conn>,
     user_key: &str,
 ) -> Result<u64, DbError> {
+    #[allow(clippy::arithmetic_side_effects)]
+    // Mints one epoch past the stored value; cannot overflow in practice.
     let next = get_token_epoch(db, user_key).await? + 1;
+    #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
+    // A token epoch is a small counter; always fits i64.
     let mut res = db
         .query(format!("UPSERT {} SET epoch = $e", epoch_id(user_key)))
         .bind(("e", next as i64))
@@ -286,7 +295,7 @@ pub struct Instance {
 
 impl Default for Instance {
     fn default() -> Self {
-        Instance {
+        Self {
             max_file_size: 2 * 1024 * 1024 * 1024,
             media_thumbs: true,
             thumb_sweep_time: "00:00".to_string(),
@@ -344,6 +353,8 @@ pub async fn get_instance(db: &surrealdb::Surreal<Conn>) -> Result<Option<Instan
 }
 
 pub async fn set_instance(db: &surrealdb::Surreal<Conn>, inst: &Instance) -> Result<(), DbError> {
+    #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
+    // Instance tunables are operator-set values that always fit i64.
     let mut res = db
         .query(format!(
             "UPSERT {INSTANCE_ID} SET max_file_size = $s, media_thumbs = $t, \
@@ -362,8 +373,8 @@ pub async fn set_instance(db: &surrealdb::Surreal<Conn>, inst: &Instance) -> Res
 impl std::fmt::Display for UploadStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            UploadStrategy::Stream => "stream",
-            UploadStrategy::Spill => "spill",
+            Self::Stream => "stream",
+            Self::Spill => "spill",
         })
     }
 }

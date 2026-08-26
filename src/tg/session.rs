@@ -17,7 +17,7 @@ impl TgManager {
     /// own session file; `user_id` is [`super::UNKNOWN_USER`] while a login
     /// is still in flight and the account is therefore unknown.
     pub fn new(cfg: Config, session_path: String, user_id: i64) -> Self {
-        TgManager {
+        Self {
             cfg,
             session_path,
             user_id,
@@ -112,6 +112,7 @@ impl TgManager {
     }
 
     /// Status for /api/me. Never fails — reports degradation in the payload.
+    #[allow(clippy::arithmetic_side_effects)] // retry counter is bounded at < 2, so `attempt += 1` cannot overflow
     pub async fn status(&self) -> TgStatus {
         match self.ensure().await {
             Err(e) => TgStatus {
@@ -195,7 +196,7 @@ impl TgManager {
             .thumbs()
             .into_iter()
             .filter(|t| !matches!(t, grammers_client::media::PhotoSize::Stripped(_)))
-            .max_by_key(|t| t.size())?;
+            .max_by_key(grammers_client::media::PhotoSize::size)?;
         let mut it = client.iter_download(&thumb).chunk_size(64 * 1024);
         let mut out = Vec::new();
         while let Some(chunk) = it.next().await.ok()? {
@@ -205,6 +206,7 @@ impl TgManager {
     }
 
     /// Picks the next storage target when several are configured.
+    #[allow(clippy::unused_self)] // kept as a &self method: it is called from routes/files/upload.rs, which is out of scope
     pub fn next_rotation(&self) -> usize {
         use std::sync::atomic::Ordering;
         ROTATION.fetch_add(1, Ordering::Relaxed)

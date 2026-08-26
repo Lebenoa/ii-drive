@@ -195,14 +195,14 @@ impl TgManager {
     /// Whether an admin-rights grant covers inviting a download bot and
     /// promoting it to admin. Both are required: an un-promoted bot cannot read
     /// the channel's files back.
-    fn can_wire_bots(rights: Option<&tl::enums::ChatAdminRights>) -> bool {
+    const fn can_wire_bots(rights: Option<&tl::enums::ChatAdminRights>) -> bool {
         let Some(tl::enums::ChatAdminRights::Rights(r)) = rights else {
             return false;
         };
         r.invite_users && r.add_admins
     }
 
-    /// Builds an InputPeer for pagination offsets from the same response's
+    /// Builds an `InputPeer` for pagination offsets from the same response's
     /// chats array (which carries the access hashes).
     fn input_peer_for(raw_id: i64, chats: &[tl::enums::Chat]) -> tl::enums::InputPeer {
         for c in chats {

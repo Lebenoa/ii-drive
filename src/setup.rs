@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use tower_http::services::{ServeDir, ServeFile};
 
 /// Runs when `config_path` does not exist. Serves the wizard until a valid
-/// submission lands, writes the file, then returns — main() exits with a
+/// submission lands, writes the file, then returns — `main()` exits with a
 /// "start again" message.
 pub async fn run(config_path: PathBuf) -> color_eyre::Result<()> {
     // The wizard binds loopback by default so credentials are never
@@ -85,9 +85,11 @@ struct SetupBody {
 /// POST /api/setup — validates, writes `config.toml`, then exits the process.
 ///
 /// The error string is what the form shows the user, so it names the field and
-/// what a valid value looks like rather than just refusing.
+// The `exit` is the whole point of the wizard: it terminates the process after
+// writing the config so the operator restarts into the real server.
+#[allow(clippy::exit)]
 async fn submit(State(state): State<SetupState>, Json(body): Json<SetupBody>) -> Response {
-    match validate_and_write(&state.config_path, body) {
+    match validate_and_write(&state.config_path, &body) {
         Ok(written) => {
             // Let the response reach the browser before exiting.
             tokio::spawn(async {
@@ -105,11 +107,11 @@ async fn submit(State(state): State<SetupState>, Json(body): Json<SetupBody>) ->
 }
 
 fn normalize_phone(raw: &str) -> Option<String> {
-    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = raw.chars().filter(char::is_ascii_digit).collect();
     (digits.len() >= 6 && digits.len() <= 15).then_some(digits)
 }
 
-fn validate_and_write(config_path: &Path, body: SetupBody) -> Result<String, String> {
+fn validate_and_write(config_path: &Path, body: &SetupBody) -> Result<String, String> {
     let api_hash = body.api_hash.trim().to_string();
     if api_hash.len() != 32 || !api_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("api_hash must be the 32-character hex string from my.telegram.org".into());
@@ -186,7 +188,7 @@ mod tests {
 
         let written = validate_and_write(
             &path,
-            SetupBody {
+            &SetupBody {
                 api_id: 12345,
                 api_hash: "a".repeat(32),
                 phones: "+1 555 123 4567, +447700900123".into(),
@@ -214,7 +216,7 @@ mod tests {
         assert!(
             validate_and_write(
                 &path,
-                SetupBody {
+                &SetupBody {
                     api_id: 0,
                     api_hash: "a".repeat(32),
                     phones: "+15551234567".into()
@@ -225,7 +227,7 @@ mod tests {
         assert!(
             validate_and_write(
                 &path,
-                SetupBody {
+                &SetupBody {
                     api_id: 5,
                     api_hash: "short".into(),
                     phones: "+15551234567".into()
@@ -236,7 +238,7 @@ mod tests {
         assert!(
             validate_and_write(
                 &path,
-                SetupBody {
+                &SetupBody {
                     api_id: 5,
                     api_hash: "a".repeat(32),
                     phones: "abc".into()

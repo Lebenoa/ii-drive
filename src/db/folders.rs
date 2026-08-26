@@ -83,10 +83,13 @@ pub async fn folder_is_empty(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result
     let total = |rows: &[serde_json::Value]| {
         rows.first()
             .and_then(|r| r.get("n"))
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0)
     };
-    Ok(total(&files) + total(&subs) == 0)
+    #[allow(clippy::arithmetic_side_effects)]
+    // Sum of two bounded DB row counts from the same table set.
+    let total_count = total(&files) + total(&subs);
+    Ok(total_count == 0)
 }
 
 pub async fn delete_folder(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u64, DbError> {
@@ -95,5 +98,8 @@ pub async fn delete_folder(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u
         .bind(("uid", uid.to_string()))
         .await?;
     let deleted: Vec<serde_json::Value> = res.take(0)?;
-    Ok(deleted.len() as u64)
+    // A Vec length is bounded by memory and always fits u64.
+    #[allow(clippy::as_conversions)]
+    let n = deleted.len() as u64;
+    Ok(n)
 }

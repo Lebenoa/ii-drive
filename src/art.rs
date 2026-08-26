@@ -2,13 +2,24 @@
 //! frames (mp3 and friends; 2.2's 3-byte `PIC` frames are not handled —
 //! too rare to matter) and FLAC `PICTURE` metadata blocks. Pure
 //! byte parsing, no decode — the payload is already a jpeg/png.
+//
+// All indexing and offset arithmetic below operates on buffers whose lengths
+// are already validated by the surrounding `.get()` / `len()` guards, so the
+// indices and offsets are provably in range and cannot overflow (they are
+// bounded by the buffer length, which itself is `usize`). `as` casts are the
+// lossless `u8 -> usize` widening every byte here needs.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing
+)]
 
-fn be32(b: &[u8]) -> usize {
+const fn be32(b: &[u8]) -> usize {
     ((b[0] as usize) << 24) | ((b[1] as usize) << 16) | ((b[2] as usize) << 8) | b[3] as usize
 }
 
 /// Syncsafe integer (ID3v2.4 / tag size): 7 bits per byte.
-fn syncsafe(b: &[u8]) -> usize {
+const fn syncsafe(b: &[u8]) -> usize {
     ((b[0] as usize) & 0x7f) << 21
         | ((b[1] as usize) & 0x7f) << 14
         | ((b[2] as usize) & 0x7f) << 7

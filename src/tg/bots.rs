@@ -33,7 +33,9 @@ impl TgManager {
                 u.access_hash,
                 u.username.clone().unwrap_or_else(|| format!("bot{}", u.id)),
             ),
-            _ => return Err("bot account unavailable".to_string()),
+            tl::enums::User::Empty(_) => {
+                return Err("bot account unavailable".to_string());
+            }
         };
         let replaced = self.st.lock().await.bots.insert(
             id,
@@ -61,6 +63,7 @@ impl TgManager {
     }
 
     /// Snapshot of the pool for the settings UI (no tokens).
+    #[allow(clippy::significant_drop_tightening)] // `st` guard lives only to snapshot bots; collected before any await
     pub async fn bot_list(&self) -> Vec<(i64, String)> {
         let st = self.st.lock().await;
         let mut v: Vec<(i64, String)> = st
@@ -76,8 +79,10 @@ impl TgManager {
     /// downloads alike: rotating through the bot pool for channel-stored
     /// files, falling back to the user session (also used for Saved
     /// Messages, which bots cannot read). Every bot is a session of its
-    /// own, so concurrent transfers each get a separate MTProto connection
+    /// own, so concurrent transfers each get a separate `MTProto` connection
     /// with separate rate limits instead of queueing on one.
+    #[allow(clippy::arithmetic_side_effects)] // `bots > 0` is guarded before the modulo, so it cannot divide by zero
+    #[allow(clippy::significant_drop_tightening)] // `st` is block-scoped to the snapshot; no cross-await hold
     pub async fn pool_target(
         &self,
         chat: &str,
@@ -102,10 +107,7 @@ impl TgManager {
                 };
                 let mut last_err = String::new();
                 for bs in sessions.iter().cycle().skip(skip).take(bots) {
-                    let pid = match PeerId::from_bot_api_dialog_id(n) {
-                        Some(p) => p,
-                        None => break,
-                    };
+                    let Some(pid) = PeerId::from_bot_api_dialog_id(n) else { break };
                     let pref = PeerRef {
                         id: pid,
                         auth: PeerAuth::default(),
@@ -135,6 +137,7 @@ impl TgManager {
 
     /// Invites every configured bot into the given storage chat and
     /// promotes it to admin, so downloads work through the pool.
+    #[allow(clippy::too_many_lines)] // a single multi-step async orchestration; splitting adds indirection for no clarity gain
     pub async fn add_bots_to_chat(&self, chat: &str) -> Vec<(String, Result<(), String>)> {
         // One snapshot pass pairs each bot's live client with its stored
         // identity, so the whole flow below sees a consistent pool.
@@ -204,7 +207,7 @@ impl TgManager {
                                     access_hash: u.access_hash.unwrap_or(0),
                                 })
                             }
-                            _ => stored_user.clone().ok_or_else(|| {
+                            tl::enums::User::Empty(_) => stored_user.clone().ok_or_else(|| {
                                 format!("bot @{username} resolved to an empty account")
                             })?,
                         },

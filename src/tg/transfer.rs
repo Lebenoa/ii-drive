@@ -1,3 +1,4 @@
+#![allow(clippy::large_futures)] // send_message/run futures are awaited directly here; boxing adds no value
 use grammers_client::InvocationError;
 use grammers_client::message::InputMessage;
 
@@ -9,6 +10,8 @@ impl TgManager {
     /// Streams `reader` up to Telegram and posts it as a document message in
     /// the given storage chat. Returns `(message id, name, mime, thumb)` —
     /// thumb is the tiny JPEG Telegram generates, when it made one.
+    #[allow(clippy::cast_possible_truncation, clippy::as_conversions)] // file size u64→usize is lossless on this 64-bit host
+    #[allow(clippy::large_futures)] // the send_message future is acknowledged directly here; boxing adds no value
     pub async fn upload<S>(
         &self,
         reader: &mut S,
@@ -74,13 +77,16 @@ impl TgManager {
     /// twice — once through the rotating bot pool, once forced through the
     /// owner session — and reports wall-clock timings. Same channel, same
     /// code path, so the only variable is which session carries the bytes.
-    /// Both posted messages are deleted afterwards.
+    #[allow(clippy::cast_possible_truncation, clippy::as_conversions)] // buffer size u64→usize is lossless on this 64-bit host
+    #[allow(clippy::large_futures)] // the send_message and run futures are awaited directly; boxing adds no value
     pub async fn bench_upload(
         &self,
         size_mb: u64,
         chat: &str,
     ) -> Result<serde_json::Value, String> {
-        let size = size_mb * 1024 * 1024;
+        // size_mb is an admin diagnostic, so clamp rather than overflow on a
+        // huge bogus value.
+        let size = size_mb.saturating_mul(1024).saturating_mul(1024);
 
         let run = |client: grammers_client::Client, peer: super::PeerRef| {
             let data = vec![0xAAu8; size as usize];
@@ -131,7 +137,7 @@ impl TgManager {
     }
 }
 
-pub(crate) fn is_file_reference_error(err: &InvocationError) -> bool {
+pub fn is_file_reference_error(err: &InvocationError) -> bool {
     if let InvocationError::Rpc(rpc) = err {
         rpc.is(FILE_REFERENCE_EXPIRED) || rpc.is(FILEREF_UPGRADE_NEEDED)
     } else {

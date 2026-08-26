@@ -27,9 +27,9 @@ pub async fn move_file(
     // The destination must be the caller's own folder — a foreign folder id
     // is indistinguishable from a nonexistent one from here.
     if !body.folder.is_empty()
-        && !crate::db::get_folder(&state.db, &body.folder)
+        && crate::db::get_folder(&state.db, &body.folder)
             .await?
-            .is_some_and(|f| f.owner == uid)
+            .is_none_or(|f| f.owner != uid)
     {
         return Err(ApiError::bad_request("target folder not found"));
     }

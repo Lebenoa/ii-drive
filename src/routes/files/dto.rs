@@ -16,7 +16,7 @@ impl FileDto {
     /// `has_thumb` comes from the thumbnail store on disk, not the row:
     /// the database no longer carries preview bytes.
     pub fn new(r: FileRow, has_thumb: bool) -> Self {
-        FileDto {
+        Self {
             id: r.uid,
             name: r.name,
             mime: r.mime,

@@ -42,7 +42,7 @@ const TABLE: &str = "file";
 
 const ROW_COLS: &str = "uid, name, mime, size, created_at, parts_json, folder, public, owner";
 
-/// Deserializes a `String` that may arrive as JSON null (SurrealDB projects
+/// Deserializes a `String` that may arrive as JSON null (`SurrealDB` projects
 /// unset fields as null) into "" instead of failing.
 fn null_as_empty<'de, D>(d: D) -> Result<String, D::Error>
 where
@@ -146,6 +146,8 @@ pub async fn list(
     limit: u64,
     offset: u64,
 ) -> Result<Vec<FileRow>, DbError> {
+    #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
+    // Limit is capped at 500 and offset is a page counter; both fit in i64.
     let mut res = db
         .query(format!(
             // CONTAINS "" is true for every name, so one query serves both cases.
@@ -202,7 +204,10 @@ pub async fn delete(db: &surrealdb::Surreal<Conn>, uid: &str) -> Result<u64, DbE
         .bind(("uid", uid.to_string()))
         .await?;
     let deleted: Vec<serde_json::Value> = res.take(0)?;
-    Ok(deleted.len() as u64)
+    // A Vec length is bounded by memory and always fits u64.
+    #[allow(clippy::as_conversions)]
+    let n = deleted.len() as u64;
+    Ok(n)
 }
 
 /// Every file uid; the thumbnail sweeper diffs the thumbs directory
@@ -230,7 +235,7 @@ pub async fn counts(db: &surrealdb::Surreal<Conn>) -> Result<(u64, u64), DbError
     let n = |rows: &[serde_json::Value]| {
         rows.first()
             .and_then(|r| r.get("n"))
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0)
     };
     Ok((n(&files), n(&folders)))

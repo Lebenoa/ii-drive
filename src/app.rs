@@ -2,6 +2,9 @@ use axum::Router;
 use axum::routing::{delete, get, post};
 use tower_http::services::{ServeDir, ServeFile};
 
+// The body is a flat declarative route table; splitting it across helpers
+// would fragment one registration into several for no clarity gain.
+#[allow(clippy::too_many_lines)]
 pub fn build_router() -> Router {
     let public = Router::new()
         .route("/health", get(crate::routes::health))

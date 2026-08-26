@@ -19,7 +19,7 @@ const LOGIN_BLOCK_SECS: u64 = 300;
 const LOGIN_TTL_SECS: u64 = 30 * 60;
 /// A number may be sent one login code per this window. Without it an
 /// allowlisted number can be made to receive unlimited Telegram codes,
-/// which both spams whoever owns it and burns the account's FLOOD_WAIT
+/// which both spams whoever owns it and burns the account's `FLOOD_WAIT`
 /// budget on attacker-chosen traffic.
 const CODE_RESEND_COOLDOWN_SECS: u64 = 60;
 /// How often abandoned logins are swept up.
@@ -57,7 +57,7 @@ struct Throttle {
 
 impl Throttle {
     fn new() -> Self {
-        Throttle {
+        Self {
             failed: 0,
             blocked_until: None,
             last_code_sent: None,
@@ -120,7 +120,7 @@ impl TgHub {
             Arc::downgrade(&logins),
             Duration::from_secs(PRUNE_INTERVAL_SECS),
         ));
-        TgHub {
+        Self {
             dir: sessions_dir(&cfg.session_path),
             cfg,
             users: Mutex::new(HashMap::new()),
@@ -260,7 +260,8 @@ impl TgHub {
     /// Forgets an account: its connections stop and its session files go.
     /// Idempotent, so a client may sign out twice without seeing an error.
     pub async fn logout(&self, user_id: i64) -> Result<(), String> {
-        if let Some(manager) = self.users.lock().await.remove(&user_id) {
+        let manager = self.users.lock().await.remove(&user_id);
+        if let Some(manager) = manager {
             manager.close().await;
         }
         remove_session(&self.user_session(user_id)).await?;
@@ -286,8 +287,8 @@ impl TgHub {
         self.logins.lock().await.remove(login_id);
         self.record_success(phone).await;
         pending.manager.close().await;
-
-        if let Some(previous) = self.users.lock().await.remove(&user_id) {
+        let previous = self.users.lock().await.remove(&user_id);
+        if let Some(previous) = previous {
             // Same account signing in again: the old session has to let go
             // of the destination file before it is overwritten.
             tracing::info!(user_id, "replacing the previous session of this account");
@@ -316,7 +317,8 @@ impl TgHub {
             .ok_or_else(|| "this login expired — start again".to_string())
     }
 
-    /// Rejects submissions while this number's brute-force block is active.
+    #[allow(clippy::arithmetic_side_effects)] // secs rounding on a bounded u64 cannot overflow
+    #[allow(clippy::significant_drop_tightening)] // `throttles` guard lives for the whole fn; entry borrows from it
     async fn gate(&self, phone: &str) -> Result<(), String> {
         let mut throttles = self.throttles.lock().await;
         let Some(entry) = throttles.get_mut(phone) else {
@@ -341,6 +343,8 @@ impl TgHub {
     /// booked before it is attempted on purpose: two requests racing here
     /// must not both reach Telegram, and a send that failed is itself a
     /// reason to back off rather than to retry immediately.
+    #[allow(clippy::arithmetic_side_effects)] // secs rounding on a bounded u64 cannot overflow
+    #[allow(clippy::significant_drop_tightening)] // `throttles` guard lives for the whole fn; entry borrows from it
     async fn reserve_code_send(&self, phone: &str) -> Result<(), String> {
         let cooldown = Duration::from_secs(CODE_RESEND_COOLDOWN_SECS);
         let mut throttles = self.throttles.lock().await;
@@ -351,7 +355,7 @@ impl TgHub {
         if let Some(sent) = entry.last_code_sent {
             let elapsed = sent.elapsed();
             if elapsed < cooldown {
-                let secs = (cooldown - elapsed).as_secs() + 1;
+                let secs = cooldown.saturating_sub(elapsed).as_secs() + 1;
                 return Err(format!(
                     "a login code was already sent to this number; wait {secs}s before asking for another"
                 ));
@@ -363,6 +367,8 @@ impl TgHub {
         Ok(())
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // failure counter bounded at MAX_LOGIN_ATTEMPTS; touch+offset cannot overflow
+    #[allow(clippy::significant_drop_tightening)] // `throttles` guard lives for the whole fn; entry borrows from it
     async fn record_failure(&self, phone: &str) {
         let mut throttles = self.throttles.lock().await;
         prune_throttles(&mut throttles);
@@ -459,7 +465,7 @@ async fn prune_loop(logins: Weak<LoginMap>, every: Duration) {
     }
 }
 
-/// Drops logins nobody finished, with their throwaway session files.
+#[allow(clippy::significant_drop_tightening)] // tokio Mutex guards held across .await; entry/pending borrows require it
 async fn prune_stale_logins(logins: &LoginMap) {
     let ttl = Duration::from_secs(LOGIN_TTL_SECS);
     let stale: Vec<Arc<Login>> = {
@@ -491,13 +497,10 @@ fn prune_throttles(throttles: &mut HashMap<String, Throttle>) {
 /// Per-account session files live in a `sessions/` directory beside the
 /// configured session path.
 fn sessions_dir(session_path: &str) -> PathBuf {
-    match Path::new(session_path)
+    Path::new(session_path)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-    {
-        Some(parent) => parent.join("sessions"),
-        None => PathBuf::from("sessions"),
-    }
+        .map_or_else(|| PathBuf::from("sessions"), |parent| parent.join("sessions"))
 }
 
 /// Unguessable handle for a login in flight; it is the only proof a client
@@ -524,7 +527,7 @@ async fn remove_session(path: &Path) -> Result<(), String> {
         match tokio::fs::remove_file(&p).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("cannot delete session file {p:?}: {e}")),
+            Err(e) => return Err(format!("cannot delete session file {}: {e}", p.display())),
         }
     }
     Ok(())
@@ -540,7 +543,7 @@ async fn move_session(from: &Path, to: &Path) -> Result<(), String> {
     if let Some(parent) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| format!("cannot create session dir {parent:?}: {e}"))?;
+            .map_err(|e| format!("cannot create session dir {}: {e}", parent.display()))?;
     }
     remove_session(to).await?;
     for suffix in SESSION_SUFFIXES {
@@ -553,7 +556,7 @@ async fn move_session(from: &Path, to: &Path) -> Result<(), String> {
             match tokio::fs::rename(&src, &dst).await {
                 Ok(()) => break,
                 Err(e) if attempt == MOVE_ATTEMPTS => {
-                    return Err(format!("cannot move session {src:?} to {dst:?}: {e}"));
+                    return Err(format!("cannot move session {} to {}: {e}", src.display(), dst.display()));
                 }
                 Err(_) => {
                     // A request still holding a client of the old connection

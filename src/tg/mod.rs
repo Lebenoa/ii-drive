@@ -14,7 +14,7 @@ mod transfer;
 
 pub use bots::bot_token_regex;
 pub use hub::{LoginStep, TgHub};
-pub(crate) use transfer::is_file_reference_error;
+pub use transfer::is_file_reference_error;
 
 /// Global round-robin counter, shared by upload-target selection and bot
 /// rotation so both spread evenly.
@@ -96,7 +96,7 @@ struct BotSession {
     access_hash: Option<i64>,
 }
 
-/// A live MTProto connection: the client plus what is needed to stop its
+/// A live `MTProto` connection: the client plus what is needed to stop its
 /// background runner, because the runner is what holds the session file
 /// open. Files must be closed before they can be moved or deleted.
 struct Conn {
@@ -155,10 +155,10 @@ async fn get_me_info(client: &Client) -> Option<UserInfo> {
         Ok(u) => Some(UserInfo {
             id: u.id().bare_id_unchecked(),
             name: u.full_name(),
-            username: u.username().map(|s| s.to_string()),
+            username: u.username().map(ToString::to_string),
             // Always present for one's own account, which is the only user
             // this is ever called for.
-            phone: u.phone().map(|s| s.to_string()),
+            phone: u.phone().map(ToString::to_string),
         }),
         Err(e) => {
             tracing::warn!("get_me failed: {e}");
@@ -168,9 +168,10 @@ async fn get_me_info(client: &Client) -> Option<UserInfo> {
 }
 
 /// Rebuilds a displayable JPEG from Telegram's stripped thumbnail bytes
-/// (https://core.tlgr.org/api/files#stripped-thumbnails). Mirrors
-/// grammers' private StrippedSize::data — same header, dimensions from
+/// <https://core.tlgr.org/api/files#stripped-thumbnails>. Mirrors
+/// grammers' private `StrippedSize::data` — same header, dimensions from
 /// bytes[1..3], scan data from bytes[3..], JPEG EOI footer.
+#[allow(clippy::indexing_slicing)] // guarded by the `len() < 4` return; out[] indices are within the fixed 623-byte HEADER
 pub fn stripped_thumb_jpeg(bytes: &[u8]) -> Vec<u8> {
     const HEADER: [u8; 623] = [
         0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,

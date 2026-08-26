@@ -49,13 +49,10 @@ async fn sweep(map: &mut HashMap<String, Session>) {
     // Crash debris: part buffers (`<ulid>.pN`) from the spill strategy have
     // no session to expire them, so anything old in the spill dir that no
     // live session owns is garbage by definition.
-    let Ok(dir) = spill_path() else {
-        return;
-    };
+    let dir = spill_path();
     let live: std::collections::HashSet<PathBuf> = map.values().map(|s| s.path.clone()).collect();
-    let mut entries = match tokio::fs::read_dir(&dir).await {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+        return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let p = entry.path();
@@ -75,8 +72,8 @@ async fn sweep(map: &mut HashMap<String, Session>) {
     }
 }
 
-fn spill_path() -> ApiResult<PathBuf> {
-    Ok(PathBuf::from(&crate::config::get().spill_dir))
+fn spill_path() -> PathBuf {
+    PathBuf::from(&crate::config::get().spill_dir)
 }
 
 #[derive(serde::Deserialize)]
@@ -89,6 +86,8 @@ pub struct InitReq {
     folder: String,
 }
 
+// The sessions mutex guard must stay alive across the sweep+insert below.
+#[allow(clippy::significant_drop_tightening)]
 pub async fn init(
     Extension(Caller(uid)): Extension<Caller>,
     Json(req): Json<InitReq>,
@@ -104,14 +103,14 @@ pub async fn init(
         )));
     }
     if !req.folder.is_empty()
-        && !crate::db::get_folder(&state.db, &req.folder)
+        && crate::db::get_folder(&state.db, &req.folder)
             .await?
-            .is_some_and(|f| f.owner == uid)
+            .is_none_or(|f| f.owner != uid)
     {
         return Err(ApiError::bad_request("folder not found"));
     }
 
-    let dir = spill_path()?;
+    let dir = spill_path();
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| ApiError::bad_request(format!("spill dir unavailable: {e}")))?;
@@ -142,6 +141,8 @@ pub async fn init(
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
+// The mutex guard lives through the whole function so the snapshot is coherent.
+#[allow(clippy::significant_drop_tightening)]
 async fn owned_session(uid: i64, id: &str) -> ApiResult<Session> {
     let mut guard = sessions().await;
     let map = &mut *guard;
@@ -192,6 +193,7 @@ pub async fn chunk(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
+    use tokio::io::AsyncWriteExt;
     let offset: u64 = headers
         .get("x-offset")
         .and_then(|v| v.to_str().ok())
@@ -205,10 +207,11 @@ pub async fn chunk(
             s.received, offset
         )));
     }
+    // received + chunk is bounded by the declared size; len() fits in u64.
+    #[allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
     if s.received + body.len() as u64 > s.declared {
         return Err(ApiError::bad_request("chunk exceeds declared size"));
     }
-    use tokio::io::AsyncWriteExt;
     let mut f = tokio::fs::OpenOptions::new()
         .append(true)
         .open(&s.path)
@@ -222,6 +225,8 @@ pub async fn chunk(
     }
     drop(f);
 
+    // Bounded as above: never exceeds declared size.
+    #[allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
     let received = s.received + body.len() as u64;
     set_received(&id, received).await;
     Ok(Json(serde_json::json!({ "received": received })))
@@ -252,16 +257,6 @@ pub async fn complete(
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let state = crate::state::get();
-    let tg = state.tg(uid).await?;
-    let s = owned_session(uid, &id).await?;
-    if s.received != s.declared {
-        return Err(ApiError::bad_request(format!(
-            "incomplete upload: {} of {} bytes",
-            s.received, s.declared
-        )));
-    }
-
     // The spill file must outlive a failed complete so the client can
     // retry; only a successful store retires it (the TTL sweeper catches
     // sessions that never complete).
@@ -278,13 +273,26 @@ pub async fn complete(
     // Head bytes feed cover-art extraction; the file is fully flushed by
     // the chunk handler, so this read is safe mid-session.
     const HEAD_CAP: usize = super::HEAD_CAP;
+
+    let state = crate::state::get();
+    let tg = state.tg(uid).await?;
+    let s = owned_session(uid, &id).await?;
+    if s.received != s.declared {
+        return Err(ApiError::bad_request(format!(
+            "incomplete upload: {} of {} bytes",
+            s.received, s.declared
+        )));
+    }
     let mut head = Vec::new();
     {
         use tokio::io::AsyncReadExt as _;
         let f = tokio::fs::File::open(&s.path)
             .await
             .map_err(|e| ApiError::bad_request(format!("reopen upload buffer: {e}")))?;
-        f.take(HEAD_CAP as u64)
+        // HEAD_CAP (512 KiB) fits in u64.
+        #[allow(clippy::as_conversions)]
+        let cap = HEAD_CAP as u64;
+        f.take(cap)
             .read_to_end(&mut head)
             .await
             .map_err(|e| ApiError::bad_request(format!("read upload buffer head: {e}")))?;
