@@ -1,4 +1,4 @@
-use anyhow::Result;
+use color_eyre::Result;
 use std::sync::{LazyLock, OnceLock};
 
 use serde::Deserialize;
@@ -93,12 +93,12 @@ impl Default for Config {
 
 /// Loads `path`, anchors its relative data paths against the file's
 /// directory, and installs it as the process-wide config.
-pub fn init(path: &str) -> anyhow::Result<&'static Config> {
+pub fn init(path: &str) -> color_eyre::Result<&'static Config> {
     let mut cfg = anchor_paths(Config::load(path)?, path);
     resolve_secret(&mut cfg);
     CONFIG
         .set(cfg)
-        .map_err(|_| anyhow::anyhow!("configuration is already initialized"))?;
+        .map_err(|_| color_eyre::eyre::eyre!("configuration is already initialized"))?;
     Ok(get())
 }
 
@@ -233,7 +233,7 @@ impl SizeRepr {
 }
 
 impl Config {
-    pub fn load(path: &str) -> anyhow::Result<Self> {
+    pub fn load(path: &str) -> color_eyre::Result<Self> {
         let raw: RawConfig = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

@@ -1,3 +1,5 @@
+use color_eyre::eyre::WrapErr;
+
 mod app;
 mod art;
 mod auth;
@@ -11,7 +13,10 @@ mod stream;
 mod tg;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> color_eyre::Result<()> {
+    // Fancy error reports for setup/config failures: the whole point of
+    // color-eyre over plain anyhow-style strings.
+    color_eyre::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -32,10 +37,7 @@ async fn main() {
     // the real server.
     if !std::path::Path::new(&config_path).exists() {
         tracing::info!("`{config_path}` not found — starting first-run setup wizard");
-        if let Err(e) = setup::run(std::path::PathBuf::from(&config_path)).await {
-            eprintln!("setup wizard error: {e}");
-            std::process::exit(1);
-        }
+        setup::run(std::path::PathBuf::from(&config_path)).await?;
         println!();
         println!("Setup complete. Start ii-drive again to launch your drive.");
         std::process::exit(0);
@@ -44,28 +46,23 @@ async fn main() {
     // Relative data paths must follow the config file, not the process CWD:
     // starting the binary from another directory would otherwise create a
     // fresh empty store there and every existing file would "vanish".
-    let cfg = match config::init(&config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("failed to load {config_path}: {e}");
-            std::process::exit(1);
-        }
-    };
+    let cfg =
+        config::init(&config_path).wrap_err_with(|| format!("failed to load `{config_path}`"))?;
 
     // First touch of the process-wide state: after `config::init`, because
     // the token signer and the Telegram hub read their settings out of it,
     // and inside the runtime, because the hub spawns its login pruner.
     let state = state::get();
-    if let Err(e) = db::connect(&state.db, &cfg.db_path).await {
-        eprintln!("failed to open database {}: {e}", cfg.db_path);
-        std::process::exit(1);
-    }
+    db::connect(&state.db, &cfg.db_path)
+        .await
+        .wrap_err_with(|| format!("failed to open database `{}`", cfg.db_path))?;
+
     // Before anything can serve a request, so no upload is ever checked
     // against the placeholder cap the lazy state had to start with.
-    if let Err(e) = state.hydrate_instance().await {
-        eprintln!("failed to load instance settings: {e}");
-        std::process::exit(1);
-    }
+    state
+        .hydrate_instance()
+        .await
+        .wrap_err("failed to load instance settings")?;
     match db::counts(&state.db).await {
         Ok((files, folders)) => {
             tracing::info!(
@@ -109,8 +106,9 @@ async fn main() {
         }
     });
 
-    if let Err(e) = app::run().await {
-        eprintln!("server error: {e}");
-        std::process::exit(1);
-    }
+    app::run()
+        .await
+        .wrap_err("failed to bind or serve the web server")?;
+
+    Ok(())
 }

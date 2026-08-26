@@ -21,13 +21,13 @@ use tower_http::services::{ServeDir, ServeFile};
 /// Runs when `config_path` does not exist. Serves the wizard until a valid
 /// submission lands, writes the file, then returns — main() exits with a
 /// "start again" message.
-pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
+pub async fn run(config_path: PathBuf) -> color_eyre::Result<()> {
     // The wizard binds loopback by default so credentials are never
     // submitted over an unauthenticated LAN hop.
     let cfg = crate::config::get();
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port)
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid host/port from defaults: {e}"))?;
+        .map_err(|e| color_eyre::eyre::eyre!("invalid host/port from defaults: {e}"))?;
 
     // `config::init` has not run — there is no file to load yet — but these
     // two paths never came from the file: they are located from the binary,
@@ -37,7 +37,7 @@ pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
     // the web UI: without a build there is no form to fill in.
     let dist = Path::new(&cfg.web_dist);
     if !dist.is_dir() {
-        anyhow::bail!(
+        color_eyre::eyre::bail!(
             "web UI not found at `{}`, so there is no setup form to serve — \
              run `nub install && nub run build` in web/, or use a release bundle",
             dist.display()
