@@ -80,16 +80,18 @@ session_path = "data/session.db"
 # crypt_password = "a-long-random-password-you-keep-safe"
 # crypt_salt = "ii-drive"
 
-# The upload cap and the ffmpeg thumbnail switch used to be configured here.
-# They are the settings people actually revisit, so they now live in the
-# database and are edited under Settings -> Uploads (or via PUT /api/instance)
-# — effective immediately, no restart.
+# --- Moved to the database ---
+#
+# The upload cap, the ffmpeg thumbnail switch and the upload strategy used to
+# be configured here. They are the settings people actually revisit, so they
+# now live in the database and are edited under Settings -> Uploads (or via
+# PUT /api/instance) — effective immediately, no restart.
 #
 # No migration window: an older config.toml that still sets those keys is
 # simply ignored — change them under Settings -> Uploads instead.
 
-# Directory for in-flight upload buffers (every upload is buffered here
-# before the parts fan out to Telegram). Created automatically.
+# Directory for in-flight upload buffers ("spill" strategy and resumable
+# chunked uploads, which always buffer). Created automatically.
 spill_dir = "data/spill"
 
 # The built web UI and the translation files are not configured here. They

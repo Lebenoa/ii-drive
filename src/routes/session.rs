@@ -459,6 +459,7 @@ pub struct InstanceBody {
     thumb_sweep_time: Option<String>,
     /// Hours between sweeps from that anchor; 0 disables the periodic one.
     thumb_sweep_hours: Option<u64>,
+    upload_strategy: Option<crate::db::UploadStrategy>,
 }
 
 /// GET /api/instance — the instance-wide tunables.
@@ -516,6 +517,9 @@ pub async fn save_instance(
     }
     if let Some(thumbs) = body.media_thumbs {
         next.media_thumbs = thumbs;
+    }
+    if let Some(strategy) = body.upload_strategy {
+        next.upload_strategy = strategy;
     }
 
     state.set_instance(next.clone()).await?;

@@ -24,6 +24,10 @@ pub use serve::*;
 pub use thumbs::*;
 pub use upload::*;
 
+/// Upper bound on how much of an aborted upload body we swallow just to
+/// deliver the error response; beyond this the connection is simply closed.
+const DRAIN_CAP: u64 = 32 * 1024 * 1024;
+
 /// How much of the stream head to buffer for cover-art extraction.
 const HEAD_CAP: usize = 512 * 1024;
 

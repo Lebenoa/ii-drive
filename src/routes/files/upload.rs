@@ -10,13 +10,16 @@ use std::sync::Arc;
 
 use axum::extract::multipart::Multipart;
 use axum::{Extension, Json};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::auth::Caller;
 use crate::db::FileRow;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-use super::{FileDto, HEAD_CAP, bytes_repr, cleanup_parts, extract_media_thumb, now_unix};
+use super::{
+    DRAIN_CAP, FileDto, HEAD_CAP, bytes_repr, cleanup_parts, extract_media_thumb, now_unix,
+};
 
 /// A part-upload failure safe to retry by re-reading the spill buffer: the
 /// socket to Telegram's DC was torn down mid-transfer (ECONNRESET /
@@ -40,7 +43,7 @@ fn is_transient(err: &str) -> bool {
 }
 
 /// Extra attempts (besides the first) a part upload gets after a transient
-/// transport failure; each re-reads its part from the spill buffer.
+/// transport failure; each re-reads its part from the buffer.
 const PART_RETRIES: u32 = 2;
 
 /// Per-request body-limit guard for POST /api/files. The limit cannot be
@@ -96,10 +99,18 @@ struct StoredFile {
 pub async fn upload_file(
     Extension(Caller(uid)): Extension<Caller>,
     headers: axum::http::HeaderMap,
-    multipart: Multipart,
+    mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // Telegram stores each document separately and caps its size (2 GiB on
+    // a free account) regardless of the configured drive limit — so a
+    // `max_file_size` above that is honored by transparently chunking the
+    // file into cap-sized documents and re-joining them on download.
+    const TG_DOC_CAP: u64 = 4000 * 512 * 1024; // 2_048_000_000 ≈ 1.91 GiB
     let state = crate::state::get();
+    // Everything below runs on the caller's own account: their client posts
+    // the parts, into their channels, under their routing rules.
     let tg = state.tg(uid).await?;
+    let user_key = uid.to_string();
 
     // grammers needs the exact byte count up front; the client provides it.
     let declared: u64 = headers
@@ -115,6 +126,14 @@ pub async fn upload_file(
             bytes_repr(max)
         )));
     }
+
+    // The real ceiling is PART COUNT, not bytes: big-file uploads may use
+    // at most ~4000 parts of 512 KiB each, so a document at the full 2 GiB
+    // (exactly 4096 parts) is refused with FILE_PARTS_INVALID — observed on
+    // a plain user session, so it is an account-level budget, not a bot
+    // quirk. Cap documents at 4000 × 512 KiB; anything larger just becomes
+    // more documents, which downloads re-join anyway.
+    let over_cap = declared > TG_DOC_CAP;
 
     // Target folder comes from a header ("" = root); multipart bodies cannot
     // carry extra fields alongside the streamed file field.
@@ -132,10 +151,322 @@ pub async fn upload_file(
         return Err(ApiError::bad_request("folder not found"));
     }
 
-    // The spill path is the only upload path now: buffer the body to
-    // `spill_dir` first, then drain each part (PartPlan::new owns the
-    // split/threshold/channel logic). There is no stream path anymore.
-    spill_upload(state, tg, uid, multipart, declared, max, folder).await
+    // Split into parallel parts when the user enabled a threshold and the
+    // file is large enough. Parts upload concurrently over separate
+    // connections, which is markedly faster for big files — especially with
+    // several download bots, since each part message can be fetched by a
+    // different bot under its own rate limit.
+    let split_bytes = crate::db::get_split(&state.db, &user_key)
+        .await
+        .unwrap_or(0);
+    // Chunk size: the user's split threshold when set (0 = off), never
+    // above Telegram's per-document cap. Over-cap files always chunk —
+    // they cannot fit a single document.
+    let part_size = if !over_cap && (split_bytes == 0 || declared <= split_bytes) {
+        declared.max(1)
+    } else if split_bytes > 0 {
+        split_bytes.min(TG_DOC_CAP)
+    } else {
+        TG_DOC_CAP
+    };
+    let nparts = declared.div_ceil(part_size).max(1) as usize;
+    if nparts > 64 {
+        return Err(ApiError::bad_request(format!(
+            "file would need {nparts} parts (max 64)"
+        )));
+    }
+
+    // Spill trades temporary disk for a decoupled drain: the whole body is
+    // buffered before any part starts uploading, so Telegram's aggregate
+    // rate is never throttled behind this request's sequential body feed.
+    if crate::state::get().instance().upload_strategy == crate::db::UploadStrategy::Spill {
+        return spill_upload(state, tg, uid, multipart, declared, max, folder).await;
+    }
+
+    // Storage target per part: round-robin across the user's selected
+    // channels. There is no fallback — the web UI forces channel selection
+    // right after login, so reaching this point without channels means an
+    // out-of-band API caller skipped setup.
+    let selected = crate::db::get_channels(&state.db, &user_key)
+        .await
+        .unwrap_or_default();
+    if selected.is_empty() {
+        return Err(ApiError::bad_request(
+            "no storage channels selected — complete channel selection in the drive first",
+        ));
+    }
+    // Over-cap chunked files keep ALL parts in one channel — a single
+    // file re-joined from parts of one chat is cleaner to fetch and audit.
+    // Which channel is chosen rotates per upload so parallel large files
+    // spread across the selection; ordinary split uploads keep the
+    // per-part round-robin.
+    let base = tg.next_rotation();
+    let chat_for = |i: usize| -> String {
+        let idx = if over_cap { base } else { base + i };
+        selected[idx % selected.len()].chat.to_ascii_lowercase()
+    };
+
+    // Uploaders start immediately (they must, to drain their channels while
+    // we feed them); file name/mime arrive over a watch channel once the
+    // multipart field is located. The field borrows `multipart`, so every
+    // use of it stays inside one loop iteration.
+    let (meta_tx, meta_rx) = tokio::sync::watch::channel(None::<(String, String)>);
+    let mut txs = Vec::with_capacity(nparts);
+    let mut uploaders = Vec::with_capacity(nparts);
+    for i in 0..nparts {
+        let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<bytes::Bytes>>(4);
+        txs.push(tx);
+        let base_reader =
+            tokio_util::io::StreamReader::new(ReceiverStream::<io::Result<bytes::Bytes>>::new(rx));
+        // The last part gets whatever remains.
+        let expected = if i + 1 == nparts {
+            declared - part_size * (nparts as u64 - 1)
+        } else {
+            part_size
+        };
+        let mut meta = meta_rx.clone();
+        let tg = tg.clone();
+        let chat = chat_for(i);
+        uploaders.push(tokio::spawn(async move {
+            // Helper keeps the watch guard from living across an await.
+            fn snapshot(
+                meta: &tokio::sync::watch::Receiver<Option<(String, String)>>,
+            ) -> Option<(String, String)> {
+                meta.borrow().clone()
+            }
+            let (name, mime) = match snapshot(&meta) {
+                Some(v) => v,
+                None => match meta.changed().await {
+                    Ok(()) => snapshot(&meta).unwrap_or_default(),
+                    Err(_) => (String::new(), String::new()),
+                },
+            };
+            if name.is_empty() {
+                return Err("multipart field `file` missing".to_string());
+            }
+            let part_name = if nparts > 1 {
+                format!("{name}.part{:03}", i + 1)
+            } else {
+                name
+            };
+            // Encrypt this part when at-rest encryption is enabled: the
+            // plaintext part feeds an EncryptingReader and Telegram stores
+            // the ciphertext container. The part's nonce travels back with
+            // the result so the row records it for decryption.
+            let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+            let mut upload_size = expected;
+            let mut nonce: Option<String> = None;
+            match crate::config::get().crypt_key() {
+                Ok(Some(key)) => {
+                    let (er, used) = crate::crypt::EncryptingReader::new(base_reader, &key);
+                    reader = Box::new(er);
+                    nonce = Some(crate::crypt::base64_encode(&used));
+                    upload_size = crate::crypt::encrypted_size(expected);
+                }
+                _ => reader = Box::new(base_reader),
+            }
+            #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
+            let (mid, _, _, thumb) = tg
+                .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                .await?;
+            Ok((mid, part_name, mime, thumb, nonce))
+        }));
+    }
+
+    let mut fed: u64 = 0;
+    let mut head: Vec<u8> = Vec::new();
+    let body_loop: Result<(), ApiError> = async {
+        loop {
+            let Some(mut f) = multipart
+                .next_field()
+                .await
+                .map_err(|e| ApiError::bad_request(format!("bad multipart body: {e}")))?
+            else {
+                return Err(ApiError::bad_request("multipart field `file` missing"));
+            };
+            if f.name() != Some("file") {
+                continue;
+            }
+
+            let name = f.file_name().unwrap_or("unnamed").to_string();
+            let mime = f.content_type().map_or_else(
+                || {
+                    mime_guess::from_path(&name)
+                        .first_or_octet_stream()
+                        .to_string()
+                },
+                str::to_string,
+            );
+            let _ = meta_tx.send(Some((name, mime)));
+
+            loop {
+                match f.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let before = fed;
+                        fed += chunk.len() as u64;
+                        // Keep the stream head: cover art lives in tags at
+                        // the start of audio files (ID3 / FLAC metadata).
+                        if head.len() < HEAD_CAP {
+                            let take = (HEAD_CAP - head.len()).min(chunk.len());
+                            head.extend_from_slice(&chunk[..take]);
+                        }
+                        if fed > max {
+                            return Err(ApiError::too_large(format!(
+                                "file exceeds limit of {max} bytes"
+                            )));
+                        }
+                        // Route each byte to the part that owns its offset.
+                        let mut off = 0usize;
+                        while off < chunk.len() {
+                            let idx =
+                                (((before + off as u64) / part_size) as usize).min(nparts - 1);
+                            let part_end = ((idx as u64 + 1) * part_size).min(declared) as usize;
+                            let take = (chunk.len() - off).min(part_end - (before as usize + off));
+                            if txs[idx]
+                                .send(Ok(chunk.slice(off..off + take)))
+                                .await
+                                .is_err()
+                            {
+                                return Err(ApiError::bad_request("upload aborted"));
+                            }
+                            off += take;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return Err(ApiError::bad_request(format!("read upload stream: {e}")));
+                    }
+                }
+            }
+            break;
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(err) = body_loop {
+        // Tell the uploaders the stream is dead so they never finalize
+        // truncated uploads on Telegram.
+        for tx in &txs {
+            let _ = tx
+                .send(Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "upload failed",
+                )))
+                .await;
+        }
+        // Consume what the client is still sending (bounded) so the error
+        // response gets through instead of the connection being aborted.
+        let mut drained: u64 = 0;
+        while drained < DRAIN_CAP {
+            match multipart.next_field().await {
+                Ok(Some(mut f)) => {
+                    while let Ok(Some(chunk)) = f.chunk().await {
+                        drained += chunk.len() as u64;
+                        if drained >= DRAIN_CAP {
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        // Uploaders that had already finalized a part before the abort
+        // posted live Telegram messages — collect and remove them so no
+        // orphan stays behind (size is irrelevant for cleanup).
+        let mut parts: Vec<crate::db::FilePart> = Vec::new();
+        let mut uploader_err: Option<String> = None;
+        for (i, u) in uploaders.into_iter().enumerate() {
+            match u
+                .await
+                .map_err(|e| format!("upload task failed: {e}"))
+                .and_then(|r| r)
+            {
+                Ok((message_id, _, _, _, _)) => parts.push(crate::db::FilePart {
+                    message_id,
+                    chat: chat_for(i),
+                    size: 0,
+                    nonce: None,
+                }),
+                Err(e) if uploader_err.is_none() => uploader_err = Some(e),
+                Err(_) => {}
+            }
+        }
+        cleanup_parts(&tg, &parts).await;
+        // "upload aborted" means an uploader died first; its error is the
+        // actual cause (e.g. Telegram down) and far more useful to the client.
+        if err.1 == "upload aborted"
+            && let Some(e) = uploader_err
+        {
+            return Err(ApiError::bad_request(e));
+        }
+        return Err(err);
+    }
+    drop(txs);
+
+    // Collect one message id per part; on any failure, roll back the parts
+    // that did land so no orphan stays behind.
+    let mut parts: Vec<crate::db::FilePart> = Vec::with_capacity(nparts);
+    let mut thumb_avif: Option<Vec<u8>> = None;
+    let mut first_err: Option<String> = None;
+    for (i, u) in uploaders.into_iter().enumerate() {
+        let res = u
+            .await
+            .map_err(|e| format!("upload task failed: {e}"))
+            .and_then(|r| r);
+        match res {
+            Ok((message_id, _, _, thumb, nonce)) => {
+                if let Some(raw) = thumb
+                    && thumb_avif.is_none()
+                {
+                    thumb_avif = super::thumbs::thumb_bytes(raw).await;
+                }
+                parts.push(crate::db::FilePart {
+                    message_id,
+                    chat: chat_for(i),
+                    size: if i + 1 == nparts {
+                        declared - part_size * (nparts as u64 - 1)
+                    } else {
+                        part_size
+                    } as i64,
+                    nonce,
+                });
+            }
+            Err(e) => {
+                first_err = Some(e);
+                break;
+            }
+        }
+    }
+    if let Some(e) = first_err {
+        cleanup_parts(&tg, &parts).await;
+        return Err(ApiError::bad_request(e));
+    }
+
+    if fed != declared {
+        // The messages may already be live in Telegram (a client that lied
+        // low in X-File-Size); remove them so storage matches the error.
+        cleanup_parts(&tg, &parts).await;
+        return Err(ApiError::bad_request(format!(
+            "uploaded {fed} bytes but X-File-Size declared {declared}"
+        )));
+    }
+    let (name, mime) = meta_rx.borrow().clone().unwrap_or_default();
+    persist_row(
+        state,
+        tg,
+        uid,
+        StoredFile {
+            name,
+            mime,
+            declared,
+            folder,
+            parts,
+            thumb: thumb_avif,
+            head: head.clone(),
+        },
+    )
+    .await
 }
 
 /// Per-part split shared by both spill paths: sizes, count and channel

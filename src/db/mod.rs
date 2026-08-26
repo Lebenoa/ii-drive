@@ -15,9 +15,9 @@ pub use folders::{
 // tests below without a second, test-only import list.
 pub use schema::*;
 pub use settings::{
-    BotDraft, ChannelSel, DraftMsg, Instance, RouteRule, bump_token_epoch, clear_bot_draft,
-    get_bot_draft, get_channels, get_instance, get_rules, get_split, get_token_epoch,
-    set_bot_draft, set_channels, set_instance, set_rules, set_split,
+    BotDraft, ChannelSel, DraftMsg, Instance, RouteRule, UploadStrategy, bump_token_epoch,
+    clear_bot_draft, get_bot_draft, get_channels, get_instance, get_rules, get_split,
+    get_token_epoch, set_bot_draft, set_channels, set_instance, set_rules, set_split,
 };
 
 type Conn = surrealdb::engine::local::Db;

@@ -72,6 +72,7 @@
         media_thumbs: instance.media_thumbs,
         thumb_sweep_time: /^\d{1,2}:\d{2}$/.test(sweepAt.trim()) ? sweepAt.trim() : '00:00',
         thumb_sweep_hours: Math.max(0, Math.min(168, Math.floor(Number(sweepHours) || 0))),
+        upload_strategy: instance.upload_strategy,
       });
       capUnit = instance.max_file_size >= UNITS.GB ? 'GB' : 'MB';
       capValue = instance.max_file_size / UNITS[capUnit];
@@ -262,6 +263,11 @@
         </div>
         {#if sweepError}<p class="error-text">{sweepError}</p>{/if}
         <div class="split-row">
+          <label class="cap-label" for="strategy">{t('instance.strategy')}</label>
+          <select id="strategy" class="field" bind:value={instance.upload_strategy}>
+            <option value="stream">{t('instance.strategyStream')}</option>
+            <option value="spill">{t('instance.strategySpill')}</option>
+          </select>
           <button
             class="btn btn-primary busy-btn"
             type="button"
