@@ -215,12 +215,36 @@ fn anchor_paths(mut cfg: Config, config_path: &str) -> Config {
 /// folders beside it, so they are found from the executable and need no
 /// configuring — unlike the data paths, they are not the operator's files.
 ///
-/// Debug builds answer with the source tree instead: `target/debug` has no
-/// `web/dist` next to it, so `cargo run` would otherwise serve nothing.
+/// Debug builds answer at runtime from the executable's directory, the
+/// working directory, then the compile-time manifest dir, so a
+/// cross-compiled binary still finds its assets.
 fn asset_root() -> std::path::PathBuf {
     #[cfg(debug_assertions)]
     {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        // Resolve at runtime rather than baking `CARGO_MANIFEST_DIR`: that
+        // constant embeds the *build* host's path, which is wrong when the
+        // binary is cross-compiled (e.g. built on Windows, run on Linux)
+        // and would point assets at a path that does not exist on the run
+        // host. Prefer, in order:
+        //  1. the executable's directory (assets copied beside a built
+        //     binary, as a release bundle would be laid out);
+        //  2. the current working directory (a plain `cargo run` from the
+        //     source tree, so `target/debug` without web/dist still serves);
+        //  3. the compile-time manifest dir (native builds running from
+        //     elsewhere).
+        let candidates = [
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
+            std::env::current_dir().ok(),
+            Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+        ];
+        let exists = |base: &std::path::Path| base.join("web/dist").is_dir() || base.join("locales").is_dir();
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|base| exists(base))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
     }
     #[cfg(not(debug_assertions))]
     {
