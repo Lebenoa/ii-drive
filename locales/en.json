@@ -38,6 +38,7 @@
     "staleAttempt": "That sign-in attempt is no longer valid. Request a new code.",
     "passwordRequired": "Password required.",
     "sendCode": "Send code",
+    "signIn": "Sign in",
     "confirm": "Confirm",
     "countryCode": "Country code: {name} +{dial}",
     "searchCountry": "Search country or code…",
@@ -69,6 +70,7 @@
     "noneFound": "No channels found — add this account to a channel first.",
     "createPlaceholder": "Or create a new channel…",
     "creating": "Creating…",
+    "create": "Create",
     "useSelected": "Use {n} selected",
     "wireWarn": "Saved, but some bots could not join:"
   },
@@ -115,7 +117,11 @@
       "telegram": "Telegram",
       "uploads": "Uploads",
       "other": "Other"
-    }
+    },
+    "reloadConfig": "Reload config",
+    "reloading": "Reloading…",
+    "reloaded": "Config reloaded",
+    "reloadConfigHint": "Rereads config.toml — paths and credentials still need a server restart"
   },
   "instance": {
     "title": "Instance settings",
