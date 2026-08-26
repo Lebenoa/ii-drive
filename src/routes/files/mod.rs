@@ -168,6 +168,10 @@ mod tests {
         assert!(may_read(&t, &row(A, false), &none, Some(A)));
         assert!(!may_read(&t, &row(B, false), &none, Some(A)));
 
+        // Public rows serve anyone with no credential at all — the
+        // contract the credential-free share link relies on.
+        assert!(may_read(&t, &row(A, true), &none, None));
+
         let media_a = t.sign_media(A, 60);
         assert!(may_read(&t, &row(A, false), &query("mt", &media_a), None));
         assert!(!may_read(&t, &row(B, false), &query("mt", &media_a), None));

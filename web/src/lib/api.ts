@@ -521,6 +521,16 @@ export async function thumbUrl(id: string): Promise<string> {
   return fileUrl(id, 'thumb', {}, mt);
 }
 
+
+/**
+ * Absolute shareable URL for a **public** file. Deliberately
+ * credential-free: no token, no expiry — anyone with it can read this one
+ * file for exactly as long as it stays marked public.
+ */
+export function shareUrl(id: string): string {
+  return `${location.origin}/api/files/${encodeURIComponent(id)}/raw`;
+}
+
 /** GET /api/limits — server upload cap. Fetched per upload rather than
  * cached: the cap is a runtime-reloadable config field, and a stale value
  * here would make the UI reject uploads the server now allows. The request

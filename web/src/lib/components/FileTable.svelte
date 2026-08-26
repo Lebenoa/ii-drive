@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { deleteFile, rawUrl, setFileVisibility, thumbUrl, type DriveFile } from '$lib/api';
+  import { deleteFile, rawUrl, setFileVisibility, shareUrl, thumbUrl, type DriveFile } from '$lib/api';
   import { humanSize, mimeIcon, relTime } from '../format';
   import Modal from './Modal.svelte';
   import { closeAttrs, closeDialog, openDialog } from '$lib/invoker';
@@ -180,7 +180,9 @@
 
   /** Only reachable for public files — the button is not rendered otherwise. */
   async function copyLink(file: DriveFile): Promise<void> {
-    const url = await rawUrl(file.id);
+    // Public rows serve anonymously, so the link carries no token: it
+    // opens this one file only and never expires while it stays public.
+    const url = shareUrl(file.id);
     try {
       await navigator.clipboard.writeText(url);
       copiedId = file.id;
