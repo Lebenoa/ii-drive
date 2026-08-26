@@ -276,6 +276,9 @@ pub struct Instance {
     /// Generate thumbnails for uploaded media: still images in-process,
     /// videos via one ffmpeg-extracted frame.
     pub media_thumbs: bool,
+    /// Minutes between orphan-thumbnail sweeps. 0 disables the periodic
+    /// sweep; the startup sweep and the manual endpoint still run.
+    pub thumb_sweep_mins: u64,
     pub upload_strategy: UploadStrategy,
 }
 
@@ -284,6 +287,7 @@ impl Default for Instance {
         Instance {
             max_file_size: 2 * 1024 * 1024 * 1024,
             media_thumbs: true,
+            thumb_sweep_mins: 60,
             upload_strategy: UploadStrategy::Stream,
         }
     }
@@ -302,7 +306,7 @@ const INSTANCE_ID: &str = "setting:instance";
 pub async fn get_instance(db: &surrealdb::Surreal<Conn>) -> Result<Option<Instance>, DbError> {
     let mut res = db
         .query(format!(
-            "SELECT max_file_size, media_thumbs, upload_strategy FROM {INSTANCE_ID}"
+            "SELECT max_file_size, media_thumbs, thumb_sweep_mins, upload_strategy FROM {INSTANCE_ID}"
         ))
         .await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
@@ -315,6 +319,10 @@ pub async fn get_instance(db: &surrealdb::Surreal<Conn>) -> Result<Option<Instan
             .get("max_file_size")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(fallback.max_file_size),
+        thumb_sweep_mins: row
+            .get("thumb_sweep_mins")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(fallback.thumb_sweep_mins),
         media_thumbs: row
             .get("media_thumbs")
             .and_then(serde_json::Value::as_bool)
@@ -331,10 +339,11 @@ pub async fn set_instance(db: &surrealdb::Surreal<Conn>, inst: &Instance) -> Res
     let mut res = db
         .query(format!(
             "UPSERT {INSTANCE_ID} SET max_file_size = $s, media_thumbs = $t, \
-             upload_strategy = $u"
+             thumb_sweep_mins = $w, upload_strategy = $u",
         ))
         .bind(("s", inst.max_file_size as i64))
         .bind(("t", inst.media_thumbs))
+        .bind(("w", inst.thumb_sweep_mins as i64))
         .bind(("u", inst.upload_strategy.to_string()))
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
@@ -386,6 +395,7 @@ mod tests {
         let want = Instance {
             max_file_size: 500 * 1024 * 1024,
             media_thumbs: false,
+            thumb_sweep_mins: 15,
             upload_strategy: UploadStrategy::Spill,
         };
         set_instance(&db, &want).await.expect("write");
@@ -402,6 +412,7 @@ mod tests {
             .expect("plant a partial row");
 
         let got = get_instance(&db).await.expect("read").expect("row exists");
+        assert_eq!(got.thumb_sweep_mins, Instance::default().thumb_sweep_mins);
         assert!(!got.media_thumbs, "the written field is honoured");
         assert_eq!(got.max_file_size, Instance::default().max_file_size);
         assert_eq!(got.upload_strategy, UploadStrategy::Stream);

@@ -455,6 +455,8 @@ pub struct InstanceBody {
     /// Bytes, or a human size like `"2GiB"`.
     max_file_size: Option<crate::config::SizeRepr>,
     media_thumbs: Option<bool>,
+    /// Minutes between orphan-thumbnail sweeps; 0 disables the periodic one.
+    thumb_sweep_mins: Option<u64>,
     upload_strategy: Option<crate::db::UploadStrategy>,
 }
 
@@ -496,6 +498,9 @@ pub async fn save_instance(
             return Err(ApiError::bad_request("upload limit must be above zero"));
         }
         next.max_file_size = bytes;
+    }
+    if let Some(mins) = body.thumb_sweep_mins {
+        next.thumb_sweep_mins = mins;
     }
     if let Some(thumbs) = body.media_thumbs {
         next.media_thumbs = thumbs;

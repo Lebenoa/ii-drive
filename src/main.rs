@@ -79,13 +79,24 @@ async fn main() {
     }
 
     // Orphaned previews (crash between row delete and file unlink) are
-    // swept at startup and then hourly: a long-running server never gets
-    // the boot-time cleanup for free.
+    // swept at startup and then on a configurable cadence — a long-running
+    // server never gets the boot-time cleanup for free. The gap re-reads
+    // the setting every cycle, so operator changes apply without a restart.
     tokio::spawn(async {
         let state = crate::state::get();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+        let mut first = true;
         loop {
-            ticker.tick().await;
+            let mins = state.instance().thumb_sweep_mins;
+            if first {
+                first = false;
+            } else if mins == 0 {
+                // Disabled: poll the setting each minute instead of
+                // sweeping; re-enabling needs no restart.
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(mins * 60)).await;
+            }
             match crate::routes::sweep(state).await {
                 Ok(0) => {}
                 Ok(n) => tracing::info!("thumbnail sweep removed {n} orphans"),
