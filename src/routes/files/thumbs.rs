@@ -10,10 +10,6 @@ use image::{ExtendedColorType, ImageEncoder, ImageReader, Limits};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-/// Cap on how much of a file we download for thumbnail extraction.
-/// MP4s with the index at the end (no faststart) simply fail past this.
-const VIDEO_PEEK_CAP: u64 = 128 * 1024 * 1024;
-
 /// Long edge of generated thumbnails; aspect-preserving fit, matching
 /// the old ffmpeg `scale=320:-2` intent.
 const THUMB_EDGE: u32 = 320;
@@ -177,11 +173,6 @@ pub async fn extract_media_thumb(
     mime: &str,
     part0: crate::db::FilePart,
 ) {
-    if part0.size as u64 > VIDEO_PEEK_CAP {
-        tracing::info!("file {uid} too large for thumbnail extraction, skipping");
-        return;
-    }
-
     let dir = std::env::temp_dir().join("ii-drive-thumbs");
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         tracing::warn!("thumb temp dir: {e}");
@@ -195,76 +186,42 @@ pub async fn extract_media_thumb(
             return;
         }
     };
-    {
-        use futures::StreamExt;
-        let mut stream = match crate::stream::file_stream(&tg, part0.message_id, &part0.chat).await
-        {
-            Ok(s) => Box::pin(s),
-            Err(e) => {
-                tracing::warn!("thumb download start failed for {uid}: {e}");
-                return;
-            }
-        };
-        let mut out = match tokio::fs::File::create(&path).await {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!("thumb temp file failed for {uid}: {e}");
-                return;
-            }
-        };
-        let mut written: u64 = 0;
-        while let Some(chunk) = stream.next().await {
-            let Ok(chunk) = chunk else { break };
-            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await {
-                tracing::warn!("thumb write failed for {uid}: {e}");
-                let _ = tokio::fs::remove_file(&path).await;
-                return;
-            }
-            written += chunk.len() as u64;
-            if written > VIDEO_PEEK_CAP {
-                break; // enough — or the index is at the end; ffmpeg will tell
-            }
-        }
-    }
+
+    let size = part0.size as u64;
 
     // One raw source image: the part itself for stills, a single
     // PNG-encoded frame from ffmpeg for video. Every failure branch logs
     // its own reason before returning.
     let raw: Option<Vec<u8>> = if mime.starts_with("image/") {
-        match tokio::fs::read(&path).await {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                tracing::warn!("thumb read failed for {uid}: {e}");
-                None
-            }
+        // Still images decode from the complete part; they are rarely
+        // large enough for the transfer to matter.
+        match download_bounded(&tg, uid, &part0, 0, size, &path).await {
+            Ok(_) => match tokio::fs::read(&path).await {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    tracing::warn!("thumb read failed for {uid}: {e}");
+                    None
+                }
+            },
+            Err(()) => None,
         }
     } else if !*FFMPEG {
         tracing::info!("ffmpeg not found — skipping thumbnail for {uid}");
         None
     } else {
-        // One frame, PNG on the pipe — `image` owns scaling and encoding.
-        match tokio::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-i"])
-            .arg(&path)
-            .args(["-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .await
-        {
-            Ok(o) if o.status.success() && !o.stdout.is_empty() => Some(o.stdout),
-            Ok(o) => {
-                tracing::info!(
-                    "ffmpeg produced no thumbnail for {uid} (status {:?})",
-                    o.status.code()
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!("ffmpeg failed for {uid}: {e}");
-                None
-            }
-        }
+        // ffmpeg reads the file back from this server's own ranged raw
+        // endpoint: it seeks MP4/MKV indexes over HTTP itself, so any file
+        // size and both moov placements work without downloading whole
+        // parts. A short-lived media token names the owning account.
+        let cfg = crate::config::get();
+        let host = if cfg.host == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &cfg.host
+        };
+        let mt = state.tokens.sign_media(owner, 600);
+        let url = format!("http://{host}:{}/api/files/{uid}/raw?mt={mt}", cfg.port);
+        run_ffmpeg_frame(uid, &url).await
     };
     let _ = tokio::fs::remove_file(&path).await;
     let Some(raw) = raw else { return };
@@ -323,6 +280,76 @@ pub async fn file_thumb(
         .body(Body::from(bytes))
         .map_err(|e| ApiError::internal(format!("response build: {e}")))
 }
+
+/// Streams up to `cap` bytes of a part starting at byte `start` into
+/// `path` (truncating). Errors are logged; the boolean only signals
+/// whether usable bytes landed on disk.
+async fn download_bounded(
+    tg: &crate::tg::TgManager,
+    uid: &str,
+    part0: &crate::db::FilePart,
+    start: u64,
+    cap: u64,
+    path: &std::path::Path,
+) -> Result<(), ()> {
+    use futures::StreamExt;
+    let mut stream =
+        match crate::stream::file_stream_from(tg, part0.message_id, &part0.chat, start).await {
+            Ok(s) => Box::pin(s),
+            Err(e) => {
+                tracing::warn!("thumb download start failed for {uid}: {e}");
+                return Err(());
+            }
+        };
+    let mut out = match tokio::fs::File::create(path).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("thumb temp file failed for {uid}: {e}");
+            return Err(());
+        }
+    };
+    let mut written: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else { break };
+        if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await {
+            tracing::warn!("thumb write failed for {uid}: {e}");
+            return Err(());
+        }
+        written += chunk.len() as u64;
+        if written >= cap {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// One PNG-encoded frame from ffmpeg reading `input` (a local temp file
+/// or an http URL); `None` on any failure (logged). The frame comes back
+/// at source resolution — `encode_thumb` does the downscale + AVIF encode.
+async fn run_ffmpeg_frame(uid: &str, input: &str) -> Option<Vec<u8>> {
+    match tokio::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i", input])
+        .args(["-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => Some(o.stdout),
+        Ok(o) => {
+            tracing::info!(
+                "ffmpeg produced no thumbnail for {uid} (status {:?})",
+                o.status.code()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("ffmpeg failed for {uid}: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

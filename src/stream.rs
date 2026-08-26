@@ -10,16 +10,7 @@ const CHUNK: i32 = 512 * 1024;
 
 /// A byte stream backed by `iter_download` that transparently refetches the
 /// message when the stored file_reference expires mid-stream, resuming from
-/// the exact offset already served.
-pub async fn file_stream(
-    tg: &crate::tg::TgManager,
-    message_id: i32,
-    chat: &str,
-) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
-    file_stream_from(tg, message_id, chat, 0).await
-}
-
-/// Same as `file_stream`, but serving from byte `start` (HTTP Range
+/// the exact offset already served. Serves from byte `start` (HTTP Range
 /// support): whole chunks are skipped server-side on Telegram, the
 /// sub-chunk remainder is discarded on the wire.
 pub async fn file_stream_from(
