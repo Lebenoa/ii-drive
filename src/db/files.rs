@@ -8,6 +8,13 @@ pub struct FilePart {
     /// Storage chat key holding this part's message.
     pub chat: String,
     pub size: i64,
+    /// Base64 of the 24-byte crypto nonce used to seal this part's
+    /// container (teldrive-compatible at-rest encryption). `None` marks a
+    /// plaintext part — either a file uploaded before encryption was
+    /// enabled, or an explicitly unencrypted upload. Presence selects the
+    /// decrypting stream for this part on download.
+    #[serde(default)]
+    pub nonce: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -157,6 +157,10 @@ allowed_phones = [
 admin_phones = [
 {phones_toml}
 ]
+
+# At-rest encryption of uploads is off by default. To enable it, add
+# crypt_enabled = true and a long random crypt_password (see
+# config.example.toml). Old plaintext files are still served as-is.
 "#,
         api_id = body.api_id,
     );

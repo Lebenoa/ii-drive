@@ -3,6 +3,7 @@ use color_eyre::eyre::WrapErr;
 mod app;
 mod art;
 mod auth;
+mod crypt;
 mod config;
 mod db;
 mod error;

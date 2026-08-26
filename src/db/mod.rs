@@ -145,6 +145,7 @@ mod tests {
                 message_id: 7,
                 chat: "me".to_string(),
                 size: 42,
+                nonce: None,
             }],
             public: false,
         }
@@ -323,11 +324,16 @@ mod tests {
                 message_id: 11,
                 chat: "-1001".into(),
                 size: 150,
+                // One part encrypted: its nonce must survive the row round
+                // trip so the download path can resume decryption later.
+                nonce: Some("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into()),
             },
             FilePart {
                 message_id: 12,
                 chat: "-1002".into(),
                 size: 150,
+                // Plaintext part (pre-encryption upload): stays None.
+                nonce: None,
             },
         ];
         insert(&db, &row).await.unwrap();
@@ -335,6 +341,12 @@ mod tests {
         assert_eq!(got.parts.len(), 2);
         assert_eq!(got.parts[1].chat, "-1002");
         assert_eq!(got.size, 300);
+        // The encrypted part's nonce came back intact.
+        assert_eq!(
+            got.parts[0].nonce.as_deref(),
+            Some("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+        );
+        assert_eq!(got.parts[1].nonce, None);
     }
 
     #[tokio::test]

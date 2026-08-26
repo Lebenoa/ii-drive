@@ -50,6 +50,21 @@ pub struct Config {
     /// Directory for in-flight upload buffers (upload strategy `spill`, and
     /// the resumable-upload sessions, which always spill by design).
     pub spill_dir: String,
+    /// At-rest encryption of uploaded files (teldrive-compatible format).
+    /// When enabled, every new upload is sealed with the key derived from
+    /// [`Self::crypt_password`] and [`Self::crypt_salt`]. Files uploaded
+    /// while this was off stay plaintext and are served as-is (detected by
+    /// the absent container magic). Enabling it does not rewrite old
+    /// uploads.
+    pub crypt_enabled: bool,
+    /// Operator password feeding key derivation (scrypt). Required when
+    /// [`Self::crypt_enabled`] is on; ignored otherwise. Changing it makes
+    /// previously encrypted uploads unreadable — treat it as permanent
+    /// once files are stored.
+    pub crypt_password: String,
+    /// Salt for key derivation. Like the password, must never change after
+    /// files are stored. Defaults to "ii-drive".
+    pub crypt_salt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +84,9 @@ struct RawConfig {
     allowed_phones: Option<Vec<String>>,
     admin_phones: Option<Vec<String>>,
     spill_dir: Option<String>,
+    crypt_enabled: Option<bool>,
+    crypt_password: Option<String>,
+    crypt_salt: Option<String>,
 }
 
 impl Default for Config {
@@ -87,6 +105,9 @@ impl Default for Config {
             allowed_phones: Vec::new(),
             admin_phones: Vec::new(),
             spill_dir: "data/spill".into(),
+            crypt_enabled: false,
+            crypt_password: String::new(),
+            crypt_salt: "ii-drive".into(),
         }
     }
 }
@@ -289,7 +310,39 @@ impl Config {
                 .filter(|p| !p.is_empty())
                 .collect(),
             spill_dir: raw.spill_dir.unwrap_or_else(|| "data/spill".into()),
+            crypt_enabled: raw.crypt_enabled.unwrap_or(false),
+            crypt_password: raw.crypt_password.unwrap_or_default(),
+            crypt_salt: raw.crypt_salt.unwrap_or_else(|| "ii-drive".into()),
         })
+    }
+    /// The key used for at-rest encryption of uploads, derived from the
+    /// configured password and salt. Returns `None` while encryption is
+    /// disabled. A missing password with encryption enabled is a
+    /// misconfiguration: uploads would produce unreadable containers, so
+    /// this surfaces it as an error instead.
+    pub fn crypt_key(&self) -> color_eyre::Result<Option<crate::crypt::Key>> {
+        if !self.crypt_enabled {
+            return Ok(None);
+        }
+        if self.crypt_password.is_empty() {
+            return Err(color_eyre::eyre::eyre!(
+                "crypt_enabled requires a non-empty crypt_password"
+            ));
+        }
+        Ok(Some(crate::crypt::derive_key(
+            &self.crypt_password,
+            &self.crypt_salt,
+        )))
+    }
+    /// The key for decrypting stored files, derived whenever the password
+    /// and salt are configured — regardless of the upload toggle. Decoding
+    /// a stored encrypted part must not depend on whether encryption is
+    /// currently enabled for new uploads.
+    pub fn crypt_key_unconditional(&self) -> Option<crate::crypt::Key> {
+        if self.crypt_password.is_empty() {
+            return None;
+        }
+        Some(crate::crypt::derive_key(&self.crypt_password, &self.crypt_salt))
     }
 
     pub fn tg_configured(&self) -> bool {

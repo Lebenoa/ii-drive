@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 color-eyre = "0.6.5"
+crypto_secretbox = "0.1"
+scrypt = "0.11"
 regex = "1"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.23"

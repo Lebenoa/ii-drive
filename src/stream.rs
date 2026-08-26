@@ -152,7 +152,9 @@ pub async fn parts_stream_from(
     parts: Vec<crate::db::FilePart>,
     start: u64,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
-    // Find the part holding `start` and the offset within it.
+    // Find the part holding `start` and the offset within it. Offsets are
+    // plaintext sizes, which is what the DB stores per part regardless of
+    // whether the part is encrypted.
     let mut skip = start;
     let mut idx = 0usize;
     while idx < parts.len() && skip >= parts[idx].size as u64 {
@@ -162,14 +164,15 @@ pub async fn parts_stream_from(
     if idx >= parts.len() {
         return Err("range start is beyond the file".into());
     }
-    let first = &parts[idx];
-    let cur: BoxedPart =
-        Box::pin(file_stream_from(&tg, first.message_id, &first.chat, skip).await?);
+    let key: Option<std::sync::Arc<crate::crypt::Key>> =
+        crate::config::get().crypt_key_unconditional().map(std::sync::Arc::new);
+    let cur: BoxedPart = part_stream(&tg, &parts, idx, skip, key.as_deref()).await?;
     let st = PartsState {
         tg,
         parts,
         idx,
         cur: Some(cur),
+        key: key.clone(),
     };
     Ok(unfold(st, |mut st| async move {
         loop {
@@ -180,9 +183,8 @@ pub async fn parts_stream_from(
                     if st.idx >= st.parts.len() {
                         return None;
                     }
-                    let p = &st.parts[st.idx];
-                    match file_stream_from(&st.tg, p.message_id, &p.chat, 0).await {
-                        Ok(s) => st.cur = Some(Box::pin(s)),
+                    match part_stream(&st.tg, &st.parts, st.idx, 0, st.key.as_deref()).await {
+                        Ok(s) => st.cur = Some(s),
                         Err(e) => return Some((Err(std::io::Error::other(e)), st)),
                     }
                     continue;
@@ -198,6 +200,66 @@ struct PartsState {
     parts: Vec<crate::db::FilePart>,
     idx: usize,
     cur: Option<BoxedPart>,
+    key: Option<std::sync::Arc<crate::crypt::Key>>,
+}
+
+/// Builds the byte stream for one part, decrypting it when the part carries
+/// a crypto nonce (an encrypted upload) and a key is configured. `skip` is
+/// the plaintext offset within THIS part:
+/// - encrypted part at `skip > 0` (range start): resume at the containing
+///   ciphertext block via `at_block`, discarding the intra-block remainder;
+/// - encrypted part at `skip == 0`: read the whole container header.
+/// Plaintext (no nonce) parts bypass decryption entirely, so files uploaded
+/// before encryption was enabled still download.
+async fn part_stream(
+    tg: &crate::tg::TgManager,
+    parts: &[crate::db::FilePart],
+    idx: usize,
+    skip: u64,
+    key: Option<&crate::crypt::Key>,
+) -> Result<BoxedPart, String> {
+    let p = &parts[idx];
+    let nonce = match p.nonce.as_deref().and_then(crate::crypt::nonce_from_b64) {
+        Some(n) => n,
+        None => {
+            // Plaintext part: serve the stored bytes as-is.
+            return Ok(Box::pin(file_stream_from(tg, p.message_id, &p.chat, skip).await?));
+        }
+    };
+    // Encrypted part — the stored bytes are a container. Decryption needs a
+    // key; without one the operator has disabled or removed the key while
+    // leaving encrypted files behind, which must not silently serve garbage.
+    let key = match key {
+        Some(k) => k,
+        None => {
+            return Err(
+                "file is encrypted but no crypt_password is configured".into(),
+            );
+        }
+    };
+    if skip == 0 {
+        let inner = file_stream_from(tg, p.message_id, &p.chat, 0).await?;
+        let dec = crate::crypt::DecryptingStream::from_header(Box::pin(inner), key);
+        Ok(Box::pin(dec))
+    } else {
+        use crate::crypt::{BLOCK_DATA, BLOCK_SIZE, HEADER_SIZE};
+        let block_data = BLOCK_DATA as u64;
+        let block_size = BLOCK_SIZE as u64;
+        let blocks = skip / block_data;
+        let intra = skip % block_data;
+        // Skip whole 64 KiB-blocks of ciphertext in Telegram's stream, then
+        // discard the intra-block plaintext remainder inside the decryptor.
+        let ct_off = HEADER_SIZE + blocks * block_size;
+        let inner = file_stream_from(tg, p.message_id, &p.chat, ct_off).await?;
+        let dec = crate::crypt::DecryptingStream::at_block(
+            Box::pin(inner),
+            key,
+            nonce,
+            blocks,
+            intra,
+        );
+        Ok(Box::pin(dec))
+    }
 }
 
 #[cfg(test)]

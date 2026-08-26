@@ -19,6 +19,7 @@ the interface.
 - **Live instance settings** — upload cap, thumbnail switch and upload strategy live in the database and apply on the next request; `config.toml` holds only what you set once.
 - **Resumable uploads** — the `spill` strategy buffers to disk so uploads keep draining even if Telegram is slow.
 - **Streaming with resume** — files stream back on demand and resume transparently when Telegram's file references expire mid-transfer.
+	- **At-rest encryption** — newly uploaded files are sealed (NaCl secretbox, scrypt key) in a teldrive-compatible format; downloads decrypt on the fly.
 
 ## Comparison with Teldrive
 
@@ -37,6 +38,7 @@ the interface.
 | **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/instance` | CLI check/clean utilities |
 | **Max file size** | 2 GiB default, configurable; larger files chunk into parts | 2 GB per Telegram document, chunked |
 | **Upload strategy** | `stream` (relay) or `spill` (disk-buffer) | Stream with configurable buffers |
+| **Encryption** | At-rest opt-in (NaCl secretbox, scrypt key), teldrive-compatible; old plaintext files still serve | Optional at-rest encryption |
 
 ## Get started
 
@@ -156,6 +158,9 @@ That's it — drag files into the drive to upload them.
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
    | `session_path` | `data/session.db` | Legacy session path kept for compatibility; per-account sessions live in `sessions/` beside it |
    | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (`spill` strategy + resumable uploads) |
+   | `crypt_enabled` | `false` | Encrypt newly uploaded files at rest (teldrive-compatible format); existing plaintext files are still served as-is |
+   | `crypt_password` | — | Password feeding the scrypt key derivation; required when `crypt_enabled = true`, and changing it later makes stored files unreadable |
+   | `crypt_salt` | `ii-drive` | Salt for the key derivation; like the password, never change it once files are stored |
 
    Every key above is set once and read only at startup — there is no config
    reload, because there is nothing here worth re-reading.

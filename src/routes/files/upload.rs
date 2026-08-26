@@ -46,10 +46,10 @@ pub async fn upload_limit(
     }
     Ok(next.run(req).await)
 }
-
-/// One spawned part upload: message id, name echo, mime echo, thumb.
+/// One spawned part upload: message id, name echo, mime echo, thumb, and
+/// the base64 per-part crypto nonce (`None` for plaintext parts).
 pub(crate) type UploaderHandle =
-    tokio::task::JoinHandle<Result<(i32, String, String, Option<Vec<u8>>), String>>;
+    tokio::task::JoinHandle<Result<(i32, String, String, Option<Vec<u8>>, Option<String>), String>>;
 
 /// A file fully described and already uploaded: everything persist_row
 /// needs to record it.
@@ -184,7 +184,7 @@ pub async fn upload_file(
     for i in 0..nparts {
         let (tx, rx) = tokio::sync::mpsc::channel::<io::Result<bytes::Bytes>>(4);
         txs.push(tx);
-        let mut reader =
+        let base_reader =
             tokio_util::io::StreamReader::new(ReceiverStream::<io::Result<bytes::Bytes>>::new(rx));
         // The last part gets whatever remains.
         let expected = if i + 1 == nparts {
@@ -217,8 +217,26 @@ pub async fn upload_file(
             } else {
                 name
             };
-            tg.upload(&mut reader, expected, &part_name, &mime, &chat)
-                .await
+            // Encrypt this part when at-rest encryption is enabled: the
+            // plaintext part feeds an EncryptingReader and Telegram stores
+            // the ciphertext container. The part's nonce travels back with
+            // the result so the row records it for decryption.
+            let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+            let mut upload_size = expected;
+            let mut nonce: Option<String> = None;
+            match crate::config::get().crypt_key() {
+                Ok(Some(key)) => {
+                    let (er, used) = crate::crypt::EncryptingReader::new(base_reader, &key);
+                    reader = Box::new(er);
+                    nonce = Some(crate::crypt::base64_encode(&used));
+                    upload_size = crate::crypt::encrypted_size(expected);
+                }
+                _ => reader = Box::new(base_reader),
+            }
+            let (mid, _, _, thumb) = tg
+                .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                .await?;
+            Ok((mid, part_name, mime, thumb, nonce))
         }));
     }
 
@@ -328,10 +346,11 @@ pub async fn upload_file(
                 .map_err(|e| format!("upload task failed: {e}"))
                 .and_then(|r| r)
             {
-                Ok((message_id, _, _, _)) => parts.push(crate::db::FilePart {
+                Ok((message_id, _, _, _, _)) => parts.push(crate::db::FilePart {
                     message_id,
                     chat: chat_for(i),
                     size: 0,
+                    nonce: None,
                 }),
                 Err(e) if uploader_err.is_none() => uploader_err = Some(e),
                 Err(_) => {}
@@ -360,7 +379,7 @@ pub async fn upload_file(
             .map_err(|e| format!("upload task failed: {e}"))
             .and_then(|r| r);
         match res {
-            Ok((message_id, _, _, thumb)) => {
+            Ok((message_id, _, _, thumb, nonce)) => {
                 if let Some(raw) = thumb
                     && thumb_avif.is_none()
                 {
@@ -374,6 +393,7 @@ pub async fn upload_file(
                     } else {
                         part_size
                     } as i64,
+                    nonce,
                 })
             }
             Err(e) => {
@@ -593,9 +613,27 @@ async fn spill_upload(
             } else {
                 file_name
             };
-            let mut r =
-                tokio_util::io::StreamReader::new(tokio_stream::wrappers::ReceiverStream::new(rx));
-            tg.upload(&mut r, expected, &part_name, &mime, &chat).await
+            let base_r = tokio_util::io::StreamReader::new(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            );
+            // Encrypt the part when at-rest encryption is on; the nonce
+            // rides back with the result for the row.
+            let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+            let mut upload_size = expected;
+            let mut nonce: Option<String> = None;
+            match crate::config::get().crypt_key() {
+                Ok(Some(key)) => {
+                    let (er, used) = crate::crypt::EncryptingReader::new(base_r, &key);
+                    reader = Box::new(er);
+                    nonce = Some(crate::crypt::base64_encode(&used));
+                    upload_size = crate::crypt::encrypted_size(expected);
+                }
+                _ => reader = Box::new(base_r),
+            }
+            let (mid, _, _, thumb) = tg
+                .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                .await?;
+            Ok((mid, part_name, mime, thumb, nonce))
         }));
     }
 
@@ -770,7 +808,7 @@ async fn collect_uploaders(
             .map_err(|e| format!("upload task failed: {e}"))
             .and_then(|r| r)
         {
-            Ok((message_id, _, _, thumb)) => {
+            Ok((message_id, _, _, thumb, nonce)) => {
                 if tg_thumb.is_none() {
                     tg_thumb = thumb;
                 }
@@ -778,6 +816,7 @@ async fn collect_uploaders(
                     message_id,
                     chat: plan.chat_for(i),
                     size: plan.expected(i) as i64,
+                    nonce,
                 });
             }
             Err(e) => {
@@ -845,13 +884,30 @@ pub(crate) async fn store_from_file(
             f.seek(std::io::SeekFrom::Start(i as u64 * part_size))
                 .await
                 .map_err(|e| format!("seek upload buffer: {e}"))?;
-            let mut r = f.take(expected);
+            let r = f.take(expected);
             let part_name = if nparts > 1 {
                 format!("{name}.part{:03}", i + 1)
             } else {
                 name
             };
-            tg.upload(&mut r, expected, &part_name, &mime, &chat).await
+            // Encrypt the part when at-rest encryption is on; the nonce
+            // rides back for the row.
+            let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+            let mut upload_size = expected;
+            let mut nonce: Option<String> = None;
+            match crate::config::get().crypt_key() {
+                Ok(Some(key)) => {
+                    let (er, used) = crate::crypt::EncryptingReader::new(r, &key);
+                    reader = Box::new(er);
+                    nonce = Some(crate::crypt::base64_encode(&used));
+                    upload_size = crate::crypt::encrypted_size(expected);
+                }
+                _ => reader = Box::new(r),
+            }
+            let (mid, _, _, thumb) = tg
+                .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                .await?;
+            Ok((mid, part_name, mime, thumb, nonce))
         }));
     }
 

@@ -59,6 +59,26 @@ db_path = "data/drive.surrealkv"
 # Telegram MTProto sessions live at "<this folder>/sessions/<telegram-user-id>.db";
 # the path below only names that folder.
 session_path = "data/session.db"
+# --- At-rest file encryption (optional, off by default) ---
+#
+# When enabled, newly uploaded files are encrypted on disk and in Telegram
+# before they reach a Telegram data center, in a format compatible with
+# teldrive (NaCl secretbox, scrypt-derived key). Downloads decrypt on the
+# fly.
+#
+# Two things matter:
+#  * The password and salt derive the key. Change either one after files
+#    are stored and those files become permanently unreadable — no recovery
+#    shortcut exists. Choose a long random password and keep it safe.
+#  * Enabling encryption does NOT rewrite files uploaded while it was off;
+#    those stay plaintext and are still served as-is. Encryption only
+#    affects uploads made after this is turned on.
+#
+# Set both crypt_password and crypt_enabled = true to turn it on. The salt
+# is optional (defaults to "ii-drive").
+# crypt_enabled = true
+# crypt_password = "a-long-random-password-you-keep-safe"
+# crypt_salt = "ii-drive"
 
 # --- Moved to the database ---
 #
