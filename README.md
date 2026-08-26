@@ -12,11 +12,12 @@ the interface.
 - **Download bot pool** — add several bots to spread upload and download load across separate MTProto connections for higher throughput.
 - **Split uploads** — files above a threshold are cut into parts (at most 64) and uploaded in parallel, round-robin across storage channels.
 - **Transparent chunking** — an upload cap above Telegram's per-document cap is honored by splitting into parts (≤64); parts are re-joined on download and deleted together.
-- **Thumbnail extraction** — audio cover art is parsed straight from ID3/FLAC bytes (no ffmpeg); videos and images get background ffmpeg thumbnails.
+- **Thumbnail extraction** — audio cover art is parsed straight from ID3/FLAC bytes (no ffmpeg); videos get a background ffmpeg frame, still images are thumbnailed in-process, both encoded to AVIF.
+- **Orphan-thumbnail sweep** — stale preview files are cleaned on an operator-set wall-clock schedule; `/api/thumbs/sweep` runs it on demand.
 - **On-demand i18n** — only English ships; other languages download at runtime from GitHub, so translations improve without rebuilding.
 - **Guided @BotFather chat** — create or import download bots through a resumable in-app conversation with @BotFather.
 - **Developer mode** — `/internal-db` gives admin users a SurrealDB browser; endpoints answer only to `admin_phones`.
-- **Live instance settings** — upload cap, thumbnail switch and upload strategy live in the database and apply on the next request; `config.toml` holds only what you set once.
+- **Live instance settings** — upload cap, thumbnail switch, upload strategy and the thumbnail-sweep schedule live in the database and apply on the next request; `config.toml` holds only what you set once.
 - **Resumable uploads** — the `spill` strategy buffers to disk so uploads keep draining even if Telegram is slow.
 - **Streaming with resume** — files stream back on demand and resume transparently when Telegram's file references expire mid-transfer.
 	- **At-rest encryption** — newly uploaded files are sealed (NaCl secretbox, scrypt key) in a teldrive-compatible format; downloads decrypt on the fly.
@@ -32,9 +33,9 @@ the interface.
 | **Bots** | Built-in @BotFather chat; guided create/import; auto-invite into channels | Bot tokens added via UI, no @BotFather flow |
 | **Rclone / WebDAV** | No — pure HTTP API + web UI | Yes — rclone remote integration |
 | **Chunking** | Configurable split threshold, ≤64 parts, round-robin across channels, rotating bot sessions | Chunked uploads; configurable threads, retries, retention; optional encryption |
-| **Thumbnails** | Audio cover art from ID3/FLAC; ffmpeg for video/images | Optional imgproxy image resizing/thumbnails |
+| **Thumbnails** | Audio cover art from ID3/FLAC; in-process AVIF for stills, ffmpeg frame for video | Optional imgproxy image resizing/thumbnails |
 | **Deployment** | Single binary + `web/dist` folder + embedded DB file; TOML config | Binary + separate React UI + PostgreSQL; optional Redis, imgproxy |
-| **Runtime settings** | Upload cap, thumbnails and strategy stored in the DB, changed from the UI, no restart | Config file, restart required |
+| **Runtime settings** | Upload cap, thumbnails, strategy and sweep schedule stored in the DB, changed from the UI, no restart | Config file, restart required |
 | **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/instance` | CLI check/clean utilities |
 | **Max file size** | 2 GiB default, configurable; larger files chunk into parts | 2 GB per Telegram document, chunked |
 | **Upload strategy** | `stream` (relay) or `spill` (disk-buffer) | Stream with configurable buffers |
@@ -183,13 +184,16 @@ That's it — drag files into the drive to upload them.
    | Setting | Default | Meaning |
    |---|---|---|
    | `max_file_size` | `2GiB` | Upload cap; bytes or `2GiB`, `500MiB`, `2GB` (=2·10⁹) |
-   | `media_thumbs` | `true` | ffmpeg image/video thumbnails; audio cover art is extracted regardless |
+   | `media_thumbs` | `true` | Generated thumbnails: still images encoded in-process, video via one ffmpeg frame; audio cover art is extracted regardless |
    | `upload_strategy` | `stream` | How an accepted upload reaches Telegram: `stream` relays the body directly, `spill` buffers to disk first so all parts drain at full rate |
+   | `thumb_sweep_time` | `00:00` | Local wall-clock anchor (`HH:MM`) for the orphan-thumbnail sweep |
+   | `thumb_sweep_hours` | `24` | Sweep interval in hours (0 turns the scheduled sweep off; `/api/thumbs/sweep` still runs it on demand) |
 
-   These three used to be config keys. An install that still sets them in
-   `config.toml` has them copied into the database once, on the first startup
-   after upgrading, and logs which keys to delete — your existing cap is not
-   silently reset.
+   These three (upload cap, thumbnails, strategy) used to be config keys. An
+   install that still sets them in `config.toml` has them copied into the
+   database once on the first startup after upgrading, and logs which keys to
+   delete — your existing cap is not silently reset. The sweep schedule has
+   never been a config key.
 
 ### Multi-account notes
 
@@ -258,10 +262,19 @@ Previews come from three places, in this order:
    this is the only source for music. It is pure byte parsing — no ffmpeg,
    no extra download — and therefore runs regardless of `media_thumbs`.
    Art stored beyond that first 512 KiB is not found.
-3. **ffmpeg**, in the background, for videos (first frame) and images that
-   arrived without a usable thumb. This is the only step `media_thumbs`
-   turns off, and the only one needing ffmpeg on `PATH`. AVIF is used when
-   the build has libaom, else WebP.
+3. **Generated AVIF**, always encoded in-process: still images are decoded
+   and downscaled by the `image` crate, and videos contribute one ffmpeg
+   frame (ffmpeg reads the file back over this server's own ranged-HTTP
+   endpoint, so any size and both mp4 `moov` placements work). The whole
+   step is the only one `media_thumbs` turns off; still images need no
+   ffmpeg at all, and only video frame extraction does.
+
+Generated previews can outlive the file they belong to (a failed upload,
+or a delete whose preview unlink was interrupted). A **scheduled sweep**
+removes orphan thumbnails on an operator-set wall-clock anchor and
+interval — `thumb_sweep_time` (`HH:MM`) and `thumb_sweep_hours` under
+**Settings → Uploads** — and `POST /api/thumbs/sweep` triggers it on
+demand, also at startup for recovery after a mid-crash.
 
 ### Translations (i18n)
 
@@ -327,10 +340,17 @@ just log in again through the web UI.
 | PATCH | `/api/files/{id}/move` `/visibility` | token | Move file / toggle public-private |
 | DELETE | `/api/files/{id}` | token | Delete file + Telegram parts |
 | GET | `/api/files/{id}/raw` `/thumb` | — / token / `?mt=` / `?sig=` | Stream or thumbnail; public files need nothing |
+| GET | `/api/files/{id}/meta` | — | Public metadata for the share page (name, mime, size, uploader) |
 | GET | `/api/files/{id}/link` | token | Mint time-limited share URL |
+| POST | `/api/files/upload/init` | token | Start a resumable/spill upload: declared `size`, `name`; returns an upload id |
+| GET/DELETE | `/api/files/upload/{id}` | token | Resumable upload status / abort (drops the spill buffer) |
+| PUT | `/api/files/upload/{id}` | token | Append one chunk (≤ 64 MiB) to a resumable upload |
+| POST | `/api/files/upload/{id}/complete` | token | Finalize a resumable upload and fan its buffered parts out to Telegram |
+| POST | `/api/files/upload-bench` | token | Benchmark helper — keystone exercise of the part fan-out, no file stored |
 | GET/POST | `/api/folders`(`/{id}`) | token | List / create / delete folders |
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
-| GET/PUT | `/api/instance` | token + admin | Instance-wide upload cap, thumbnail switch and strategy; non-admins get 404 |
+| GET/PUT | `/api/instance` | token + admin | Instance-wide upload cap, thumbnail switch, strategy and sweep schedule; non-admins get 404 |
+| POST | `/api/thumbs/sweep` | token + admin | Trigger the orphan-thumbnail sweep now; operator-only, same guard as `/api/instance` |
 | GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
 | GET | `/locales/manifest.json` | — | Languages available beside the binary, with display names |
 | GET | `/locales/{lang}.json` | — | One translation dictionary; the UI downloads it on language change |
@@ -385,7 +405,7 @@ cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `n
   `web/dist` folder beside the executable.
 - **Max file size:** 2 GiB default (Telegram free-account per-file limit);
   configurable, larger files upload via transparent chunking.
-- **Thumbnails:** ffmpeg (optional, on `PATH`) for video/images; audio cover art parsed from ID3/FLAC.
+- **Thumbnails:** ffmpeg (optional, on `PATH`) for video; still images encoded in-process to AVIF; audio cover art parsed from ID3/FLAC.
 - **Build:** Rust 1.85+ (edition 2024), Node.js 20.19+ (or 22.12+) for the web UI (SvelteKit 2 / Vite 8).
 - **Deployment:** single binary plus a `web/dist` assets folder and an embedded SurrealDB file — no external services.
 
