@@ -88,6 +88,46 @@ pub(crate) async fn remove(dir: &std::path::Path, uid: &str) {
     let _ = tokio::fs::remove_file(thumb_path(dir, uid)).await;
 }
 
+/// Parses a "HH:MM" local wall-clock anchor into (hour, minute).
+pub fn parse_sweep_time(s: &str) -> Result<(u8, u8), String> {
+    let (h, m) = s
+        .split_once(':')
+        .ok_or_else(|| format!("expected \"HH:MM\", got {s:?}"))?;
+    let h: u8 = h.trim().parse().map_err(|_| format!("bad hour in {s:?}"))?;
+    let m: u8 = m
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad minute in {s:?}"))?;
+    if h > 23 || m > 59 {
+        return Err(format!("time out of range in {s:?}"));
+    }
+    Ok((h, m))
+}
+
+/// Seconds until the next sweep tick on the schedule anchored at local
+/// `HH:MM`, repeating every `hours` hours across days. `None` when the
+/// periodic sweep is disabled or the anchor does not parse.
+pub fn next_sweep_in(anchor: &str, hours: u64) -> Option<std::time::Duration> {
+    let (h, m) = parse_sweep_time(anchor).ok()?;
+    if hours == 0 {
+        return None;
+    }
+    use time::{OffsetDateTime, Time};
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    // The grid starts at today's anchor and steps forward every `hours`
+    // hours, rolling over into following days as needed — DST shifts are
+    // absorbed by the fixed-offset arithmetic rather than re-anchoring.
+    let today_anchor = now.replace_time(Time::from_hms(h, m, 0).ok()?);
+    let step = (hours * 3600) as i64;
+    let mut cand = today_anchor.unix_timestamp();
+    while cand <= now.unix_timestamp() {
+        cand += step;
+    }
+    Some(std::time::Duration::from_secs(
+        (cand - now.unix_timestamp()) as u64,
+    ))
+}
+
 /// Deletes preview files whose row is gone (a crash between row delete
 /// and preview unlink leaves these behind). Returns how many went away.
 pub async fn sweep(state: &AppState) -> Result<usize, String> {
@@ -328,5 +368,34 @@ mod tests {
     fn garbage_fails_cleanly() {
         assert!(encode_thumb(b"not an image at all").is_err());
         assert!(encode_thumb(&[]).is_err());
+    }
+
+    #[test]
+    fn sweep_time_parsing() {
+        assert_eq!(parse_sweep_time("00:00"), Ok((0, 0)));
+        assert_eq!(parse_sweep_time("7:05"), Ok((7, 5)));
+        assert_eq!(parse_sweep_time("23:59"), Ok((23, 59)));
+        for bad in ["24:00", "12:60", "abc", "10", ""] {
+            assert!(parse_sweep_time(bad).is_err(), "{bad:?} must not parse");
+        }
+    }
+
+    /// The interval is always positive and never longer than the step
+    /// demands; a disabled or invalid schedule yields nothing.
+    #[test]
+    fn next_run_is_on_the_grid() {
+        use std::time::Duration;
+        assert_eq!(next_sweep_in("07:00", 0), None);
+        assert_eq!(next_sweep_in("nope", 3), None);
+        // An anchor later today delays the first tick until it arrives
+        // (at most ~24 h); afterwards ticks repeat every `hours` hours.
+        for anchor in ["00:00", "07:00", "23:59"] {
+            let d = next_sweep_in(anchor, 3).unwrap();
+            assert!(d > Duration::ZERO);
+            assert!(d <= Duration::from_secs(25 * 3600), "{anchor:?} -> {d:?}");
+        }
+        // A daily midnight run is at most 24 h away.
+        let d = next_sweep_in("00:00", 24).unwrap();
+        assert!(d <= Duration::from_secs(24 * 3600));
     }
 }

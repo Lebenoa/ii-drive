@@ -127,8 +127,9 @@
     "strategySpill": "Spill — buffer to disk first, faster on fast links",
     "sweepThumbs": "Clear orphan thumbnails",
     "swept": "Removed {count} orphan thumbnail{s}",
-    "sweepEvery": "Sweep orphans every",
-    "sweepUnit": "min (0 = only at startup / manual)"
+    "sweepEvery": "every",
+    "sweepAt": "Sweep at",
+    "sweepUnit": "h (0 = off)"
   },
   "other": {
     "language": "Language",

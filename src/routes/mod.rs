@@ -22,6 +22,6 @@ pub use session::{
 
 /// The thumbnail sweeper is also driven by the startup/interval loop in
 /// `main`, not just the operator endpoint.
-pub use files::sweep;
+pub use files::{next_sweep_in, sweep};
 pub use internal_db::{query as internal_db_query, tables as internal_db_tables};
 pub use locales::{locale as locale_file, manifest as locale_manifest};

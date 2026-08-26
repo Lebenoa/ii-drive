@@ -79,24 +79,28 @@ async fn main() {
     }
 
     // Orphaned previews (crash between row delete and file unlink) are
-    // swept at startup and then on a configurable cadence — a long-running
-    // server never gets the boot-time cleanup for free. The gap re-reads
-    // the setting every cycle, so operator changes apply without a restart.
+    // swept once at startup and then on the operator's schedule — an anchor
+    // wall-clock time plus an interval in hours ("00:00" every 24 h runs
+    // nightly at midnight). The schedule re-reads every cycle, so changes
+    // apply without a restart; a disabled or invalid schedule polls the
+    // setting each minute and resumes sweeping when it becomes valid.
     tokio::spawn(async {
         let state = crate::state::get();
-        let mut first = true;
+        match crate::routes::sweep(state).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("startup thumbnail sweep removed {n} orphans"),
+            Err(e) => tracing::warn!("startup thumbnail sweep failed: {e}"),
+        }
         loop {
-            let mins = state.instance().thumb_sweep_mins;
-            if first {
-                first = false;
-            } else if mins == 0 {
-                // Disabled: poll the setting each minute instead of
-                // sweeping; re-enabling needs no restart.
+            let inst = state.instance();
+            let Some(delay) =
+                crate::routes::next_sweep_in(&inst.thumb_sweep_time, inst.thumb_sweep_hours)
+            else {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_secs(mins * 60)).await;
-            }
+            };
+            drop(inst);
+            tokio::time::sleep(delay).await;
             match crate::routes::sweep(state).await {
                 Ok(0) => {}
                 Ok(n) => tracing::info!("thumbnail sweep removed {n} orphans"),

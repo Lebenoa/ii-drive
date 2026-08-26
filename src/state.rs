@@ -153,13 +153,13 @@ impl AppState {
         crate::config::get().is_admin_phone(&phone)
     }
 
-    /// The instance tunables. A copy out of the cache, so this is free to
-    /// call per request.
+    /// The instance tunables. A clone out of the cache, so this is free
+    /// to call per request.
     pub fn instance(&self) -> crate::db::Instance {
-        *self
-            .instance
+        self.instance
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Stores new tunables and updates the cache.
@@ -307,7 +307,7 @@ mod tests {
             upload_strategy: crate::db::UploadStrategy::Spill,
             ..state.instance()
         };
-        state.set_instance(next).await.expect("save");
+        state.set_instance(next.clone()).await.expect("save");
 
         assert_eq!(
             crate::db::get_instance(&state.db).await.expect("read"),

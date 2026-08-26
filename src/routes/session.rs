@@ -398,7 +398,7 @@ pub async fn sweep_thumbs(
     }
     let removed = crate::routes::files::sweep(state)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(json!({ "removed": removed })))
 }
 
@@ -455,8 +455,10 @@ pub struct InstanceBody {
     /// Bytes, or a human size like `"2GiB"`.
     max_file_size: Option<crate::config::SizeRepr>,
     media_thumbs: Option<bool>,
-    /// Minutes between orphan-thumbnail sweeps; 0 disables the periodic one.
-    thumb_sweep_mins: Option<u64>,
+    /// Local wall-clock anchor "HH:MM" for the orphan-thumbnail sweep.
+    thumb_sweep_time: Option<String>,
+    /// Hours between sweeps from that anchor; 0 disables the periodic one.
+    thumb_sweep_hours: Option<u64>,
     upload_strategy: Option<crate::db::UploadStrategy>,
 }
 
@@ -499,8 +501,19 @@ pub async fn save_instance(
         }
         next.max_file_size = bytes;
     }
-    if let Some(mins) = body.thumb_sweep_mins {
-        next.thumb_sweep_mins = mins;
+    if let Some(at) = body.thumb_sweep_time.as_deref() {
+        crate::routes::files::parse_sweep_time(at).map_err(ApiError::bad_request)?;
+        next.thumb_sweep_time = at.to_string();
+    }
+    if let Some(hours) = body.thumb_sweep_hours {
+        // A week is the longest sane gap; beyond that the operator should
+        // just disable the sweep instead of hiding it behind a huge number.
+        if hours > 24 * 7 {
+            return Err(ApiError::bad_request(
+                "thumbnail sweep interval cannot exceed 168 hours (use 0 to disable)",
+            ));
+        }
+        next.thumb_sweep_hours = hours;
     }
     if let Some(thumbs) = body.media_thumbs {
         next.media_thumbs = thumbs;
@@ -509,7 +522,7 @@ pub async fn save_instance(
         next.upload_strategy = strategy;
     }
 
-    state.set_instance(next).await?;
+    state.set_instance(next.clone()).await?;
     Ok(Json(next))
 }
 
@@ -525,7 +538,6 @@ mod tests {
     fn settings_are_scoped_to_the_caller() {
         with_state(|_state| async move {
             let (mine_uid, other_uid) = (next_uid(), next_uid());
-
             let saved = save_settings(
                 Extension(Caller(mine_uid)),
                 Json(SettingsBody { split_mb: 64 }),

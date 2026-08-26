@@ -261,8 +261,10 @@ export function botfatherToken(bot: string): Promise<{ token: string }> {
 export interface Instance {
   max_file_size: number;
   media_thumbs: boolean;
-  /** Minutes between orphan-thumbnail sweeps; 0 disables the periodic one. */
-  thumb_sweep_mins: number;
+  /** Local "HH:MM" anchor for the orphan-thumbnail sweep. */
+  thumb_sweep_time: string;
+  /** Hours between sweeps from that anchor; 0 disables the periodic one. */
+  thumb_sweep_hours: number;
   upload_strategy: 'stream' | 'spill';
 }
 

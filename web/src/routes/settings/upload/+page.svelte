@@ -37,7 +37,8 @@
     try {
       instance = await getInstance();
       capMb = Math.round(instance.max_file_size / MB);
-      sweepMins = instance.thumb_sweep_mins;
+      sweepAt = instance.thumb_sweep_time;
+      sweepHours = instance.thumb_sweep_hours;
     } catch (err) {
       // A 404 here means the account lost operator rights between the
       // /api/me probe and this call; the panel simply stays hidden.
@@ -51,7 +52,8 @@
   // the endpoint keeps whatever a request leaves out.
   const capEdited = $derived(!!instance && capMb !== Math.round(instance.max_file_size / MB));
 
-  let sweepMins = $state(60);
+  let sweepAt = $state('00:00');
+  let sweepHours = $state(24);
 
   async function saveInstanceSettings(): Promise<void> {
     if (instanceSaving || !instance) return;
@@ -62,11 +64,13 @@
       instance = await saveInstance({
         ...(capEdited ? { max_file_size: Math.max(1, Math.floor(Number(capMb) || 0)) * MB } : {}),
         media_thumbs: instance.media_thumbs,
-        thumb_sweep_mins: Math.max(0, Math.floor(Number(sweepMins) || 0)),
+        thumb_sweep_time: /^\d{1,2}:\d{2}$/.test(sweepAt.trim()) ? sweepAt.trim() : '00:00',
+        thumb_sweep_hours: Math.max(0, Math.min(168, Math.floor(Number(sweepHours) || 0))),
         upload_strategy: instance.upload_strategy,
       });
       capMb = Math.round(instance.max_file_size / MB);
-      sweepMins = instance.thumb_sweep_mins;
+      sweepAt = instance.thumb_sweep_time;
+      sweepHours = instance.thumb_sweep_hours;
       instanceMsg = t('common.saved');
     } catch (err) {
       instanceError = err instanceof Error ? err.message : String(err);
@@ -209,13 +213,21 @@
           <span>{t('instance.thumbs')}</span>
         </label>
         <div class="split-row">
-          <label class="cap-label" for="sweemins">{t('instance.sweepEvery')}</label>
+          <label class="cap-label" for="sweeptime">{t('instance.sweepAt')}</label>
           <input
-            id="sweemins"
+            id="sweeptime"
+            class="field split-input"
+            type="time"
+            bind:value={sweepAt}
+          />
+          <label class="cap-label" for="sweehours">{t('instance.sweepEvery')}</label>
+          <input
+            id="sweehours"
             class="field split-input"
             type="number"
             min="0"
-            bind:value={sweepMins}
+            max="168"
+            bind:value={sweepHours}
           />
           <span class="muted">{t('instance.sweepUnit')}</span>
         </div>
