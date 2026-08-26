@@ -180,7 +180,7 @@
         aria-activedescendant={activeId}
         onkeydown={onKey}
       />
-      <div id="country-list" class="list" role="listbox" aria-label="Countries" bind:this={listEl}>
+      <div id="country-list" class="list" role="listbox" aria-label={t('login.countries')} bind:this={listEl}>
         {#each matches as c, i (c.iso2)}
           <button
             type="button"

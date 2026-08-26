@@ -11,6 +11,7 @@
   }
 
   let { src, thumb, mediaTitle }: Props = $props();
+import { t } from '$lib/i18n.svelte';
 
   let video = $state<HTMLVideoElement | null>(null);
   let shell = $state<HTMLDivElement | null>(null);
@@ -76,10 +77,10 @@
     ontimeupdate={onTimeUpdate}
   ></video>
   {#if !playing}
-    <button class="bigplay" aria-label="Play" onclick={toggle}>▶</button>
+    <button class="bigplay" aria-label={t('player.play')} onclick={toggle}>▶</button>
   {/if}
   <div class="bar">
-    <button type="button" aria-label="Play / pause" onclick={toggle}>
+    <button type="button" aria-label={t('player.playPause')} onclick={toggle}>
       {playing ? '❚❚' : '▶'}
     </button>
     <span class="t">{fmt(current)}</span>
@@ -92,12 +93,12 @@
       oninput={onSeekInput}
       onpointerdown={() => (seeking = true)}
       onpointerup={() => (seeking = false)}
-      aria-label="Seek"
+      aria-label={t('player.seek')}
     />
     <span class="t">{fmt(duration)}</span>
     <button
       type="button"
-      aria-label="Mute"
+      aria-label={t('player.mute')}
       onclick={() => {
         if (!video) return;
         video.muted = !video.muted;
@@ -106,7 +107,7 @@
     >
       {muted ? '🔇' : '🔊'}
     </button>
-    <button type="button" aria-label="Fullscreen" onclick={onFullscreen}>⛶</button>
+    <button type="button" aria-label={t('player.fullscreen')} onclick={onFullscreen}>⛶</button>
   </div>
 </div>
 

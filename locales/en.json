@@ -42,7 +42,8 @@
     "confirm": "Confirm",
     "countryCode": "Country code: {name} +{dial}",
     "searchCountry": "Search country or code…",
-    "noCountry": "No country matches “{query}”."
+    "noCountry": "No country matches “{query}”.",
+    "countries": "Countries"
   },
   "setup": {
     "title": "Setup",
@@ -94,7 +95,8 @@
     "adding": "Adding…",
     "addBot": "Add bot",
     "noBots": "No bots configured — downloads use your own account.",
-    "channelAccess": "Channel access:"
+    "channelAccess": "Channel access:",
+    "tokenPlaceholder": "123456:AA… bot token"
   },
   "botfather": {
     "title": "Create a bot with @BotFather",
@@ -159,7 +161,8 @@
     "removeRule": "Remove rule",
     "noRules": "No rules — uploads to the root stay in the root.",
     "addRule": "Add rule",
-    "createFolderFirst": "Create a folder in the drive first."
+    "createFolderFirst": "Create a folder in the drive first.",
+    "unit": "Unit"
   },
   "db": {
     "title": "Internal DB",
@@ -227,5 +230,12 @@
     "folderName": "Folder name",
     "deleteFolderTitle": "Delete folder",
     "deleteFolderBody": "Delete “{name}”? The folder must be empty — files and subfolders inside it are kept and must be removed first."
+  },
+  "player": {
+    "play": "Play",
+    "playPause": "Play / pause",
+    "seek": "Seek",
+    "mute": "Mute",
+    "fullscreen": "Fullscreen"
   }
 }

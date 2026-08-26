@@ -214,7 +214,7 @@
         <input
           class="field"
           type="password"
-          placeholder="123456:AA… bot token"
+          placeholder={t('telegram.tokenPlaceholder')}
           autocomplete="off"
           bind:value={token}
           disabled={adding}

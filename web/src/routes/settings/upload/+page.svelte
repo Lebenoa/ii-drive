@@ -220,7 +220,7 @@
             step="any"
             bind:value={capValue}
           />
-          <select class="field split-input" bind:value={capUnit} aria-label="Unit">
+          <select class="field split-input" bind:value={capUnit} aria-label={t('upload.unit')}>
             {#each Object.keys(UNITS) as u (u)}
               <option value={u}>{u}</option>
             {/each}

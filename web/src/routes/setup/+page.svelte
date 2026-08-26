@@ -59,7 +59,7 @@
 
 <div class="center-screen">
   {#if phase === 'checking'}
-    <div class="spinner" aria-label="loading"></div>
+    <div class="spinner" aria-label={t('common.loading')}></div>
   {:else if phase === 'absent'}
     <div class="card setup-card" in:fadeUp>
       <h1 class="brand">ii-drive</h1>

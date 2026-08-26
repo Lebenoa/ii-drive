@@ -44,7 +44,7 @@
   <!-- No exit on the spinner: it fills the viewport, so fading it out
        while the picker mounts below would double the page height. -->
   <div class="center-screen">
-    <div class="spinner" aria-label="loading"></div>
+    <div class="spinner" aria-label={t('common.loading')}></div>
   </div>
 {:else}
   <div in:fadeUp>

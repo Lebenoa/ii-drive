@@ -63,7 +63,7 @@
 {#if booting}
   <!-- Delayed fade: a boot that resolves in <250ms never flashes a spinner. -->
   <div class="center-screen" in:fadeOnly={{ delay: 250 }}>
-    <div class="spinner" aria-label="loading"></div>
+    <div class="spinner" aria-label={t('common.loading')}></div>
   </div>
 {:else if bootError}
   <div class="center-screen boot-retry" in:fadeUp>
