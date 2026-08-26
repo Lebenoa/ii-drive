@@ -16,9 +16,32 @@ use crate::db::FileRow;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
-use super::{
-    FileDto, HEAD_CAP, bytes_repr, cleanup_parts, extract_media_thumb, now_unix,
-};
+use super::{FileDto, HEAD_CAP, bytes_repr, cleanup_parts, extract_media_thumb, now_unix};
+
+/// A part-upload failure safe to retry by re-reading the spill buffer: the
+/// socket to Telegram's DC was torn down mid-transfer (ECONNRESET /
+/// ECONNABORTED / connect timeout / refused), killing the in-flight stream
+/// but not the buffered part. Anything else — an RPC rejection such as a
+/// flood wait, an invalid file, a permission error — would fail every retry
+/// identically, so leave it to fail fast.
+fn is_transient(err: &str) -> bool {
+    let low = err.to_ascii_lowercase();
+    [
+        "connection reset by peer",
+        "connection aborted",
+        "broken pipe",
+        "established connection was aborted",
+        "connection timed out",
+        "timed out",
+        "connection refused",
+    ]
+    .iter()
+    .any(|frag| low.contains(frag))
+}
+
+/// Extra attempts (besides the first) a part upload gets after a transient
+/// transport failure; each re-reads its part from the spill buffer.
+const PART_RETRIES: u32 = 2;
 
 /// Per-request body-limit guard for POST /api/files. The limit cannot be
 /// baked into the router at startup: the cap is an instance setting an
@@ -297,9 +320,8 @@ async fn spill_upload(
             } else {
                 file_name
             };
-            let base_r = tokio_util::io::StreamReader::new(
-                tokio_stream::wrappers::ReceiverStream::new(rx),
-            );
+            let base_r =
+                tokio_util::io::StreamReader::new(tokio_stream::wrappers::ReceiverStream::new(rx));
             // Encrypt the part when at-rest encryption is on; the nonce
             // rides back with the result for the row.
             let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
@@ -341,16 +363,14 @@ async fn spill_upload(
                 continue;
             }
             name = f.file_name().unwrap_or("unnamed").to_string();
-            mime = f
-                .content_type()
-                .map_or_else(
-                    || {
-                        mime_guess::from_path(&name)
-                            .first_or_octet_stream()
-                            .to_string()
-                    },
-                    str::to_string,
-                );
+            mime = f.content_type().map_or_else(
+                || {
+                    mime_guess::from_path(&name)
+                        .first_or_octet_stream()
+                        .to_string()
+                },
+                str::to_string,
+            );
             let _ = meta_tx.send(Some((name.clone(), mime.clone())));
             loop {
                 match f.chunk().await {
@@ -567,37 +587,63 @@ pub async fn store_from_file(
         let part_size = plan.part_size;
         let nparts = plan.nparts;
         uploaders.push(tokio::spawn(async move {
-            let mut f = tokio::fs::File::open(&path)
-                .await
-                .map_err(|e| format!("reopen upload buffer: {e}"))?;
-            f.seek(std::io::SeekFrom::Start(i as u64 * part_size))
-                .await
-                .map_err(|e| format!("seek upload buffer: {e}"))?;
-            let r = f.take(expected);
             let part_name = if nparts > 1 {
                 format!("{name}.part{:03}", i + 1)
             } else {
                 name
             };
-            // Encrypt the part when at-rest encryption is on; the nonce
-            // rides back for the row.
-            let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
-            let mut upload_size = expected;
-            let mut nonce: Option<String> = None;
-            match crate::config::get().crypt_key() {
-                Ok(Some(key)) => {
-                    let (er, used) = crate::crypt::EncryptingReader::new(r, &key);
-                    reader = Box::new(er);
-                    nonce = Some(crate::crypt::base64_encode(&used));
-                    upload_size = crate::crypt::encrypted_size(expected);
+            // Transient transport failures (a TCP reset/abort mid-upload —
+            // ECONNRESET/ECONNABORTED on the socket to Telegram's DC) kill
+            // the in-flight stream but are retryable: the part is fully
+            // buffered on disk, so re-open, re-seek and resend up to
+            // PART_RETRIES times with backoff. RPC rejections (flood wait,
+            // invalid file, etc.) are not retried — they would fail every
+            // attempt the same way (see `is_transient`).
+            let mut attempt: u32 = 0;
+            loop {
+                let mut f = tokio::fs::File::open(&path)
+                    .await
+                    .map_err(|e| format!("reopen upload buffer: {e}"))?;
+                f.seek(std::io::SeekFrom::Start(i as u64 * part_size))
+                    .await
+                    .map_err(|e| format!("seek upload buffer: {e}"))?;
+                let r = f.take(expected);
+                // Encrypt the part when at-rest encryption is on; the nonce
+                // rides back for the row. A fresh nonce is made per attempt,
+                // so a retry never reuses the nonce of a possibly-landed part.
+                let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+                let mut upload_size = expected;
+                let mut nonce: Option<String> = None;
+                match crate::config::get().crypt_key() {
+                    Ok(Some(key)) => {
+                        let (er, used) = crate::crypt::EncryptingReader::new(r, &key);
+                        reader = Box::new(er);
+                        nonce = Some(crate::crypt::base64_encode(&used));
+                        upload_size = crate::crypt::encrypted_size(expected);
+                    }
+                    _ => reader = Box::new(r),
                 }
-                _ => reader = Box::new(r),
+                #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
+                let res = tg
+                    .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                    .await;
+                match res {
+                    Ok((mid, _, _, thumb)) => {
+                        break Ok((mid, part_name, mime.clone(), thumb, nonce));
+                    }
+                    Err(e) if attempt < PART_RETRIES && is_transient(&e) => {
+                        attempt += 1;
+                        tracing::info!(
+                            part = %part_name,
+                            attempt,
+                            err = %e,
+                            "transient part upload failure — retrying from the spill buffer"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
-            let (mid, _, _, thumb) = tg
-                .upload(&mut reader, upload_size, &part_name, &mime, &chat)
-                .await?;
-            Ok((mid, part_name, mime, thumb, nonce))
         }));
     }
 
