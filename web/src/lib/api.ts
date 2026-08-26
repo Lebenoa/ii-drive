@@ -521,14 +521,14 @@ export async function thumbUrl(id: string): Promise<string> {
   return fileUrl(id, 'thumb', {}, mt);
 }
 
-
 /**
- * Absolute shareable URL for a **public** file. Deliberately
- * credential-free: no token, no expiry — anyone with it can read this one
- * file for exactly as long as it stays marked public.
+ * Absolute shareable URL for a **public** file. Lands on the share page
+ * (which previews media and offers the download) and carries no
+ * credential: anyone with it can read this one file for exactly as long
+ * as it stays marked public.
  */
 export function shareUrl(id: string): string {
-  return `${location.origin}/api/files/${encodeURIComponent(id)}/raw`;
+  return `${location.origin}/s/${encodeURIComponent(id)}`;
 }
 
 /** GET /api/limits — server upload cap. Fetched per upload rather than

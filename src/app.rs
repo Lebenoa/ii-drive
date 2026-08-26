@@ -5,6 +5,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub fn build_router() -> Router {
     let public = Router::new()
         .route("/health", get(crate::routes::health))
+        .route("/s/{id}", get(crate::routes::share_page))
         .route("/api/limits", get(crate::routes::limits))
         .route(
             "/locales/manifest.json",
