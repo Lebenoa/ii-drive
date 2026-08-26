@@ -5,11 +5,10 @@
         listFiles,
         listFolders,
         moveFile,
-        uploadFile,
-        UploadCancelled,
         type DriveFile,
         type Folder,
     } from "$lib/api";
+    import { enqueue as enqueueUploads, reloadTick as uploadsReloadTick } from "$lib/uploads.svelte";
     import FileTable from "../components/FileTable.svelte";
     import Modal from "../components/Modal.svelte";
     import { closeAttrs, openDialog } from "$lib/invoker";
@@ -46,25 +45,6 @@
     const DEL_FOLDER_DIALOG = "dlg-del-folder";
     let pendingFolder = $state<Folder | null>(null);
 
-    // Upload queue (lives here now that the file display is the drop zone).
-    type QueueItem = {
-        key: number;
-        name: string;
-        progress: number;
-        state: "pending" | "uploading" | "done" | "error" | "cancelled";
-        error: string;
-        target: string;
-        speed: number;
-    };
-    let queue = $state<QueueItem[]>([]);
-
-    // Parallel uploads to the server: each item runs its own chunk pipeline,
-    // so a stalled transfer never starves the others. Abort controllers are
-    // keyed per item for one-click cancellation.
-    const MAX_PARALLEL_UPLOADS = 3;
-    let activeUploads = 0;
-    const aborts = new Map<number, AbortController>();
-  let panelCollapsed = $state(false);
 
   // Cut/paste: ids staged for a move into whichever folder gets the paste.
   let cutIds = $state<Set<string>>(new Set());
@@ -136,8 +116,6 @@
   }
     let dragging = $state(false);
     let input = $state<HTMLInputElement | null>(null);
-    const filesByKey = new Map<number, File>();
-    let nextKey = 1;
 
     // Folder tree, flattened depth-first with a depth per entry for indentation.
     let tree = $derived.by(() => {
@@ -175,6 +153,7 @@
         const query = debouncedQ;
         const folder = current;
         void reloadTick;
+        void uploadsReloadTick.n; // refresh the listing when an upload lands
         const mySeq = ++seq;
         loading = true;
         listFiles(query, folder)
@@ -244,89 +223,9 @@
 
     function enqueue(list: FileList | File[]): void {
         // Uploads target the folder open at drop time — navigating mid-queue
-        // must not redirect the rest.
-        const target = current;
-        for (const file of Array.from(list)) {
-            const key = nextKey++;
-            filesByKey.set(key, file);
-            queue.push({
-                key,
-                name: file.name,
-                progress: 0,
-                state: "pending",
-                error: "",
-                target,
-                speed: 0,
-            });
-        }
-        queue = queue;
-        pump();
-    }
-
-    function fmtSpeed(bps: number): string {
-        if (bps <= 0) return "";
-        if (bps >= 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
-        return `${Math.max(1, Math.round(bps / 1024))} KB/s`;
-    }
-
-    function pump(): void {
-        while (activeUploads < MAX_PARALLEL_UPLOADS) {
-            const item = queue.find((i) => i.state === "pending");
-            if (!item) return;
-            void startUpload(item);
-        }
-    }
-
-    async function startUpload(item: QueueItem): Promise<void> {
-        activeUploads++;
-        item.state = "uploading";
-        const ctrl = new AbortController();
-        aborts.set(item.key, ctrl);
-        const file = filesByKey.get(item.key);
-        try {
-            if (!file) {
-                item.state = "error";
-                item.error = t("drive.handleLost");
-                return;
-            }
-            await uploadFile(
-                file,
-                (pct, speed) => {
-                    item.progress = pct;
-                    item.speed = speed;
-                },
-                item.target,
-                { signal: ctrl.signal },
-            );
-            item.state = "done";
-            item.progress = 100;
-            reloadTick++;
-        } catch (err) {
-            if (err instanceof UploadCancelled || ctrl.signal.aborted) {
-                item.state = "cancelled";
-                filesByKey.delete(item.key);
-            } else {
-                item.state = "error";
-                item.error =
-                    err instanceof Error ? err.message : String(err);
-            }
-        } finally {
-            aborts.delete(item.key);
-            activeUploads--;
-            queue = queue;
-            pump();
-        }
-    }
-
-    function cancelUpload(key: number): void {
-        aborts.get(key)?.abort();
-    }
-
-    function clearFinished(): void {
-        for (const item of queue) filesByKey.delete(item.key);
-        queue = queue.filter(
-            (i) => i.state === "uploading" || i.state === "pending",
-        );
+        // must not redirect the rest. The queue lives in the global store,
+        // so the progress panel survives route changes.
+        enqueueUploads(list, current);
     }
 
     function onDrop(e: DragEvent): void {
@@ -526,99 +425,6 @@
             </div>
         </section>
 
-        {#if queue.length > 0}
-            <div class="uploads-panel" transition:fadeUp={{ y: 10 }}>
-                <button
-                    class="up-head"
-                    type="button"
-                    onclick={() => (panelCollapsed = !panelCollapsed)}
-                    aria-expanded={!panelCollapsed}
-                >
-                    <span class="up-title">
-                        {#if queue.filter((i) => i.state === "uploading" || i.state === "pending").length > 0}
-                            {t("drive.uploadingN", {
-                                n: queue.filter((i) => i.state === "uploading" || i.state === "pending").length,
-                                total: queue.length,
-                            })}
-                        {:else}
-                            {t("drive.uploads", { n: queue.length })}
-                        {/if}
-                    </span>
-                    {#if queue.every((i) => i.state === "done" || i.state === "error")}
-                        <span
-                            class="up-clear"
-                            role="button"
-                            tabindex="-1"
-                            title={t("drive.clearFinished")}
-                            onclick={(e) => {
-                                e.stopPropagation();
-                                clearFinished();
-                            }}
-                            onkeydown={(e) => e.stopPropagation()}
-                        >
-                            ✕
-                        </span>
-                    {:else}
-                        <span class="up-chevron">{panelCollapsed ? "▲" : "▼"}</span>
-                    {/if}
-                </button>
-                {#if !panelCollapsed}
-                    <ul class="queue" transition:collapse>
-                        {#each queue as item, i (item.key)}
-                            <li
-                                class="q-item"
-                                class:error={item.state === "error"}
-                                animate:flip={{ duration: flipDur() }}
-                                transition:fadeUp={{ delay: stagger(i, 12, 120) }}
-                            >
-                                <div class="q-top">
-                                    <span class="q-name" title={item.name}>{item.name}</span>
-                                    <span
-                                        class="q-state"
-                                        class:ok={item.state === "done"}
-                                    >
-                                        {#if item.state === "pending"}
-                                            {t("drive.queued")}
-                                        {:else if item.state === "uploading"}
-                                            {item.progress}%
-                                            {#if item.speed > 0}
-                                                <span class="q-speed">{fmtSpeed(item.speed)}</span>
-                                            {/if}
-                                        {:else if item.state === "cancelled"}
-                                            {t("drive.cancelled")}
-                                        {:else if item.state === "done"}
-                                            <span class="q-tick" in:pop>✓</span>
-                                        {:else}
-                                            ✗
-                                        {/if}
-                                    </span>
-                                    {#if item.state === "uploading"}
-                                        <button
-                                            class="q-cancel"
-                                            type="button"
-                                            title={t("drive.cancelUpload")}
-                                            aria-label={t("drive.cancelUpload")}
-                                            onclick={() => cancelUpload(item.key)}
-                                        >✕</button>
-                                    {/if}
-                                </div>
-                                <div class="bar">
-                                    <div
-                                        class="fill"
-                                        class:err={item.state === "error"}
-                                        class:done={item.state === "done"}
-                                        style={`width:${item.progress}%`}
-                                    ></div>
-                                </div>
-                                {#if item.state === "error"}
-                                    <p class="error-text">{item.error}</p>
-                                {/if}
-                            </li>
-                        {/each}
-                    </ul>
-                {/if}
-            </div>
-        {/if}
 
         <!-- Phones have no drag &amp; drop: dedicated upload button. -->
         <button
@@ -901,114 +707,6 @@
         display: none;
     }
 
-    .queue {
-        list-style: none;
-        margin: 0;
-        padding: 10px 12px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        max-height: 260px;
-        overflow-y: auto;
-    }
-
-    .q-item {
-        background: var(--panel-2);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 8px 12px;
-    }
-
-    .q-item.error {
-        border-color: #5b2730;
-    }
-
-    .q-top {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        font-size: 13px;
-        margin-bottom: 6px;
-    }
-
-    .q-name {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .q-state {
-        color: var(--muted);
-        flex-shrink: 0;
-        transition: color var(--dur) var(--ease);
-    }
-
-    .q-state.ok {
-        color: var(--ok);
-    }
-
-    /* `pop` scales, which a bare inline box would ignore. */
-    .q-tick {
-        display: inline-block;
-    }
-
-    .q-speed {
-        margin-left: 6px;
-        color: var(--muted);
-        font-variant-numeric: tabular-nums;
-    }
-
-    .q-cancel {
-        flex-shrink: 0;
-        border: 0;
-        background: transparent;
-        color: var(--muted);
-        cursor: pointer;
-        padding: 2px 6px;
-        border-radius: 4px;
-        line-height: 1;
-    }
-
-    .q-cancel:hover {
-        color: var(--danger, #e5484d);
-        background: rgba(229, 72, 77, 0.12);
-    }
-
-    .bar {
-        height: 4px;
-        border-radius: 2px;
-        background: #10141c;
-        overflow: hidden;
-    }
-
-    .fill {
-        height: 100%;
-        background: var(--accent);
-        border-radius: 2px;
-        transition:
-            width var(--dur) var(--ease-out),
-            background var(--dur) var(--ease);
-    }
-
-    .fill.done {
-        background: var(--ok);
-    }
-
-    .fill.err {
-        background: var(--danger);
-    }
-
-
-    .drop-hint {
-        margin-top: auto;
-        text-align: center;
-        font-size: 12px;
-        padding: 10px 0 2px;
-        opacity: 0.7;
-        transition:
-            opacity var(--dur) var(--ease),
-            color var(--dur) var(--ease);
-    }
 
     .file-area.dragging .drop-hint {
         opacity: 1;
@@ -1017,49 +715,6 @@
 
     .upload-fab {
         display: none;
-    }
-
-    .uploads-panel {
-        position: fixed;
-        right: 20px;
-        bottom: 20px;
-        width: min(340px, calc(100vw - 40px));
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        background: var(--panel);
-        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
-        z-index: 30;
-        overflow: hidden;
-    }
-
-    .up-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        width: 100%;
-        border: none;
-        background: var(--panel-2);
-        color: var(--text);
-        font: inherit;
-        font-size: 13.5px;
-        text-align: left;
-        padding: 10px 12px;
-        cursor: pointer;
-    }
-
-    .up-title {
-        font-weight: 600;
-    }
-
-    .up-clear,
-    .up-chevron {
-        color: var(--muted);
-        transition: color var(--dur-fast) var(--ease);
-    }
-
-    .up-clear:hover {
-        color: var(--danger);
     }
 
     .sidebar-toggle {
@@ -1103,10 +758,6 @@
             inset: 0;
             background: rgba(6, 9, 15, 0.55);
             z-index: 39;
-        }
-
-        .uploads-panel {
-            bottom: 86px;
         }
 
         .upload-fab {

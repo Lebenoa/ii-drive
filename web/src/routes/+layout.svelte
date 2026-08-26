@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { onNavigate } from '$app/navigation';
 	import Navbar from '$lib/components/TopBar.svelte';
+	import UploadsPanel from '$lib/components/UploadsPanel.svelte';
 	import { reducedMotion } from '$lib/motion';
 	import { initI18n, i18nReady } from '$lib/i18n.svelte';
 
@@ -34,6 +35,8 @@
 	{#if page.url.pathname !== '/login' && page.url.pathname !== '/setup' && !page.url.pathname.startsWith('/s/')}
 		<Navbar />
 	{/if}
-
 	{@render children()}
+
+	<!-- Upload progress follows the operator across routes. -->
+	<UploadsPanel />
 {/if}
