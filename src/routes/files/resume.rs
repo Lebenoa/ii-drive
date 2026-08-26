@@ -46,9 +46,9 @@ async fn sweep(map: &mut HashMap<String, Session>) {
         }
     }
 
-    // Crash debris: part buffers (`<ulid>.pN`) from the spill strategy have
-    // no session to expire them, so anything old in the spill dir that no
-    // live session owns is garbage by definition.
+    // Crash debris: part buffers (`<ulid>.pN`) from the always-spill upload
+    // path have no session to expire them, so anything old in the spill dir
+    // that no live session owns is garbage by definition.
     let dir = spill_path();
     let live: std::collections::HashSet<PathBuf> = map.values().map(|s| s.path.clone()).collect();
     let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {

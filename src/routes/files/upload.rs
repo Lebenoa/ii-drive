@@ -523,8 +523,8 @@ async fn collect_uploaders(
 }
 
 /// Fans a fully-buffered local file out to Telegram as parts, then records
-/// it. Shared by the `spill` strategy and resumable uploads, which always
-/// buffer by design.
+/// it. Shared by the always-spill upload path and resumable uploads, which
+/// always buffer by design.
 /// A buffered local file plus its metadata, ready to fan out to Telegram.
 pub struct FileInput<'a> {
     pub path: &'a std::path::Path,

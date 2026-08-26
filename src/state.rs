@@ -73,9 +73,9 @@ pub struct AppState {
     epochs: tokio::sync::RwLock<HashMap<i64, u64>>,
     /// Directory holding generated thumbnails (`<data dir>/thumbs`).
     pub thumbs_dir: std::path::PathBuf,
-    /// Instance-wide tunables, cached. Every upload reads the cap and the
-    /// strategy, so these must not cost a query — the stored row exists to
-    /// survive a restart, and [`Self::set_instance`] keeps both in step.
+    /// Instance-wide tunables, cached. Every upload reads the cap, so these
+    /// must not cost a query — the stored row exists to survive a restart,
+    /// and [`Self::set_instance`] keeps both in step.
     ///
     /// A `std` lock rather than a tokio one: [`crate::db::Instance`] is
     /// `Copy`, so readers take a copy and drop the guard without ever

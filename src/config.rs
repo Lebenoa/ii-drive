@@ -47,8 +47,9 @@ pub struct Config {
     /// only ever reads means granting operator rights takes filesystem
     /// access, not a session.
     pub admin_phones: Vec<String>,
-    /// Directory for in-flight upload buffers (upload strategy `spill`, and
-    /// the resumable-upload sessions, which always spill by design).
+    /// Directory for in-flight upload buffers (every upload is buffered here
+    /// before its parts fan out; the resumable-upload sessions, which always
+    /// spill by design).
     pub spill_dir: String,
     /// At-rest encryption of uploaded files (teldrive-compatible format).
     /// When enabled, every new upload is sealed with the key derived from
