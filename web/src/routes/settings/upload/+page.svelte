@@ -23,11 +23,13 @@
   const session = settingsSession();
 
   // --- Instance settings (operator-only) ---
-  // The cap is stored in bytes but edited in MB: nobody wants to type
-  // 2147483648, and the server accepts either.
-  const MB = 1024 * 1024;
+  // The cap is stored in bytes but edited in a selectable unit: nobody
+  // wants to type 2147483648, and the server accepts either.
+  const UNITS = { MB: 1024 * 1024, GB: 1024 ** 3 } as const;
+  type CapUnit = keyof typeof UNITS;
   let instance = $state<Instance | undefined>();
-  let capMb = $state(0);
+  let capValue = $state(0);
+  let capUnit = $state<CapUnit>('MB');
   let instanceSaving = $state(false);
   let instanceMsg = $state('');
   let instanceError = $state('');
@@ -36,7 +38,8 @@
     if (!session.admin || instance) return;
     try {
       instance = await getInstance();
-      capMb = Math.round(instance.max_file_size / MB);
+      capUnit = instance.max_file_size >= UNITS.GB ? 'GB' : 'MB';
+      capValue = instance.max_file_size / UNITS[capUnit];
       sweepAt = instance.thumb_sweep_time;
       sweepHours = instance.thumb_sweep_hours;
     } catch (err) {
@@ -48,9 +51,12 @@
 
   // A cap of 500 MB (decimal, as `max_file_size = "500MB"` once allowed)
   // displays as 477 MB, so re-sending the rounded field would quietly move
-  // the stored value. Send it only when the operator actually edited it —
-  // the endpoint keeps whatever a request leaves out.
-  const capEdited = $derived(!!instance && capMb !== Math.round(instance.max_file_size / MB));
+  // the stored value. Compare in bytes and send only when the operator
+  // actually edited it — the endpoint keeps whatever a request leaves out.
+  const capBytes = $derived(
+    !!instance ? Math.floor(Math.max(0, Number(capValue) || 0) * UNITS[capUnit]) : 0,
+  );
+  const capEdited = $derived(!!instance && capBytes !== instance.max_file_size);
 
   let sweepAt = $state('00:00');
   let sweepHours = $state(24);
@@ -62,13 +68,14 @@
     instanceError = '';
     try {
       instance = await saveInstance({
-        ...(capEdited ? { max_file_size: Math.max(1, Math.floor(Number(capMb) || 0)) * MB } : {}),
+        ...(capEdited ? { max_file_size: Math.max(1, capBytes) } : {}),
         media_thumbs: instance.media_thumbs,
         thumb_sweep_time: /^\d{1,2}:\d{2}$/.test(sweepAt.trim()) ? sweepAt.trim() : '00:00',
         thumb_sweep_hours: Math.max(0, Math.min(168, Math.floor(Number(sweepHours) || 0))),
         upload_strategy: instance.upload_strategy,
       });
-      capMb = Math.round(instance.max_file_size / MB);
+      capUnit = instance.max_file_size >= UNITS.GB ? 'GB' : 'MB';
+      capValue = instance.max_file_size / UNITS[capUnit];
       sweepAt = instance.thumb_sweep_time;
       sweepHours = instance.thumb_sweep_hours;
       instanceMsg = t('common.saved');
@@ -205,8 +212,19 @@
       {#if instance}
         <div class="split-row">
           <label class="cap-label" for="cap">{t('instance.cap')}</label>
-          <input id="cap" class="field split-input" type="number" min="1" bind:value={capMb} />
-          <span class="muted">MB</span>
+          <input
+            id="cap"
+            class="field split-input"
+            type="number"
+            min="1"
+            step="any"
+            bind:value={capValue}
+          />
+          <select class="field split-input" bind:value={capUnit} aria-label="Unit">
+            {#each Object.keys(UNITS) as u (u)}
+              <option value={u}>{u}</option>
+            {/each}
+          </select>
         </div>
         <label class="switch-row">
           <input type="checkbox" bind:checked={instance.media_thumbs} />
