@@ -17,8 +17,8 @@ the interface.
 - **On-demand i18n** — only English ships; other languages download at runtime from GitHub, so translations improve without rebuilding.
 - **Guided @BotFather chat** — create or import download bots through a resumable in-app conversation with @BotFather.
 - **Developer mode** — `/internal-db` gives admin users a SurrealDB browser; endpoints answer only to `admin_phones`.
-- **Live instance settings** — upload cap, thumbnail switch, upload strategy and the thumbnail-sweep schedule live in the database and apply on the next request; `config.toml` holds only what you set once.
-- **Resumable uploads** — the `spill` strategy buffers to disk so uploads keep draining even if Telegram is slow.
+- **Live instance settings** — upload cap, thumbnail switch and the thumbnail-sweep schedule live in the database and apply on the next request; `config.toml` holds only what you set once.
+- **Resumable uploads** — every upload is buffered to disk first, so a dropped connection or failed transfer resumes instead of restarting the multi-gigabyte send.
 - **Streaming with resume** — files stream back on demand and resume transparently when Telegram's file references expire mid-transfer.
 	- **At-rest encryption** — newly uploaded files are sealed (NaCl secretbox, scrypt key) in a teldrive-compatible format; downloads decrypt on the fly.
 
@@ -35,10 +35,10 @@ the interface.
 | **Chunking** | Configurable split threshold, ≤64 parts, round-robin across channels, rotating bot sessions | Chunked uploads; configurable threads, retries, retention; optional encryption |
 | **Thumbnails** | Audio cover art from ID3/FLAC; in-process AVIF for stills, ffmpeg frame for video | Optional imgproxy image resizing/thumbnails |
 | **Deployment** | Single binary + `web/dist` folder + embedded DB file; TOML config | Binary + separate React UI + PostgreSQL; optional Redis, imgproxy |
-| **Runtime settings** | Upload cap, thumbnails, strategy and sweep schedule stored in the DB, changed from the UI, no restart | Config file, restart required |
+| **Runtime settings** | Upload cap, thumbnails and sweep schedule stored in the DB, changed from the UI, no restart | Config file, restart required |
 | **Admin tooling** | `/internal-db` (SurrealQL browser), `/api/instance` | CLI check/clean utilities |
 | **Max file size** | 2 GiB default, configurable; larger files chunk into parts | 2 GB per Telegram document, chunked |
-| **Upload strategy** | `stream` (relay) or `spill` (disk-buffer) | Stream with configurable buffers |
+| **Upload strategy** | Spill to disk, then fan parts out in parallel | Stream with configurable buffers |
 | **Encryption** | At-rest opt-in (NaCl secretbox, scrypt key), teldrive-compatible; old plaintext files still serve | Optional at-rest encryption |
 
 ## Get started
@@ -158,7 +158,7 @@ That's it — drag files into the drive to upload them.
    | `token_ttl_secs` | 30 days | Web session lifetime |
    | `db_path` | `data/drive.surrealkv` | Embedded metadata store |
    | `session_path` | `data/session.db` | Legacy session path kept for compatibility; per-account sessions live in `sessions/` beside it |
-   | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (`spill` strategy + resumable uploads) |
+   | `spill_dir` | `data/spill` | Directory for in-flight upload buffers (resumable uploads) |
    | `crypt_enabled` | `false` | Encrypt newly uploaded files at rest (teldrive-compatible format); existing plaintext files are still served as-is |
    | `crypt_password` | — | Password feeding the scrypt key derivation; required when `crypt_enabled = true`, and changing it later makes stored files unreadable |
    | `crypt_salt` | `ii-drive` | Salt for the key derivation; like the password, never change it once files are stored |
@@ -185,15 +185,14 @@ That's it — drag files into the drive to upload them.
    |---|---|---|
    | `max_file_size` | `2GiB` | Upload cap; bytes or `2GiB`, `500MiB`, `2GB` (=2·10⁹) |
    | `media_thumbs` | `true` | Generated thumbnails: still images encoded in-process, video via one ffmpeg frame; audio cover art is extracted regardless |
-   | `upload_strategy` | `stream` | How an accepted upload reaches Telegram: `stream` relays the body directly, `spill` buffers to disk first so all parts drain at full rate |
    | `thumb_sweep_time` | `00:00` | Local wall-clock anchor (`HH:MM`) for the orphan-thumbnail sweep |
    | `thumb_sweep_hours` | `24` | Sweep interval in hours (0 turns the scheduled sweep off; `/api/thumbs/sweep` still runs it on demand) |
 
-   These three (upload cap, thumbnails, strategy) used to be config keys. An
-   install that still sets them in `config.toml` has them copied into the
-   database once on the first startup after upgrading, and logs which keys to
-   delete — your existing cap is not silently reset. The sweep schedule has
-   never been a config key.
+   These two (upload cap, thumbnails) used to be config keys; a config that
+   still sets them is copied into the database once on the first startup after
+   upgrading, with a log naming the keys to delete — your existing cap is not
+   silently reset. The sweep schedule has never been a config key, and the
+   upload strategy is always spill now.
 
 ### Multi-account notes
 
@@ -227,8 +226,8 @@ Settings lives under `/settings` with three categories:
   @BotFather to drop it.
 - **Uploads** — split-upload threshold and auto-upload routing rules
   (mime-prefix → folder). Operators also get the instance settings here:
-  upload cap, ffmpeg thumbnails and upload strategy, applied immediately
-  and shared by every account.
+  upload cap and ffmpeg thumbnails, applied immediately and shared by
+  every account.
 - **Other** — developer mode, which unlocks `/internal-db`: browse the
   embedded tables and run SurrealQL directly. Those queries span every
   signed-in account, so the endpoints behind it answer only to numbers in
@@ -349,7 +348,7 @@ just log in again through the web UI.
 | POST | `/api/files/upload-bench` | token | Benchmark helper — keystone exercise of the part fan-out, no file stored |
 | GET/POST | `/api/folders`(`/{id}`) | token | List / create / delete folders |
 | GET | `/api/avatar` `/media-token` | token | Profile photo bytes / short-lived media token |
-| GET/PUT | `/api/instance` | token + admin | Instance-wide upload cap, thumbnail switch, strategy and sweep schedule; non-admins get 404 |
+| GET/PUT | `/api/instance` | token + admin | Instance-wide upload cap, thumbnail switch and sweep schedule; non-admins get 404 |
 | POST | `/api/thumbs/sweep` | token + admin | Trigger the orphan-thumbnail sweep now; operator-only, same guard as `/api/instance` |
 | GET | `/api/limits` | — | Upload cap, so the UI can reject oversized files early |
 | GET | `/locales/manifest.json` | — | Languages available beside the binary, with display names |
@@ -421,7 +420,8 @@ Telegram) and logs you out of MTProto.
   a trusted network or front it with your own auth proxy.
 - Bot tokens added through the settings UI are stored **plaintext** in the
   embedded SurrealDB — treat `data/` like any other secret store.
-- Uploads stream in `stream` mode: memory use stays constant regardless of file size; `spill` mode buffers the whole file to disk instead.
+- Every upload is buffered to `data/spill` first, then fan-out to Telegram —
+  a dropped connection resumes from the buffer instead of restarting the send.
 - Telegram free-account hard limit: 2 GiB per file. No published daily cap —
   abuse triggers flood wait errors. The server defaults `max_file_size` to
   2 GiB (configurable); larger files upload via transparent chunking.

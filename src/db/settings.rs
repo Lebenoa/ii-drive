@@ -256,20 +256,6 @@ pub async fn bump_token_epoch(
     Ok(next)
 }
 
-/// How an accepted upload reaches Telegram.
-///
-/// `Stream` relays the client body straight into per-part uploaders — no disk
-/// usage, but each part only starts draining once the sequential body feed
-/// reaches it. `Spill` buffers the whole body to `spill_dir` first, then
-/// drains every part at full aggregate rate: a faster tail on fast pipes,
-/// paid for in temporary disk space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UploadStrategy {
-    Stream,
-    Spill,
-}
-
 /// Instance-wide tunables: the settings an operator actually revisits while
 /// the server runs. They live here rather than in `config.toml` so changing
 /// one is a request instead of an edit-and-restart — the file is left for
@@ -290,7 +276,6 @@ pub struct Instance {
     /// Hours between sweeps from that anchor. 0 disables the periodic
     /// sweep; the startup sweep and the manual endpoint still run.
     pub thumb_sweep_hours: u64,
-    pub upload_strategy: UploadStrategy,
 }
 
 impl Default for Instance {
@@ -300,7 +285,6 @@ impl Default for Instance {
             media_thumbs: true,
             thumb_sweep_time: "00:00".to_string(),
             thumb_sweep_hours: 24,
-            upload_strategy: UploadStrategy::Stream,
         }
     }
 }
@@ -318,7 +302,7 @@ const INSTANCE_ID: &str = "setting:instance";
 pub async fn get_instance(db: &surrealdb::Surreal<Conn>) -> Result<Option<Instance>, DbError> {
     let mut res = db
         .query(format!(
-            "SELECT max_file_size, media_thumbs, thumb_sweep_time, thumb_sweep_hours, upload_strategy FROM {INSTANCE_ID}"
+            "SELECT max_file_size, media_thumbs, thumb_sweep_time, thumb_sweep_hours FROM {INSTANCE_ID}"
         ))
         .await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
@@ -344,11 +328,6 @@ pub async fn get_instance(db: &surrealdb::Surreal<Conn>) -> Result<Option<Instan
             .get("media_thumbs")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(fallback.media_thumbs),
-        upload_strategy: match row.get("upload_strategy").and_then(|v| v.as_str()) {
-            Some("spill") => UploadStrategy::Spill,
-            Some("stream") => UploadStrategy::Stream,
-            _ => fallback.upload_strategy,
-        },
     }))
 }
 
@@ -358,25 +337,15 @@ pub async fn set_instance(db: &surrealdb::Surreal<Conn>, inst: &Instance) -> Res
     let mut res = db
         .query(format!(
             "UPSERT {INSTANCE_ID} SET max_file_size = $s, media_thumbs = $t, \
-             thumb_sweep_time = $w, thumb_sweep_hours = $h, upload_strategy = $u",
+             thumb_sweep_time = $w, thumb_sweep_hours = $h",
         ))
         .bind(("s", inst.max_file_size as i64))
         .bind(("t", inst.media_thumbs))
         .bind(("w", inst.thumb_sweep_time.clone()))
         .bind(("h", inst.thumb_sweep_hours as i64))
-        .bind(("u", inst.upload_strategy.to_string()))
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;
     Ok(())
-}
-
-impl std::fmt::Display for UploadStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Stream => "stream",
-            Self::Spill => "spill",
-        })
-    }
 }
 
 #[cfg(test)]
@@ -417,7 +386,6 @@ mod tests {
             media_thumbs: false,
             thumb_sweep_time: "07:00".to_string(),
             thumb_sweep_hours: 3,
-            upload_strategy: UploadStrategy::Spill,
         };
         set_instance(&db, &want).await.expect("write");
         assert_eq!(get_instance(&db).await.expect("read"), Some(want));
@@ -437,6 +405,5 @@ mod tests {
         assert_eq!(got.thumb_sweep_hours, Instance::default().thumb_sweep_hours);
         assert!(!got.media_thumbs, "the written field is honoured");
         assert_eq!(got.max_file_size, Instance::default().max_file_size);
-        assert_eq!(got.upload_strategy, UploadStrategy::Stream);
     }
 }

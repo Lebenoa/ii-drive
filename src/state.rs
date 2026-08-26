@@ -308,7 +308,6 @@ mod tests {
 
         let next = crate::db::Instance {
             media_thumbs: false,
-            upload_strategy: crate::db::UploadStrategy::Spill,
             ..state.instance()
         };
         state.set_instance(next.clone()).await.expect("save");
