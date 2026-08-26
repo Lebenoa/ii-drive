@@ -11,8 +11,8 @@
     getToken,
     type DbQueryResult,
   } from '$lib/api';
-  import { fadeUp, stagger } from '$lib/motion';
-  import { t } from '$lib/i18n.svelte';
+  import Modal from '$lib/components/Modal.svelte';
+  import { closeAttrs, openDialog } from '$lib/invoker';
 
   const PAGE = 50;
   let checking = $state(true);
@@ -71,15 +71,24 @@
     }
   }
 
-  function hasId(res: DbQueryResult | undefined): boolean {
-    const first = res?.result?.[0];
-    return !!first && typeof first === 'object' && 'id' in (first as object);
+  const DELETE_DIALOG = 'dlg-db-delete';
+  let pendingId = $state('');
+  let deletingId = $state('');
+
+  /** Ask before deleting a record: the destructive half of the ╳ affordance. */
+  function askDelete(id: string): void {
+    pendingId = id;
+    openDialog(DELETE_DIALOG);
   }
 
-  async function deleteRow(id: string): Promise<void> {
-    if (!confirm(t('db.deleteRecord', { id }))) return;
-    await run(`DELETE ${id}`);
-    if (active) await openTable(active, page);
+  async function remove(id: string): Promise<void> {
+    deletingId = id;
+    try {
+      await run(`DELETE ${id}`);
+      if (active) await openTable(active, page);
+    } finally {
+      deletingId = '';
+    }
   }
 
   const canPrev = $derived(active !== '' && page > 0);
@@ -201,7 +210,7 @@
                             class="icon-btn danger"
                             type="button"
                             title={t('db.deleteRecordTitle')}
-                            onclick={() => void deleteRow(String(rec.id))}
+                            onclick={() => askDelete(String(rec.id))}
                           >
                             ✕
                           </button>
@@ -245,6 +254,29 @@
       </main>
     </div>
   {/if}
+        <Modal
+          id={DELETE_DIALOG}
+          title={t('db.deleteRecordTitle')}
+          onclose={(rv) => {
+            if (rv === 'delete' && pendingId) void remove(pendingId);
+            pendingId = '';
+          }}
+        >
+          {#if pendingId}
+            <p>{t('db.deleteRecord', { id: pendingId })}</p>
+          {/if}
+          {#snippet actions()}
+            <button class="btn" type="submit" {...closeAttrs(DELETE_DIALOG)}>{t('common.cancel')}</button>
+            <button
+              class="btn btn-danger"
+              type="submit"
+              value="delete"
+              disabled={deletingId !== ''}
+            >
+              {deletingId === pendingId ? t('common.deleting') : t('common.delete')}
+            </button>
+          {/snippet}
+        </Modal>
 </div>
 
 <style>

@@ -1,14 +1,16 @@
-import { error } from '@sveltejs/kit';
-import { shareMeta, type ShareMeta } from '$lib/api';
+import type { ShareMeta } from '$lib/api';
 
-/** Client-side only (pure SPA): pull the public metadata or 404. */
-export async function load({ params }: { params: { id: string } }): Promise<{
-  meta: ShareMeta;
-  id: string;
-}> {
-  try {
-    return { meta: await shareMeta(params.id), id: params.id };
-  } catch {
-    error(404, 'File not found');
-  }
+/** Data handed to the page. `meta` is null until the client fetch lands. */
+export interface Data {
+	id: string;
+	meta: ShareMeta | null;
+}
+
+/**
+ * Pure SPA: don't block `load` on the metadata fetch — that leaves a blank
+ * screen during the round-trip. Return the id now, let the page render a
+ * loading skeleton and fetch/404 client-side.
+ */
+export function load({ params }: { params: { id: string } }): Data {
+	return { id: params.id, meta: null };
 }

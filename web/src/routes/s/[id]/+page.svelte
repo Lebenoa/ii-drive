@@ -1,47 +1,67 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import ShareVideoPlayer from '$lib/components/ShareVideoPlayer.svelte';
+  import { humanSize } from '$lib/format';
+  import { shareMeta, type ShareMeta } from '$lib/api';
   import type { PageProps } from './$types';
+  import { t } from '$lib/i18n.svelte';
 
   let { data }: PageProps = $props();
-  const meta = $derived(data.meta);
-  const raw = $derived(`/api/files/${encodeURIComponent(data.id)}/raw`);
-  const thumb = $derived(`/api/files/${encodeURIComponent(data.id)}/thumb`);
+  const id = data.id;
 
-  const isImage = $derived(meta.mime.startsWith('image/'));
-  const isVideo = $derived(meta.mime.startsWith('video/'));
-  const isAudio = $derived(meta.mime.startsWith('audio/'));
+  let meta = $state<ShareMeta | null>(data.meta ?? null);
+  let notFound = $state(false);
+  // Guard: `load` returns immediately, so re-fetch only once.
+  let fetched = $state(false);
 
-  function humanSize(bytes: number): string {
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
-    let v = bytes;
-    let u = 0;
-    while (v >= 1024 && u < units.length - 1) {
-      v /= 1024;
-      u += 1;
-    }
-    return u === 0 ? `${bytes} B` : `${v.toFixed(1)} ${units[u]}`;
-  }
+  $effect(() => {
+    if (fetched) return;
+    fetched = true;
+    void (async () => {
+      try {
+        meta = await shareMeta(id);
+      } catch {
+        notFound = true;
+      }
+    })();
+  });
+
+  const raw = $derived(`/api/files/${encodeURIComponent(id)}/raw`);
+  const thumb = $derived(`/api/files/${encodeURIComponent(id)}/thumb`);
+
+  const isImage = $derived(meta?.mime.startsWith('image/') ?? false);
+  const isVideo = $derived(meta?.mime.startsWith('video/') ?? false);
+  const isAudio = $derived(meta?.mime.startsWith('audio/') ?? false);
 </script>
 
 <svelte:head>
-  <title>{meta.name}</title>
+  <title>{meta ? meta.name : 'ii-drive'}</title>
 </svelte:head>
 
 <main class="share">
   <div class="card">
-    {#if isImage}
-      <img class="media" src={raw} alt={meta.name} />
-    {:else if isVideo}
-      <ShareVideoPlayer src={raw} {thumb} mediaTitle={meta.name} />
-    {:else if isAudio}
-      <audio class="media" src={raw} controls></audio>
+    {#if notFound}
+      <p class="muted">{t('share.notFound')}</p>
+      <a class="dl" href="/" onclick={(e) => { e.preventDefault(); goto('/'); }}>{t('share.goDrive')}</a>
+    {:else if !meta}
+      <div class="skeleton" aria-live="polite">
+        <span class="spinner"></span>
+      </div>
+    {:else}
+      {#if isImage}
+        <img class="media" src={raw} alt={meta.name} />
+      {:else if isVideo}
+        <ShareVideoPlayer src={raw} {thumb} mediaTitle={meta.name} />
+      {:else if isAudio}
+        <audio class="media" src={raw} controls></audio>
+      {/if}
+      <h1>{meta.name}</h1>
+      {#if meta.owner}
+        <p class="byline">{t('share.owner', { name: meta.owner })}</p>
+      {/if}
+      <p class="meta">{humanSize(meta.size)} · {meta.mime}</p>
+      <a class="dl" href={`${raw}?dl=1`} download>{t('share.download')}</a>
     {/if}
-    <h1>{meta.name}</h1>
-    {#if meta.owner}
-      <p class="byline">shared by {meta.owner}</p>
-    {/if}
-    <p class="meta">{humanSize(meta.size)} · {meta.mime}</p>
-    <a class="dl" href={`${raw}?dl=1`} download>Download</a>
   </div>
 </main>
 
@@ -98,5 +118,28 @@
   }
   .dl:hover {
     background: #2f6fe0;
+  }
+  .skeleton {
+    min-height: 40vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid #3a3a46;
+    border-top-color: #7dd3fc;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .muted {
+    color: #9a9aa6;
+    margin-bottom: 1.25rem;
   }
 </style>

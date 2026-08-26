@@ -234,5 +234,11 @@
     "seek": "Seek",
     "mute": "Mute",
     "fullscreen": "Fullscreen"
+  },
+  "share": {
+    "notFound": "File not found",
+    "goDrive": "Go to drive",
+    "owner": "shared by {name}",
+    "download": "Download"
   }
 }
