@@ -1830,8 +1830,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "grammers-client"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f330139772e71b5e104f5a7bbf43bbda92fd8a734b4cf9c57839e04e949cf9b"
+source = "git+https://github.com/Lebenoa/grammers#e39c3ad5a3ab193144cfd8ea3dbe8cfbabad1ef6"
 dependencies = [
  "chrono",
  "futures-util",

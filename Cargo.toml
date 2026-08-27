@@ -12,7 +12,7 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.23"
 bytes = "1"
 futures = "0.3"
-grammers-client = "0.10"
+grammers-client = { git = "https://github.com/Lebenoa/grammers", subdir = "grammers-client" }
 grammers-session = { version = "0.10", features = ["sqlite-storage"] }
 hex = "0.4"
 hmac = "0.13"
@@ -58,4 +58,3 @@ codegen-units = 1
 # that task (tokio can no longer contain it).
 panic = "abort"
 strip = true
-
