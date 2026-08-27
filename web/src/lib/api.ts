@@ -265,7 +265,6 @@ export interface Instance {
   thumb_sweep_time: string;
   /** Hours between sweeps from that anchor; 0 disables the periodic one. */
   thumb_sweep_hours: number;
-  upload_strategy: 'stream' | 'spill';
 }
 
 /** POST /api/thumbs/sweep — delete preview files whose row is gone. */
