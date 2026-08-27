@@ -553,7 +553,16 @@ export async function maxFileSize(): Promise<number> {
   return typeof res.max_file_size === 'number' ? res.max_file_size : Number.POSITIVE_INFINITY;
 }
 
-const UPLOAD_CHUNK = 8 * 1024 * 1024;
+/// Chunk size for resumable uploads. 1 MiB balances low per-chunk latency
+/// (good server-side overlap) against HTTP overhead. Previous 8 MiB chunks
+/// serialized the entire client→server phase; 1 MiB + parallel sends
+/// pipeline the data so the server can start pushing to Telegram sooner.
+const UPLOAD_CHUNK = 1 * 1024 * 1024;
+/// Maximum in-flight PUT requests. Multiple chunks fly through the network
+/// simultaneously, keeping the server's receive buffer full. The server
+/// processes them sequentially (offset == received guard), but the network
+/// round-trips overlap.
+const UPLOAD_CONCURRENCY = 3;
 
 /** Thrown when an upload is cancelled through its AbortSignal. */
 export class UploadCancelled extends Error {
@@ -587,15 +596,19 @@ export async function uploadFile(
   // too spiky to read, but a 0.3 factor tracks direction changes within a
   // couple of updates.
   let ema = 0;
-  let lastBytes = 0;
+  // peakBytes is monotonically non-decreasing: with concurrent uploads the
+  // per-chunk `offset + loaded` can arrive out of order, so we must not
+  // let the rate calculation see a value smaller than the previous one.
+  let peakBytes = 0;
   let lastTime = performance.now();
   const tick = (bytes: number) => {
+    if (bytes <= peakBytes) return; // stale or out-of-order report
     const now = performance.now();
     const dt = (now - lastTime) / 1000;
     if (dt <= 0.05) return;
-    const inst = (bytes - lastBytes) / dt;
+    const inst = (bytes - peakBytes) / dt;
     ema = ema === 0 ? inst : ema * 0.7 + inst * 0.3;
-    lastBytes = bytes;
+    peakBytes = bytes;
     lastTime = now;
   };
 
@@ -695,33 +708,104 @@ export async function uploadFile(
     return promise;
   };
 
-  outer: while (received < file.size) {
+  // Pipeline: send up to UPLOAD_CONCURRENCY chunks at once. The server
+  // processes them sequentially (offset == received guard), but the network
+  // round-trips overlap so the receive buffer stays full.
+  while (received < file.size) {
     for (let attempt = 1; ; attempt++) {
       checkAbort();
-      const end = Math.min(received + UPLOAD_CHUNK, file.size);
-      const res = await rawPut(file.slice(received, end), received);
-      if (res.status === -1) {
-        abandonSession();
-        throw new UploadCancelled();
+
+      // Build a batch of chunks that fit within the concurrency window.
+      const batch: { offset: number; end: number }[] = [];
+      let batchWatermark = received;
+      while (
+        batch.length < UPLOAD_CONCURRENCY &&
+        batchWatermark < file.size
+      ) {
+        const end = Math.min(batchWatermark + UPLOAD_CHUNK, file.size);
+        batch.push({ offset: batchWatermark, end });
+        batchWatermark = end;
       }
-      if (res.status >= 200 && res.status < 300) {
-        received = end;
-        continue outer;
+
+      // Fire all chunks in the batch concurrently.
+      const results = await Promise.all(
+        batch.map(({ offset, end }) => rawPut(file.slice(offset, end), offset)),
+      );
+
+      // Evaluate in order: track 409s (expected in concurrent mode)
+      // separately from real errors.
+      let failedIdx = -1;
+      let had409 = false;
+      for (let i = 0; i < results.length; i++) {
+        const res = results[i];
+        if (res.status === -1) {
+          abandonSession();
+          throw new UploadCancelled();
+        }
+        if (res.status >= 200 && res.status < 300) {
+          received = batch[i].end;
+          continue;
+        }
+        // 409 = server was not at our expected offset (another chunk
+        // arrived first in concurrent mode). Normal — note it and
+        // keep evaluating so we extract any2xx successes.
+        if (res.status === 409) {
+          had409 = true;
+          continue;
+        }
+        // Real failure — stop here.
+        failedIdx = i;
+        break;
       }
-      // Another tab advanced the session: re-sync rather than fail.
-      if (res.status === 409) {
-        const st = await request<{ received: number }>(`/api/files/upload/${id}`);
+
+      if (failedIdx < 0) {
+        // No real errors. If we saw any409s, re-sync once to pick
+        // up bytes the server accepted out of order.
+        if (had409) {
+          const st = await request<{ received: number }>(
+            `/api/files/upload/${id}`,
+          );
+          received = Math.min(st.received, file.size);
+        }
+        break; // batch done, move to next
+      }
+
+      // Re-sync to capture the server's true offset after the failure.
+      {
+        const st = await request<{ received: number }>(
+          `/api/files/upload/${id}`,
+        );
         received = Math.min(st.received, file.size);
-        continue outer;
       }
+
+      // Classify based on the actual failing chunk, not the last one.
+      const failRes = results[failedIdx];
+      const errBody =
+        failRes && 'body' in failRes ? (failRes as { body: unknown }).body : null;
       // Transient failures get bounded backoff; anything else is fatal.
-      if ((res.status === 0 || res.status >= 500 || res.status === 429) && attempt <= 5) {
+      if (
+        (failRes &&
+          ('status' in failRes
+            ? (failRes as { status: number }).status === 0 ||
+              (failRes as { status: number }).status >= 500 ||
+              (failRes as { status: number }).status === 429
+            : false)) &&
+        attempt <= 5
+      ) {
         await new Promise((r) => setTimeout(r, 400 * attempt));
         continue;
       }
       delete resumeMap[resumeKey];
       localStorage.setItem('ii_uploads', JSON.stringify(resumeMap));
-      throw new ApiError(res.status || 0, errMessage(res.body, 'Connection lost during upload — check the file size and try again'));
+      throw new ApiError(
+        (failRes && 'status' in failRes
+          ? (failRes as { status: number }).status
+          : 0) || 0,
+        errMessage(
+          errBody,
+          'Connection lost during upload — check the file size and try again',
+        ),
+      );
     }
   }
   checkAbort();

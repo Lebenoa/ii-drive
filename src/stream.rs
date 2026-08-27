@@ -26,7 +26,7 @@ pub async fn file_stream_from(
     chat: &str,
     start: u64,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
-    let (client, peer, _bot) = tg.pool_target(chat).await?;
+    let (client, peer, _bot, _dc_id, _pools) = tg.pool_target(chat).await?;
 
     let st = StreamState {
         client,

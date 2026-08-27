@@ -1,13 +1,20 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use axum::extract::Path;
 use axum::{Extension, Json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
+
+use super::upload::{
+    PartPlan, StoredFile, UploaderHandle, collect_uploaders, is_transient, persist_row,
+    store_from_file, PART_RETRIES,
+};
 
 /// In-flight resumable uploads. Process-local on purpose: a restart
 /// invalidates the spill files anyway, so durability would only preserve
@@ -21,6 +28,32 @@ struct Session {
     folder: String,
     path: PathBuf,
     last_touch: Instant,
+    /// Broadcasts the total bytes received so far.  Background uploaders
+    /// watch this to know when their part is fully on disk and can be
+    /// pushed to Telegram.
+    progress_tx: watch::Sender<u64>,
+    /// Background uploaders spawned at `init` time — one per part.  Each
+    /// waits for its byte range to land, then uploads immediately.
+    uploaders: Vec<UploaderHandle>,
+    /// Part split plan, kept so `complete` can map uploader results back
+    /// to `FilePart` rows.
+    part_plan: PartPlan,
+    /// Guards against concurrent `complete` calls.  Two race-free
+    /// completions would double-post parts to Telegram.
+    complete_in_flight: Arc<AtomicBool>,
+}
+
+/// RAII guard that clears `complete_in_flight` when dropped, even on
+/// early-return error paths.  The clear is synchronous (no async lock
+/// reacquire, no spawn) so a retry always sees the updated flag.
+struct CompleteGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for CompleteGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 const SESSION_TTL_SECS: u64 = 24 * 3600;
@@ -42,6 +75,10 @@ async fn sweep(map: &mut HashMap<String, Session>) {
         .collect();
     for id in stale {
         if let Some(s) = map.remove(&id) {
+            // Abort any background uploaders before removing the spill file.
+            for u in s.uploaders {
+                u.abort();
+            }
             let _ = tokio::fs::remove_file(&s.path).await;
         }
     }
@@ -120,11 +157,101 @@ pub async fn init(
         .await
         .map_err(|e| ApiError::bad_request(format!("could not create upload buffer: {e}")))?;
 
+    // Build the part plan and TgManager up front so background uploaders
+    // can start as soon as bytes land.
+    let tg = state.tg(uid).await?;
+    let part_plan = PartPlan::new(state, uid, req.size).await?;
+    let (progress_tx, progress_rx_init) = watch::channel(0u64);
+
+    // Spawn one background uploader per part.  Each waits on the progress
+    // channel until its byte range is fully on disk, then streams it to
+    // Telegram immediately — no need to wait for `complete`.
+    let mut uploaders = Vec::with_capacity(part_plan.nparts);
+    for i in 0..part_plan.nparts {
+        let expected = part_plan.expected(i);
+        let part_end = ((i as u64 + 1) * part_plan.part_size).min(part_plan.declared);
+        let tg = tg.clone();
+        let chat = part_plan.chat_for(i);
+        let path = path.clone();
+        let name = req.name.clone();
+        let mime = req.mime.clone();
+        let part_size = part_plan.part_size;
+        let nparts = part_plan.nparts;
+        let mut progress_rx = progress_rx_init.clone();
+        uploaders.push(tokio::spawn(async move {
+            // Wait until our part is fully received.
+            {
+                let mut done = false;
+                while !done {
+                    let received = *progress_rx.borrow_and_update();
+                    if received >= part_end {
+                        done = true;
+                    } else if progress_rx.changed().await.is_err() {
+                        // Channel closed — session was aborted.
+                        return Err("upload session ended".to_string());
+                    }
+                }
+            }
+
+            let part_name = if nparts > 1 {
+                format!("{name}.part{:03}", i + 1)
+            } else {
+                name
+            };
+
+            // Transient transport failures are retryable; the part is
+            // fully buffered on disk, so re-open, re-seek and resend.
+            let mut attempt: u32 = 0;
+            loop {
+                use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+                let mut f = tokio::fs::File::open(&path)
+                    .await
+                    .map_err(|e| format!("reopen upload buffer: {e}"))?;
+                f.seek(std::io::SeekFrom::Start(i as u64 * part_size))
+                    .await
+                    .map_err(|e| format!("seek upload buffer: {e}"))?;
+                let r = f.take(expected);
+                // Encrypt the part when at-rest encryption is on.
+                let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+                let mut upload_size = expected;
+                let mut nonce: Option<String> = None;
+                match crate::config::get().crypt_key() {
+                    Ok(Some(key)) => {
+                        let (er, used) = crate::crypt::EncryptingReader::new(r, &key);
+                        reader = Box::new(er);
+                        nonce = Some(crate::crypt::base64_encode(&used));
+                        upload_size = crate::crypt::encrypted_size(expected);
+                    }
+                    _ => reader = Box::new(r),
+                }
+                #[allow(clippy::large_futures)]
+                let res = tg
+                    .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                    .await;
+                match res {
+                    Ok((mid, _, _, thumb)) => {
+                        break Ok((mid, part_name, mime.clone(), thumb, nonce));
+                    }
+                    Err(e) if attempt < PART_RETRIES && is_transient(&e) => {
+                        attempt += 1;
+                        tracing::info!(
+                            part = %part_name,
+                            attempt,
+                            err = %e,
+                            "transient part upload failure — retrying from the spill buffer"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }));
+    }
+
     {
         let mut guard = sessions().await;
         let map = &mut *guard;
-        sweep(map).await;
-        map.insert(
+        sweep(map).await;            map.insert(
             id.clone(),
             Session {
                 owner: uid,
@@ -135,6 +262,10 @@ pub async fn init(
                 folder: req.folder,
                 path,
                 last_touch: Instant::now(),
+                progress_tx,
+                uploaders,
+                part_plan,
+                complete_in_flight: Arc::new(AtomicBool::new(false)),
             },
         );
     }
@@ -162,6 +293,12 @@ async fn owned_session(uid: i64, id: &str) -> ApiResult<Session> {
         folder: s.folder.clone(),
         path: s.path.clone(),
         last_touch: s.last_touch,
+        // The remaining fields are only needed internally; uploaders are
+        // taken in `complete` and progress_tx is shared via clone.
+        progress_tx: s.progress_tx.clone(),
+        uploaders: Vec::new(), // snapshot doesn't need the handles
+        part_plan: s.part_plan.clone(),
+        complete_in_flight: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -170,6 +307,8 @@ async fn set_received(id: &str, n: u64) {
     if let Some(s) = map.get_mut(id) {
         s.received = n;
         s.last_touch = Instant::now();
+        // Broadcast so background uploaders know their part is on disk.
+        let _ = s.progress_tx.send(n);
     }
 }
 
@@ -248,8 +387,16 @@ pub async fn abort(
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = owned_session(uid, &id).await?;
+    // Cancel any background uploaders before removing the session.
+    {
+        let mut guard = SESSIONS.lock().await;
+        if let Some(session) = guard.remove(&id) {
+            for u in session.uploaders {
+                u.abort();
+            }
+        }
+    }
     remove_spill(&s.path).await;
-    SESSIONS.lock().await.remove(&id);
     Ok(Json(serde_json::json!({ "aborted": true })))
 }
 
@@ -276,20 +423,66 @@ pub async fn complete(
 
     let state = crate::state::get();
     let tg = state.tg(uid).await?;
-    let s = owned_session(uid, &id).await?;
-    if s.received != s.declared {
-        return Err(ApiError::bad_request(format!(
-            "incomplete upload: {} of {} bytes",
-            s.received, s.declared
-        )));
-    }
+
+    // Take the session — uploaders are moved out so they can be joined.
+    let s = {
+        let mut guard = SESSIONS.lock().await;
+        let s = guard
+            .get_mut(&id)
+            .filter(|s| s.owner == uid)
+            .ok_or_else(|| ApiError::not_found("no such upload session"))?;
+        if s.received != s.declared {
+            return Err(ApiError::bad_request(format!(
+                "incomplete upload: {} of {} bytes",
+                s.received, s.declared
+            )));
+        }
+        // Gate concurrent complete() calls: two racing completions
+        // would double-post every part to Telegram.
+        if s.complete_in_flight.load(Ordering::Acquire) {
+            return Err(ApiError::conflict(
+                "another complete() is already in progress".to_string(),
+            ));
+        }
+        s.complete_in_flight.store(true, Ordering::Release);
+        // Move uploaders and part_plan out; the session entry is removed
+        // after a successful persist.
+        let uploaders = std::mem::take(&mut s.uploaders);
+        let part_plan = s.part_plan.clone();
+        let name = s.name.clone();
+        let mime = s.mime.clone();
+        let folder = s.folder.clone();
+        let path = s.path.clone();
+        let declared = s.declared;
+        Session {
+            owner: s.owner,
+            declared,
+            received: s.received,
+            name,
+            mime,
+            folder,
+            path,
+            last_touch: s.last_touch,
+            progress_tx: s.progress_tx.clone(),
+            uploaders,
+            part_plan,
+            complete_in_flight: Arc::clone(&s.complete_in_flight),
+        }
+    };
+    // RAII guard: clears complete_in_flight synchronously on drop,
+    // covering every exit path including early ? returns.
+    let _guard = CompleteGuard {
+        flag: Arc::clone(&s.complete_in_flight),
+    };
+
+    // Head bytes feed cover-art extraction; the file is fully flushed by
+    // the chunk handler, so this read is safe mid-session.
     let mut head = Vec::new();
     {
         use tokio::io::AsyncReadExt as _;
         let f = tokio::fs::File::open(&s.path)
             .await
             .map_err(|e| ApiError::bad_request(format!("reopen upload buffer: {e}")))?;
-        // HEAD_CAP (512 KiB) fits in u64.
         #[allow(clippy::as_conversions)]
         let cap = HEAD_CAP as u64;
         f.take(cap)
@@ -298,19 +491,75 @@ pub async fn complete(
             .map_err(|e| ApiError::bad_request(format!("read upload buffer head: {e}")))?;
     }
 
-    let file = super::upload::FileInput {
-        path: &s.path,
-        declared: s.declared,
-        name: s.name.clone(),
-        mime: s.mime.clone(),
-        folder: s.folder.clone(),
-    };
-    match super::upload::store_from_file(state, tg, uid, file, &head).await {
-        Ok(v) => {
-            let _guard = SpillFile(s.path.clone());
-            SESSIONS.lock().await.remove(&id);
-            Ok(v)
+    // If the overlap uploaders are still present, join them.  If they
+    // were already consumed by a previous (failed) `complete` call, fall
+    // back to the sequential `store_from_file` path which creates fresh
+    // uploaders from the spill buffer.
+    let result = if !s.uploaders.is_empty() {
+        let (parts, tg_thumb) = collect_uploaders(s.uploaders, &s.part_plan, &tg).await?;
+        let mime = if s.mime.is_empty() {
+            mime_guess::from_path(&s.name)
+                .first_or_octet_stream()
+                .to_string()
+        } else {
+            s.mime.clone()
+        };
+        let thumb = match tg_thumb.or_else(|| {
+            (mime.starts_with("audio/"))
+                .then(|| crate::art::extract(&head))
+                .flatten()
+        }) {
+            Some(jpeg) => super::thumbs::thumb_bytes(jpeg).await,
+            None => None,
+        };
+        tracing::info!(name = %s.name, parts = s.part_plan.nparts, declared = s.declared, "uploaded file");
+        let r = persist_row(
+            state,
+            tg.clone(),
+            uid,
+            StoredFile {
+                name: s.name.clone(),
+                mime,
+                declared: s.declared,
+                folder: s.folder.clone(),
+                parts: parts.clone(),
+                thumb,
+                head,
+            },
+        )
+        .await;
+        // If parts were posted to Telegram but the DB row wasn't
+        // created, clean them up so a retry via store_from_file
+        // doesn't produce orphans.
+        if r.is_err() {
+            super::cleanup_parts(&tg, &parts).await;
         }
-        Err(e) => Err(e),
+        r
+    } else {
+        // Overlap uploaders were consumed by a prior attempt.  Fall back
+        // to sequential upload from the spill buffer.
+        store_from_file(
+            state,
+            tg,
+            uid,
+            &s.path,
+            s.declared,
+            &s.name,
+            &s.mime,
+            &s.folder,
+            &head,
+        )
+        .await
+    };
+
+    // Only remove the session and spill file on success so the client
+    // can retry on failure.
+    if result.is_ok() {
+        let _spill = SpillFile(s.path.clone());
+        SESSIONS.lock().await.remove(&id);
     }
+    // _guard drops here, synchronously clearing complete_in_flight —
+    // covering both success (session already removed → flag gone) and
+    // failure (flag reset so retries can proceed).
+    result
 }

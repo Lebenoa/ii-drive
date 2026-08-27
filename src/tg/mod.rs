@@ -87,6 +87,11 @@ pub struct ChannelInfo {
 struct BotHandle {
     client: Client,
     username: String,
+    /// Upload DC id, cached so workers can call
+    /// `SenderPoolHandle::invoke_in_dc` directly.
+    dc_id: i32,
+    /// Pool handles (main + aux) for this bot's connection.
+    pools: Vec<SenderPoolHandle>,
 }
 
 struct BotSession {
@@ -103,15 +108,46 @@ struct Conn {
     client: Client,
     pool: SenderPoolHandle,
     runner: tokio::task::JoinHandle<()>,
+    /// Upload DC id (home DC), cached so workers can use
+    /// `SenderPoolHandle::invoke_in_dc` without round-tripping through the
+    /// session.
+    dc_id: i32,
+    /// Extra sender-pool handles, each backed by its own TCP connection to
+    /// the same DC.  Combined with the main `pool` they give us N parallel
+    /// connections for upload workers.
+    aux_pools: Vec<SenderPoolHandle>,
+    /// Runner tasks for the auxiliary pools — must be stopped on close.
+    aux_runners: Vec<tokio::task::JoinHandle<()>>,
+    /// Paths of the copied session files opened by aux pools — removed
+    /// on close so they don't accumulate.
+    aux_session_paths: Vec<String>,
 }
 
 /// How long to wait for a network runner to wind down before abandoning it.
 const RUNNER_STOP_SECS: u64 = 5;
 
+/// Number of extra TCP connections opened alongside the main one for
+/// upload parallelism.  The official Telegram client uses ~30; we keep it
+/// modest because each connection carries its own MTProto auth handshake.
+const AUX_UPLOAD_POOLS: usize = 3;
+
 impl Conn {
+    /// All available pool handles (main + auxiliary) for round-robin
+    /// distribution of upload workers.
+    fn all_pools(&self) -> impl Iterator<Item = &SenderPoolHandle> {
+        std::iter::once(&self.pool).chain(self.aux_pools.iter())
+    }
+
     /// Stops the network runner and waits for it to let go of the session
     /// file. Bounded, so a runner stuck mid-connect cannot hang a request.
+    /// Also removes the aux session copies so they don't accumulate on disk.
+    /// On Windows an aborted runner may not have released its file handle
+    /// immediately, so removal retries briefly.
     async fn close(self) {
+        // Stop auxiliary runners first.
+        for aux in self.aux_runners {
+            aux.abort();
+        }
         self.pool.quit();
         let abort = self.runner.abort_handle();
         if tokio::time::timeout(
@@ -123,6 +159,17 @@ impl Conn {
         {
             tracing::warn!("telegram runner did not stop in time; abandoning it");
             abort.abort();
+        }
+        // Remove the copied session files so they don't pile up.
+        // On Windows, an aborted runner may still hold the file handle
+        // briefly; retry a few times before giving up.
+        for path in &self.aux_session_paths {
+            for _ in 0..10 {
+                if tokio::fs::remove_file(path).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
     }
 }

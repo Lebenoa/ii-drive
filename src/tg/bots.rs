@@ -1,4 +1,5 @@
 use grammers_client::Client;
+use grammers_client::sender::SenderPoolHandle;
 use grammers_client::tl;
 
 use super::{BotHandle, BotSession, PeerAuth, PeerId, PeerRef, TgManager, friendly};
@@ -83,15 +84,21 @@ impl TgManager {
     /// with separate rate limits instead of queueing on one.
     #[allow(clippy::arithmetic_side_effects)] // `bots > 0` is guarded before the modulo, so it cannot divide by zero
     #[allow(clippy::significant_drop_tightening)] // `st` is block-scoped to the snapshot; no cross-await hold
+    /// Returns (client, peer, bot_name, dc_id, pools). The dc_id and
+    /// pools are bound to the same session as the client, so the caller
+    /// can pass them to `parallel_upload_stream` for any target (bot or
+    /// owner) without a cross-session file-reference bug.
     pub async fn pool_target(
         &self,
         chat: &str,
-    ) -> Result<(Client, PeerRef, Option<String>), String> {
+    ) -> Result<(Client, PeerRef, Option<String>, i32, Vec<SenderPoolHandle>), String> {
         let key = chat.trim();
         if let Ok(n) = key.parse::<i64>() {
             let bots = self.st.lock().await.bots.len();
             if bots > 0 {
                 let skip = self.next_rotation() % bots;
+                // Snapshot everything we need from the bot sessions,
+                // then drop the lock before any async peer resolution.
                 let sessions: Vec<BotHandle> = {
                     let st = self.st.lock().await;
                     let mut v: Vec<BotHandle> = st
@@ -100,6 +107,8 @@ impl TgManager {
                         .map(|b| BotHandle {
                             client: b.conn.client.clone(),
                             username: b.username.clone(),
+                            dc_id: b.conn.dc_id,
+                            pools: b.conn.all_pools().cloned().collect(),
                         })
                         .collect();
                     v.sort_by_key(|b| b.username.clone());
@@ -120,7 +129,13 @@ impl TgManager {
                                 .map_err(|e| format!("peer ref failed: {e}"))?
                                 .ok_or_else(|| format!("chat `{key}` has no usable peer ref"))?;
                             tracing::info!(bot = %bs.username, chat = %key, "transfer via bot");
-                            return Ok((bs.client.clone(), pref, Some(bs.username.clone())));
+                            return Ok((
+                                bs.client.clone(),
+                                pref,
+                                Some(bs.username.clone()),
+                                bs.dc_id,
+                                bs.pools.clone(),
+                            ));
                         }
                         Err(e) => {
                             last_err = format!("bot {}: {e}", bs.username);
@@ -132,7 +147,8 @@ impl TgManager {
         }
         let client = self.ensure().await?;
         let peer = self.storage_peer(chat).await?;
-        Ok((client, peer, None))
+        let (dc_id, pools) = self.upload_pools().await?;
+        Ok((client, peer, None, dc_id, pools))
     }
 
     /// Invites every configured bot into the given storage chat and
@@ -150,6 +166,8 @@ impl TgManager {
                         BotHandle {
                             client: b.conn.client.clone(),
                             username: b.username.clone(),
+                            dc_id: b.conn.dc_id,
+                            pools: b.conn.all_pools().cloned().collect(),
                         },
                         b.access_hash.map(|h| {
                             tl::enums::InputUser::User(tl::types::InputUser {

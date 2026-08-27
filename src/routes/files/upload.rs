@@ -24,7 +24,7 @@ use super::{FileDto, HEAD_CAP, bytes_repr, cleanup_parts, extract_media_thumb, n
 /// but not the buffered part. Anything else — an RPC rejection such as a
 /// flood wait, an invalid file, a permission error — would fail every retry
 /// identically, so leave it to fail fast.
-fn is_transient(err: &str) -> bool {
+pub(super) fn is_transient(err: &str) -> bool {
     let low = err.to_ascii_lowercase();
     [
         "connection reset by peer",
@@ -41,7 +41,7 @@ fn is_transient(err: &str) -> bool {
 
 /// Extra attempts (besides the first) a part upload gets after a transient
 /// transport failure; each re-reads its part from the spill buffer.
-const PART_RETRIES: u32 = 2;
+pub(super) const PART_RETRIES: u32 = 2;
 
 /// Per-request body-limit guard for POST /api/files. The limit cannot be
 /// baked into the router at startup: the cap is an instance setting an
@@ -82,14 +82,14 @@ pub type UploaderHandle =
 
 /// A file fully described and already uploaded: everything `persist_row`
 /// needs to record it.
-struct StoredFile {
-    name: String,
-    mime: String,
-    declared: u64,
-    folder: String,
-    parts: Vec<crate::db::FilePart>,
-    thumb: Option<Vec<u8>>,
-    head: Vec<u8>,
+pub(super) struct StoredFile {
+    pub(super) name: String,
+    pub(super) mime: String,
+    pub(super) declared: u64,
+    pub(super) folder: String,
+    pub(super) parts: Vec<crate::db::FilePart>,
+    pub(super) thumb: Option<Vec<u8>>,
+    pub(super) head: Vec<u8>,
 }
 
 #[allow(clippy::too_many_lines)] // linear multipart-drain + part-fan-out handler; splitting fragments it
@@ -140,17 +140,18 @@ pub async fn upload_file(
 
 /// Per-part split shared by both spill paths: sizes, count and channel
 /// rotation depend only on the user's settings and the declared size.
-struct PartPlan {
-    declared: u64,
-    part_size: u64,
-    nparts: usize,
+#[derive(Clone)]
+pub(super) struct PartPlan {
+    pub(super) declared: u64,
+    pub(super) part_size: u64,
+    pub(super) nparts: usize,
     over_cap: bool,
     base: usize,
     chats: Vec<String>,
 }
 
 impl PartPlan {
-    async fn new(state: &AppState, uid: i64, declared: u64) -> ApiResult<Self> {
+    pub(super) async fn new(state: &AppState, uid: i64, declared: u64) -> ApiResult<Self> {
         const TG_DOC_CAP: u64 = 4000 * 512 * 1024;
         let user_key = uid.to_string();
         let split_bytes = crate::db::get_split(&state.db, &user_key)
@@ -192,7 +193,7 @@ impl PartPlan {
         })
     }
 
-    const fn expected(&self, i: usize) -> u64 {
+    pub(super) const fn expected(&self, i: usize) -> u64 {
         if i + 1 == self.nparts {
             self.declared - self.part_size * (self.nparts as u64 - 1)
         } else {
@@ -200,7 +201,7 @@ impl PartPlan {
         }
     }
 
-    fn chat_for(&self, i: usize) -> String {
+    pub(super) fn chat_for(&self, i: usize) -> String {
         let idx = if self.over_cap {
             self.base
         } else {
@@ -504,7 +505,7 @@ async fn spill_upload(
 
 /// Awaits every part uploader, collecting landed message ids; on any
 /// failure the already-posted parts are removed so no orphans stay behind.
-async fn collect_uploaders(
+pub(super) async fn collect_uploaders(
     mut uploaders: Vec<UploaderHandle>,
     plan: &PartPlan,
     tg: &crate::tg::TgManager,
@@ -543,37 +544,30 @@ async fn collect_uploaders(
 }
 
 /// Fans a fully-buffered local file out to Telegram as parts, then records
-/// it. Shared by the always-spill upload path and resumable uploads, which
-/// always buffer by design.
-/// A buffered local file plus its metadata, ready to fan out to Telegram.
-pub struct FileInput<'a> {
-    pub path: &'a std::path::Path,
-    pub declared: u64,
-    pub name: String,
-    pub mime: String,
-    pub folder: String,
-}
-
-pub async fn store_from_file(
+/// it.  Used as a fallback when the overlap uploaders have already been
+/// consumed (e.g. after a failed `complete` that the client retries).
+#[allow(clippy::too_many_arguments)] // faithful port of the original; splitting adds indirection
+pub(super) async fn store_from_file(
     state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,
-    file: FileInput<'_>,
+    path: &std::path::Path,
+    declared: u64,
+    name: &str,
+    mime: &str,
+    folder: &str,
     head: &[u8],
 ) -> ApiResult<Json<serde_json::Value>> {
     use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
-    let declared = file.declared;
-    let name = file.name;
-    let path = file.path;
 
     let plan = PartPlan::new(state, uid, declared).await?;
     let nparts = plan.nparts;
-    let mime = if file.mime.is_empty() {
-        mime_guess::from_path(&name)
+    let resolved_mime = if mime.is_empty() {
+        mime_guess::from_path(name)
             .first_or_octet_stream()
             .to_string()
     } else {
-        file.mime
+        mime.to_string()
     };
 
     let mut uploaders = Vec::with_capacity(plan.nparts);
@@ -582,8 +576,8 @@ pub async fn store_from_file(
         let tg = tg.clone();
         let chat = plan.chat_for(i);
         let path = path.to_path_buf();
-        let name = name.clone();
-        let mime = mime.clone();
+        let name = name.to_string();
+        let resolved_mime = resolved_mime.clone();
         let part_size = plan.part_size;
         let nparts = plan.nparts;
         uploaders.push(tokio::spawn(async move {
@@ -592,13 +586,6 @@ pub async fn store_from_file(
             } else {
                 name
             };
-            // Transient transport failures (a TCP reset/abort mid-upload —
-            // ECONNRESET/ECONNABORTED on the socket to Telegram's DC) kill
-            // the in-flight stream but are retryable: the part is fully
-            // buffered on disk, so re-open, re-seek and resend up to
-            // PART_RETRIES times with backoff. RPC rejections (flood wait,
-            // invalid file, etc.) are not retried — they would fail every
-            // attempt the same way (see `is_transient`).
             let mut attempt: u32 = 0;
             loop {
                 let mut f = tokio::fs::File::open(&path)
@@ -608,9 +595,6 @@ pub async fn store_from_file(
                     .await
                     .map_err(|e| format!("seek upload buffer: {e}"))?;
                 let r = f.take(expected);
-                // Encrypt the part when at-rest encryption is on; the nonce
-                // rides back for the row. A fresh nonce is made per attempt,
-                // so a retry never reuses the nonce of a possibly-landed part.
                 let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
                 let mut upload_size = expected;
                 let mut nonce: Option<String> = None;
@@ -623,13 +607,13 @@ pub async fn store_from_file(
                     }
                     _ => reader = Box::new(r),
                 }
-                #[allow(clippy::large_futures)] // spawned upload future is unavoidably large
+                #[allow(clippy::large_futures)]
                 let res = tg
-                    .upload(&mut reader, upload_size, &part_name, &mime, &chat)
+                    .upload(&mut reader, upload_size, &part_name, &resolved_mime, &chat)
                     .await;
                 match res {
                     Ok((mid, _, _, thumb)) => {
-                        break Ok((mid, part_name, mime.clone(), thumb, nonce));
+                        break Ok((mid, part_name, resolved_mime.clone(), thumb, nonce));
                     }
                     Err(e) if attempt < PART_RETRIES && is_transient(&e) => {
                         attempt += 1;
@@ -649,26 +633,24 @@ pub async fn store_from_file(
 
     let (parts, tg_thumb) = collect_uploaders(uploaders, &plan, &tg).await?;
 
-    // Telegram makes no stripped thumbnail for audio; fall back to the
-    // embedded cover art captured from the buffer head.
     let thumb = match tg_thumb.or_else(|| {
-        (mime.starts_with("audio/"))
+        (resolved_mime.starts_with("audio/"))
             .then(|| crate::art::extract(head))
             .flatten()
     }) {
         Some(jpeg) => super::thumbs::thumb_bytes(jpeg).await,
         None => None,
     };
-    tracing::info!(%name, parts = nparts, %declared, "uploaded file");
+    tracing::info!(%name, parts = nparts, %declared, "uploaded file (fallback)");
     persist_row(
         state,
         tg,
         uid,
         StoredFile {
-            name,
-            mime,
+            name: name.to_string(),
+            mime: resolved_mime,
             declared,
-            folder: file.folder,
+            folder: folder.to_string(),
             parts,
             thumb,
             head: head.to_vec(),
@@ -677,7 +659,7 @@ pub async fn store_from_file(
     .await
 }
 
-async fn persist_row(
+pub(super) async fn persist_row(
     state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,
     uid: i64,

@@ -57,6 +57,10 @@ impl TgManager {
             handle,
             mut updates,
         } = SenderPool::new(session, self.cfg.api_id);
+        let dc_id = handle
+            .session
+            .home_dc_id()
+            .map_err(|e| format!("cannot determine home DC: {e}"))?;
         let pool = handle.thin.clone();
         let runner = tokio::spawn(runner.run());
         tokio::spawn(async move {
@@ -64,10 +68,76 @@ impl TgManager {
                 tracing::debug!(?update, "telegram update");
             }
         });
+
+        // Open extra connections to the same DC so upload workers can
+        // spread across multiple TCP pipes instead of pipelining through
+        // one.  Each pool gets its own copy of the session file to
+        // avoid SQLite locking conflicts (grammers writes during normal
+        // ops — bound file refs, DC bookkeeping — so concurrent access
+        // to a single file would wedge).
+        let mut aux_pools = Vec::with_capacity(super::AUX_UPLOAD_POOLS);
+        let mut aux_runners = Vec::with_capacity(super::AUX_UPLOAD_POOLS);
+        let mut aux_session_paths = Vec::with_capacity(super::AUX_UPLOAD_POOLS);
+        for idx in 0..super::AUX_UPLOAD_POOLS {
+            // Copy the main session so each aux pool has its own
+            // SQLite file — same auth key, independent state tracker.
+            let aux_path = format!("{session_path}.aux{idx}");
+            if let Err(e) = tokio::fs::copy(session_path, &aux_path).await {
+                // First connection may not have flushed yet; an empty
+                // file is fine — SqliteSession will initialise it.
+                if tokio::fs::metadata(session_path).await.is_ok() {
+                    return aux_cleanup(
+                        &mut aux_pools,
+                        &mut aux_runners,
+                        &mut aux_session_paths,
+                        pool,
+                        runner,
+                        format!("cannot copy session for aux {idx}: {e}"),
+                    );
+                }
+            }
+            let aux_session = match SqliteSession::open(&aux_path).await {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&aux_path).await;
+                    return aux_cleanup(
+                        &mut aux_pools,
+                        &mut aux_runners,
+                        &mut aux_session_paths,
+                        pool,
+                        runner,
+                        format!("cannot open aux session {idx}: {e}"),
+                    );
+                }
+            };
+            let SenderPool {
+                runner: aux_runner,
+                handle: aux_handle,
+                mut updates,
+            } = SenderPool::new(aux_session, self.cfg.api_id);
+            aux_pools.push(aux_handle.thin.clone());
+            aux_runners.push(tokio::spawn(aux_runner.run()));
+            aux_session_paths.push(aux_path);
+            tokio::spawn(async move {
+                while let Some(update) = updates.recv().await {
+                    tracing::debug!(?update, "telegram update (aux)");
+                }
+            });
+        }
+        tracing::info!(
+            dc_id,
+            connections = 1 + aux_pools.len(),
+            "opened upload connections"
+        );
+
         Ok(Conn {
             client: Client::new(handle),
             pool,
             runner,
+            dc_id,
+            aux_pools,
+            aux_runners,
+            aux_session_paths,
         })
     }
 
@@ -211,6 +281,28 @@ impl TgManager {
         use std::sync::atomic::Ordering;
         ROTATION.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// Tears down already-spawned runners on aux connection failure,
+/// avoiding leaked tasks and held session files.
+fn aux_cleanup(
+    aux_pools: &mut Vec<grammers_client::sender::SenderPoolHandle>,
+    aux_runners: &mut Vec<tokio::task::JoinHandle<()>>,
+    aux_session_paths: &mut Vec<String>,
+    pool: grammers_client::sender::SenderPoolHandle,
+    runner: tokio::task::JoinHandle<()>,
+    error: String,
+) -> Result<Conn, String> {
+    for r in aux_runners.drain(..) {
+        r.abort();
+    }
+    aux_pools.clear();
+    for p in aux_session_paths.drain(..) {
+        let _ = std::fs::remove_file(p);
+    }
+    pool.quit();
+    runner.abort();
+    Err(error)
 }
 
 #[cfg(test)]
