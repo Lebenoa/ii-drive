@@ -623,7 +623,11 @@ pub(super) async fn store_from_file(
                             err = %e,
                             "transient part upload failure — retrying from the spill buffer"
                         );
-                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                        tracing::info!(
+                            part = %part_name,
+                            attempt,
+                            "retry starting"
+                        );
                     }
                     Err(e) => return Err(e),
                 }
