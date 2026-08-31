@@ -2,10 +2,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use mtprsto::client::Client;
-use mtprsto::types::{self, Chat, InputPeer};
+use mtprsto::rpc;
+use mtprsto::types::{self, Chat, Dialogs, InputPeer};
 use tokio::sync::Mutex;
 
-use super::{ChannelInfo, PeerRef, TgManager, build_get_dialogs, friendly, parse_dialogs_response};
+use super::{ChannelInfo, PeerRef, TgManager, friendly};
 
 impl TgManager {
     /// Resolves (and caches) a chat key — "me", "@username" or "-100<id>" —
@@ -74,12 +75,12 @@ impl TgManager {
             let resp = {
                 let c = client.lock().await;
                 let payload =
-                    build_get_dialogs(folder_id, offset_date, offset_id, &offset_peer, 100);
+                    rpc::build_get_dialogs(folder_id, offset_date, offset_id, &offset_peer, 100);
                 c.invoke_raw(payload)
                     .await
                     .map_err(|e| friendly(format!("listing dialogs failed: {e}")))?
             };
-            let dialogs = parse_dialogs_response(&resp)?;
+            let dialogs = Dialogs::parse(&resp).map_err(|e| e.to_string())?;
 
             Self::harvest_chats(&dialogs.chats, out, seen);
             if dialogs.dialogs.len() < 100 {

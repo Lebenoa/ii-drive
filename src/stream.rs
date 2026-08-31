@@ -8,7 +8,7 @@ use mtprsto::pool::SenderPool;
 use mtprsto::rpc;
 use mtprsto::types::{self, InputPeer, MsgId};
 
-use crate::tg::{TgManager, get_messages_by_id, is_file_reference_error, message_document};
+use crate::tg::{TgManager, get_messages_by_id};
 
 /// `upload.getFile` alignment: Telegram requires offsets divisible by
 /// 4 KiB. A range start in the middle of a block aligns down, and the
@@ -76,7 +76,7 @@ pub async fn file_stream_from(
                         st,
                     ));
                 };
-                let Some(doc) = message_document(&msg) else {
+                let Some(doc) = msg.document() else {
                     return Some((
                         Err(std::io::Error::other("message has no document media")),
                         st,
@@ -111,7 +111,7 @@ pub async fn file_stream_from(
                             st,
                         ));
                     }
-                    Err(e) if is_file_reference_error(&e) => {
+                    Err(e) if e.is_file_reference() => {
                         tracing::info!("file reference expired mid-download; refetching");
                         st.loc = None;
                         None
@@ -123,7 +123,7 @@ pub async fn file_stream_from(
                         ));
                     }
                 },
-                Err(e) if is_file_reference_error(&e) => {
+                Err(e) if e.is_file_reference() => {
                     tracing::info!("file reference expired mid-download; refetching");
                     st.loc = None;
                     None

@@ -12,7 +12,7 @@ impl TgManager {
     pub async fn botfather_send(&self, text: &str) -> Result<String, String> {
         let client = self.ensure_connected().await?;
         let peer = self.storage_peer("botfather").await?;
-        let sent = send_text(&*client.lock().await, &peer, text).await?;
+        let sent = send_text(&mut *client.lock().await, &peer, text).await?;
 
         // BotFather usually answers within a second; poll the dialog for a
         // newer message. Give up after ~8s so the HTTP request cannot hang.
@@ -138,7 +138,7 @@ impl TgManager {
 
         let client = self.ensure_connected().await?;
         let peer_ref = self.storage_peer("botfather").await?;
-        let sent = send_text(&*client.lock().await, &peer_ref, "/mybots").await?;
+        let sent = send_text(&mut *client.lock().await, &peer_ref, "/mybots").await?;
         let (mut msg_id, mut buttons) =
             Self::await_reply_buttons(&*client.lock().await, &peer_ref, sent.0 as i32).await?;
 
@@ -179,7 +179,7 @@ impl TgManager {
     pub async fn botfather_bot_token(&self, bot: &str) -> Result<String, String> {
         let client = self.ensure_connected().await?;
         let peer_ref = self.storage_peer("botfather").await?;
-        send_text(&*client.lock().await, &peer_ref, "/mybots").await?;
+        send_text(&mut *client.lock().await, &peer_ref, "/mybots").await?;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         self.press_botfather_button(&*client.lock().await, &peer_ref, bot)
             .await?;

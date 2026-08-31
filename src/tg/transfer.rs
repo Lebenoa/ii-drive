@@ -3,18 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mtprsto::client::Client;
-use mtprsto::error::Error as TgError;
 use mtprsto::pool::SenderPool;
 use mtprsto::rpc::{self, InputMedia};
-use mtprsto::serialize::TLWriter;
 use mtprsto::types::{self, InputFile, MsgId, Updates};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, mpsc};
 
-use super::{
-    CHANNELS_DELETE_MESSAGES, PeerRef, TgManager, doc_stripped_thumb, friendly,
-    get_messages_by_id, message_document, updates_message_and_id,
-};
+use super::{PeerRef, TgManager, friendly, get_messages_by_id};
 
 /// `upload.saveFilePart` part size (512 KiB is the only allowed value).
 const PART_SIZE: usize = 512 * 1024;
@@ -78,7 +73,7 @@ impl TgManager {
                 .map_err(|e| friendly(format!("sending message failed: {e}")))?
         };
         let updates = Updates::parse(&raw).map_err(|e| format!("send response unreadable: {e}"))?;
-        let (msg_id, doc) = updates_message_and_id(&updates);
+        let (msg_id, doc) = updates.message_and_document();
 
         // A short answer carries the id but no media; fetch the message
         // once so its stripped thumbnail is not lost.
@@ -88,12 +83,12 @@ impl TgManager {
                 Some(id) => {
                     let c = client.lock().await;
                     let msgs = get_messages_by_id(&c, &peer, &[id]).await?;
-                    msgs.iter().find_map(message_document)
+                    msgs.iter().find_map(types::Message::document)
                 }
                 None => None,
             },
         };
-        let thumb = doc.as_ref().and_then(doc_stripped_thumb);
+        let thumb = doc.as_ref().and_then(types::Document::stripped_thumb_jpeg);
         let id = msg_id.ok_or("server returned no message id")?.0 as i32;
         Ok((id, name.to_string(), mime.to_string(), thumb))
     }
@@ -138,7 +133,7 @@ impl TgManager {
             };
             let updates = Updates::parse(&raw)
                 .map_err(|e| format!("bench send response unreadable: {e}"))?;
-            let (msg_id, _) = updates_message_and_id(&updates);
+            let (msg_id, _) = updates.message_and_document();
             let id = msg_id
                 .ok_or("bench send returned no message id")?
                 .0 as i32;
@@ -174,17 +169,13 @@ impl TgManager {
             types::InputPeer::Channel {
                 channel_id,
                 access_hash,
-            } => {
-                let mut w = TLWriter::new();
-                w.write_u32(CHANNELS_DELETE_MESSAGES);
-                w.write_u32(types::INPUT_CHANNEL);
-                w.write_i64(channel_id.0);
-                w.write_i64(access_hash.0);
-                w.write_u32(types::VECTOR);
-                w.write_i32(1);
-                w.write_i32(message_id);
-                w.into_bytes()
-            }
+            } => rpc::build_channels_delete_messages(
+                &types::InputChannel::Channel {
+                    channel_id,
+                    access_hash,
+                },
+                &[MsgId(i64::from(message_id))],
+            ),
             _ => rpc::build_delete_messages(&[MsgId(i64::from(message_id))], false),
         };
         client
@@ -323,11 +314,4 @@ where
             md5_checksum: String::new(),
         }
     })
-}
-
-pub fn is_file_reference_error(err: &TgError) -> bool {
-    match err {
-        TgError::FileReferenceExpired { .. } => true,
-        other => super::is_file_reference_str(&other.to_string()),
-    }
 }

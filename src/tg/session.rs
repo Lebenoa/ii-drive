@@ -9,10 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::config::Config;
 
-use super::{
-    Conn, ROTATION, State, TgManager, TgStatus, UserInfo, friendly, is_auth_error,
-    is_auth_error_str,
-};
+use super::{Conn, ROTATION, State, TgManager, TgStatus, UserInfo, friendly};
 
 impl TgManager {
     /// Builds a manager for one account. `session_path` is that account's
@@ -146,7 +143,7 @@ impl TgManager {
                 connected: false,
                 authorized: false,
                 user: None,
-                relogin: is_auth_error_str(&e),
+                relogin: mtprsto::error::is_auth_error_message(&e),
                 error: Some(e),
             },
             Ok(client) => {
@@ -161,7 +158,7 @@ impl TgManager {
                         Ok(user) => {
                             let info = UserInfo {
                                 id: user.id().0,
-                                name: super::full_name(&user),
+                                name: user.full_name(),
                                 username: user.username().map(ToString::to_string),
                                 phone: user.phone().map(ToString::to_string),
                             };
@@ -179,12 +176,12 @@ impl TgManager {
                         }
                         Err(e) => {
                             let msg = e.to_string();
-                            if !is_auth_error(&e) && attempt < 2 {
+                            if !e.is_session_dead() && attempt < 2 {
                                 attempt += 1;
                                 tokio::time::sleep(std::time::Duration::from_millis(750)).await;
                                 continue;
                             }
-                            let auth = is_auth_error(&e);
+                            let auth = e.is_session_dead();
                             return TgStatus {
                                 connected: false,
                                 authorized: false,
