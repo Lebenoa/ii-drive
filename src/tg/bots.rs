@@ -1,8 +1,11 @@
-use grammers_client::Client;
-use grammers_client::sender::SenderPoolHandle;
-use grammers_client::tl;
+use std::sync::Arc;
 
-use super::{BotHandle, BotSession, PeerAuth, PeerId, PeerRef, TgManager, friendly};
+use mtprsto::client::Client;
+use mtprsto::pool::SenderPool;
+use mtprsto::types::{self, InputChannel, InputPeer, InputUser};
+use tokio::sync::Mutex;
+
+use super::{BotHandle, BotSession, PeerRef, TgManager, friendly};
 
 impl TgManager {
     /// Deterministic per bot and per account: the owning account's session
@@ -23,19 +26,35 @@ impl TgManager {
         }
         let path = self.bot_session_path(token);
         let conn = self.open_conn(&path).await?;
-        let user = conn
-            .client
-            .bot_sign_in(token, &self.cfg.api_hash)
-            .await
-            .map_err(|e| friendly(format!("bot sign-in failed: {e}")))?;
-        let (id, access_hash, username) = match &user.raw {
-            tl::enums::User::User(u) => (
-                u.id,
-                u.access_hash,
-                u.username.clone().unwrap_or_else(|| format!("bot{}", u.id)),
-            ),
-            tl::enums::User::Empty(_) => {
-                return Err("bot account unavailable".to_string());
+        {
+            let mut c = conn.client.lock().await;
+            c.connect()
+                .await
+                .map_err(|e| friendly(format!("bot connection failed: {e}")))?;
+            // mtprsto handles bot home-DC migration inside authorize_bot
+            // and persists the bot's user id, so restarts skip re-auth.
+            c.authorize_bot(token)
+                .await
+                .map_err(|e| friendly(format!("bot sign-in failed: {e}")))?;
+        }
+        let (id, access_hash, username) = {
+            let c = conn.client.lock().await;
+            match c
+                .get_me()
+                .await
+                .map_err(|e| friendly(format!("bot profile failed: {e}")))?
+            {
+                types::User::User {
+                    id,
+                    access_hash,
+                    username,
+                    ..
+                } => (
+                    id.0,
+                    access_hash.map(|h| h.0),
+                    username.unwrap_or_else(|| format!("bot{}", id.0)),
+                ),
+                types::User::Empty { .. } => return Err("bot account unavailable".to_string()),
             }
         };
         let replaced = self.st.lock().await.bots.insert(
@@ -57,8 +76,6 @@ impl TgManager {
     pub async fn drop_bot(&self, id: i64) {
         let dropped = self.st.lock().await.bots.remove(&id);
         if let Some(bot) = dropped {
-            // Stop its runner too, or the bot's session file stays open for
-            // the rest of the process' life.
             bot.conn.close().await;
         }
     }
@@ -80,130 +97,180 @@ impl TgManager {
     /// downloads alike: rotating through the bot pool for channel-stored
     /// files, falling back to the user session (also used for Saved
     /// Messages, which bots cannot read). Every bot is a session of its
-    /// own, so concurrent transfers each get a separate `MTProto` connection
-    /// with separate rate limits instead of queueing on one.
-    #[allow(clippy::arithmetic_side_effects)] // `bots > 0` is guarded before the modulo, so it cannot divide by zero
-    #[allow(clippy::significant_drop_tightening)] // `st` is block-scoped to the snapshot; no cross-await hold
-    /// Returns (client, peer, bot_name, dc_id, pools). The dc_id and
-    /// pools are bound to the same session as the client, so the caller
-    /// can pass them to `parallel_upload_stream` for any target (bot or
-    /// owner) without a cross-session file-reference bug.
+    /// own, so concurrent transfers each get a separate connection with
+    /// separate rate limits instead of queueing on the owner session.
+    ///
+    /// Returns (client, peer, bot_name, dc_id, pool). The pool is bound to
+    /// the same session as the client, so file ids uploaded through it are
+    /// valid for the follow-up send, whichever target was picked.
     pub async fn pool_target(
         &self,
         chat: &str,
-    ) -> Result<(Client, PeerRef, Option<String>, i32, Vec<SenderPoolHandle>), String> {
+    ) -> Result<
+        (
+            Arc<Mutex<Client>>,
+            PeerRef,
+            Option<String>,
+            i32,
+            Arc<SenderPool>,
+        ),
+        String,
+    > {
         let key = chat.trim();
-        if let Ok(n) = key.parse::<i64>() {
+        if key.parse::<i64>().is_ok() {
             let bots = self.st.lock().await.bots.len();
             if bots > 0 {
                 let skip = self.next_rotation() % bots;
-                // Snapshot everything we need from the bot sessions,
-                // then drop the lock before any async peer resolution.
-                let sessions: Vec<BotHandle> = {
+                // Snapshot everything we need from the bot sessions
+                // (including their connection pieces, which need a brief
+                // lock each), then rotate without holding any locks.
+                let snapshots: Vec<(Arc<Mutex<Client>>, String)> = {
                     let st = self.st.lock().await;
-                    let mut v: Vec<BotHandle> = st
-                        .bots
+                    st.bots
                         .values()
-                        .map(|b| BotHandle {
-                            client: b.conn.client.clone(),
-                            username: b.username.clone(),
-                            dc_id: b.conn.dc_id,
-                            pools: b.conn.all_pools().cloned().collect(),
-                        })
-                        .collect();
-                    v.sort_by_key(|b| b.username.clone());
-                    v
+                        .map(|b| (b.conn.client.clone(), b.username.clone()))
+                        .collect()
                 };
-                let mut last_err = String::new();
-                for bs in sessions.iter().cycle().skip(skip).take(bots) {
-                    let Some(pid) = PeerId::from_bot_api_dialog_id(n) else { break };
-                    let pref = PeerRef {
-                        id: pid,
-                        auth: PeerAuth::default(),
-                    };
-                    match bs.client.resolve_peer(pref).await {
-                        Ok(peer) => {
-                            let pref = peer
-                                .to_ref()
-                                .await
-                                .map_err(|e| format!("peer ref failed: {e}"))?
-                                .ok_or_else(|| format!("chat `{key}` has no usable peer ref"))?;
-                            tracing::info!(bot = %bs.username, chat = %key, "transfer via bot");
-                            return Ok((
-                                bs.client.clone(),
-                                pref,
-                                Some(bs.username.clone()),
-                                bs.dc_id,
-                                bs.pools.clone(),
-                            ));
+                let mut sessions = Vec::with_capacity(snapshots.len());
+                for (client, username) in snapshots {
+                    let (dc_id, pool) = {
+                        let c = client.lock().await;
+                        if !c.is_connected() {
+                            continue;
                         }
-                        Err(e) => {
-                            last_err = format!("bot {}: {e}", bs.username);
+                        (c.dc_id(), c.pool())
+                    };
+                    sessions.push(BotHandle {
+                        client,
+                        username,
+                        dc_id,
+                        pool,
+                    });
+                }
+                if sessions.is_empty() {
+                    tracing::warn!("all bot sessions are disconnected; using user session");
+                } else {
+                    sessions.sort_by(|a, b| a.username.cmp(&b.username));
+                    let count = sessions.len();
+                    let mut last_err = String::new();
+                    for bs in sessions.iter().cycle().skip(skip).take(count) {
+                        // Only ids the bot can actually see resolve: wiring
+                        // makes each bot index the channel, and its session
+                        // file keeps the access hash for later boots.
+                        let mut c = bs.client.lock().await;
+                        match c.resolve_peer(key).await {
+                            Ok(peer) => {
+                                tracing::info!(
+                                    bot = %bs.username,
+                                    chat = %key,
+                                    "transfer via bot"
+                                );
+                                return Ok((
+                                    bs.client.clone(),
+                                    peer,
+                                    Some(bs.username.clone()),
+                                    bs.dc_id,
+                                    bs.pool.clone(),
+                                ));
+                            }
+                            Err(e) => {
+                                last_err = format!("bot {}: {e}", bs.username);
+                            }
                         }
                     }
+                    tracing::warn!("all bots failed for `{chat}` ({last_err}); using user session");
                 }
-                tracing::warn!("all bots failed for `{chat}` ({last_err}); using user session");
             }
         }
-        let client = self.ensure().await?;
+        let client = self.ensure_connected().await?;
         let peer = self.storage_peer(chat).await?;
-        let (dc_id, pools) = self.upload_pools().await?;
-        Ok((client, peer, None, dc_id, pools))
+        let (dc_id, pool) = {
+            let c = client.lock().await;
+            (c.dc_id(), c.pool())
+        };
+        Ok((client, peer, None, dc_id, pool))
     }
 
     /// Invites every configured bot into the given storage chat and
     /// promotes it to admin, so downloads work through the pool.
     #[allow(clippy::too_many_lines)] // a single multi-step async orchestration; splitting adds indirection for no clarity gain
     pub async fn add_bots_to_chat(&self, chat: &str) -> Vec<(String, Result<(), String>)> {
-        // One snapshot pass pairs each bot's live client with its stored
-        // identity, so the whole flow below sees a consistent pool.
-        let bots: Vec<(BotHandle, Option<tl::enums::InputUser>)> = {
+        // A bot's stored identity: client handle, username, account id and
+        // the access hash captured at its own sign-in (often unusable, but
+        // the last resort when username resolution fails).
+        type BotSnapshot = (Arc<Mutex<Client>>, String, i64, Option<i64>);
+        let snapshots: Vec<BotSnapshot> = {
             let st = self.st.lock().await;
             st.bots
                 .values()
                 .map(|b| {
                     (
-                        BotHandle {
-                            client: b.conn.client.clone(),
-                            username: b.username.clone(),
-                            dc_id: b.conn.dc_id,
-                            pools: b.conn.all_pools().cloned().collect(),
-                        },
-                        b.access_hash.map(|h| {
-                            tl::enums::InputUser::User(tl::types::InputUser {
-                                user_id: b.id,
-                                access_hash: h,
-                            })
-                        }),
+                        b.conn.client.clone(),
+                        b.username.clone(),
+                        b.id,
+                        b.access_hash,
                     )
                 })
                 .collect()
         };
+        let mut bots: Vec<(BotHandle, Option<InputUser>)> = Vec::with_capacity(snapshots.len());
+        for (client, username, id, hash) in snapshots {
+            let (dc_id, pool) = {
+                let c = client.lock().await;
+                if !c.is_connected() {
+                    continue;
+                }
+                (c.dc_id(), c.pool())
+            };
+            bots.push((
+                BotHandle {
+                    client,
+                    username,
+                    dc_id,
+                    pool,
+                },
+                hash.map(|h| InputUser::User {
+                    user_id: types::UserId(id),
+                    access_hash: types::AccessHash(h),
+                }),
+            ));
+        }
         if bots.is_empty() {
             return Vec::new();
         }
 
-        let Ok(peer_ref) = self.storage_peer(chat).await else {
+        let Ok(peer) = self.storage_peer(chat).await else {
             return bots
                 .into_iter()
                 .map(|(b, _)| (b.username, Err(format!("cannot resolve `{chat}`"))))
                 .collect();
         };
-        let channel_id = peer_ref.id.bare_id_unchecked();
-        let access_hash = peer_ref.auth.hash();
-        let input_channel = tl::enums::InputChannel::Channel(tl::types::InputChannel {
+        let InputPeer::Channel {
             channel_id,
             access_hash,
-        });
+        } = peer
+        else {
+            return bots
+                .into_iter()
+                .map(|(b, _)| {
+                    (b.username, Err(format!("`{chat}` is not a channel; bots cannot be wired into it")))
+                })
+                .collect();
+        };
+        let input_channel = InputChannel::Channel {
+            channel_id,
+            access_hash,
+        };
 
         // The bot's InputUser must be valid from THIS account's view. The
         // hash captured during the bot's own sign-in often is not (it can
         // even be 0), which makes channels.inviteToChannel answer
         // USER_ID_INVALID — so resolve each bot by username here, through
         // the user client, right before inviting.
-        let st = self.st.lock().await;
-        let user_client = st.conn.as_ref().map(|c| c.client.clone());
-        drop(st);
+        let user_client = {
+            let st = self.st.lock().await;
+            st.conn.as_ref().map(|c| c.client.clone())
+        };
 
         let Some(user_client) = user_client else {
             return bots
@@ -216,35 +283,33 @@ impl TgManager {
         for (bot, stored_user) in bots {
             let username = bot.username.clone();
             let res = (|| async {
-                let input_user = match user_client.resolve_username(&username).await {
-                    Ok(Some(peer)) => match peer {
-                        grammers_client::peer::Peer::User(wrapped) => match wrapped.raw {
-                            tl::enums::User::User(u) => {
-                                tl::enums::InputUser::User(tl::types::InputUser {
-                                    user_id: u.id,
-                                    access_hash: u.access_hash.unwrap_or(0),
-                                })
-                            }
-                            tl::enums::User::Empty(_) => stored_user.clone().ok_or_else(|| {
-                                format!("bot @{username} resolved to an empty account")
-                            })?,
+                let input_user = {
+                    let mut uc = user_client.lock().await;
+                    match uc.resolve_username(&username).await {
+                        Ok(InputPeer::User {
+                            user_id,
+                            access_hash,
+                        }) => InputUser::User {
+                            user_id,
+                            access_hash,
                         },
-                        _ => stored_user
-                            .clone()
-                            .ok_or_else(|| format!("@{username} is not a user account"))?,
-                    },
-                    Ok(None) => stored_user.clone().ok_or_else(|| {
-                        format!(
-                            "bot @{username} not found — open a chat with it once in Telegram first"
-                        )
-                    })?,
-                    Err(e) => return Err(friendly(format!("resolve failed: {e}"))),
+                        Ok(other) => {
+                            let _ = other;
+                            stored_user.clone().ok_or_else(|| {
+                                format!("@{username} resolved to a non-user account")
+                            })?
+                        }
+                        // Unresolvable usually means the account never talked
+                        // to the bot; the stored hash is the last resort.
+                        Err(e) => stored_user.clone().ok_or_else(|| {
+                            format!("bot @{username} not found — open a chat with it once in Telegram first ({e})")
+                        })?,
+                    }
                 };
                 match user_client
-                    .invoke(&tl::functions::channels::InviteToChannel {
-                        channel: input_channel.clone(),
-                        users: vec![input_user.clone()],
-                    })
+                    .lock()
+                    .await
+                    .invite_to_channel(&input_channel, std::slice::from_ref(&input_user))
                     .await
                 {
                     Ok(_) => Ok(()),
@@ -266,33 +331,12 @@ impl TgManager {
                         }
                     }
                 }?;
+                // post_messages (flags.1) + invite_users (flags.5): enough
+                // for the bot to post uploads and stay invitable.
                 user_client
-                    .invoke(&tl::functions::channels::EditAdmin {
-                        channel: input_channel.clone(),
-                        user_id: input_user,
-                        admin_rights: tl::enums::ChatAdminRights::Rights(
-                            tl::types::ChatAdminRights {
-                                change_info: false,
-                                post_messages: true,
-                                edit_messages: false,
-                                delete_messages: false,
-                                ban_users: false,
-                                invite_users: true,
-                                pin_messages: false,
-                                add_admins: false,
-                                anonymous: false,
-                                manage_call: false,
-                                other: false,
-                                manage_topics: false,
-                                post_stories: false,
-                                edit_stories: false,
-                                delete_stories: false,
-                                manage_direct_messages: false,
-                                manage_ranks: false,
-                            },
-                        ),
-                        rank: Some("storage".to_string()),
-                    })
+                    .lock()
+                    .await
+                    .edit_admin(&input_channel, &input_user, (1 << 1) | (1 << 5), "storage")
                     .await
                     .map_err(|e| friendly(format!("promoting failed: {e}")))?;
 
@@ -303,9 +347,9 @@ impl TgManager {
                 // never reaches the bot's cache on its own — make the bot
                 // index it once now, while the membership is brand new.
                 bot.client
-                    .invoke(&tl::functions::channels::GetChannels {
-                        id: vec![input_channel.clone()],
-                    })
+                    .lock()
+                    .await
+                    .get_channels(std::slice::from_ref(&input_channel))
                     .await
                     .map_err(|e| {
                         format!("wired, but @{username} could not index the channel: {e}")

@@ -101,7 +101,8 @@ pub async fn upload_file(
     let state = crate::state::get();
     let tg = state.tg(uid).await?;
 
-    // grammers needs the exact byte count up front; the client provides it.
+    // The Telegram uploader needs the exact byte count up front; the
+    // client provides it.
     let declared: u64 = headers
         .get("x-file-size")
         .and_then(|v| v.to_str().ok())

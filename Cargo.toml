@@ -12,8 +12,7 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.23"
 bytes = "1"
 futures = "0.3"
-grammers-client = { git = "https://github.com/Lebenoa/grammers", subdir = "grammers-client" }
-grammers-session = { version = "0.10", features = ["sqlite-storage"] }
+mtprsto = { path = "../mtprsto" }
 hex = "0.4"
 hmac = "0.13"
 # Still-image decode, AVIF encode in-process (chosen over JPEG/WebP in a

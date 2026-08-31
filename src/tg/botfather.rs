@@ -1,26 +1,21 @@
-use grammers_client::Client;
-use grammers_client::message::InputMessage;
-use grammers_client::tl;
+use mtprsto::client::Client;
+use mtprsto::rpc;
+use mtprsto::types::{IncomingReplyMarkup, KeyboardButtonKind, Message};
 
-use super::{PeerRef, TgManager, bot_token_regex, friendly};
+use super::{PeerRef, TgManager, bot_token_regex, friendly, last_messages, send_text};
 
 impl TgManager {
     /// Sends `text` to @`BotFather` and returns its reply text. The
     /// conversation state lives on `BotFather`'s side of this account's chat,
     /// so every signed-in account can run its own wizard through this one
     /// relay primitive without any state on our side.
-    #[allow(clippy::large_futures)] // the send_message future is awaited directly; boxing adds no value
     pub async fn botfather_send(&self, text: &str) -> Result<String, String> {
-        let client = self.ensure().await?;
+        let client = self.ensure_connected().await?;
         let peer = self.storage_peer("botfather").await?;
-        let sent = client
-            .send_message(peer, InputMessage::new().text(text))
-            .await
-            .map_err(|e| friendly(format!("botfather send failed: {e}")))?;
+        let sent = send_text(&*client.lock().await, &peer, text).await?;
 
         // BotFather usually answers within a second; poll the dialog for a
-        // newer incoming message. Give up after ~8s so the HTTP request
-        // cannot hang.
+        // newer message. Give up after ~8s so the HTTP request cannot hang.
         for attempt in 0u32..16 {
             tokio::time::sleep(std::time::Duration::from_millis(if attempt < 4 {
                 300
@@ -28,10 +23,9 @@ impl TgManager {
                 600
             }))
             .await;
-            let mut it = client.iter_messages(peer).limit(1);
-            if let Ok(Some(msg)) = it.next().await
-                && !msg.outgoing()
-                && msg.id() > sent.id()
+            let msgs = last_messages(&*client.lock().await, &peer, 1).await?;
+            if let Some(msg) = msgs.first()
+                && msg.id().0 > sent.0
             {
                 return Ok(msg.text().to_string());
             }
@@ -39,20 +33,21 @@ impl TgManager {
         Err("BotFather did not answer — try again shortly".to_string())
     }
 
-    /// Flat callback-button list `(text, data)` of a reply markup — empty
-    /// for plain-text messages and other markup kinds.
-    fn markup_buttons(rm: Option<tl::enums::ReplyMarkup>) -> Vec<(String, Vec<u8>)> {
-        let Some(tl::enums::ReplyMarkup::ReplyInlineMarkup(markup)) = rm else {
+    /// Flat callback-button list `(text, data)` of a message's reply markup —
+    /// empty for plain-text messages and other markup kinds.
+    fn markup_buttons(msg: &Message) -> Vec<(String, Vec<u8>)> {
+        let Message::Message(full) = msg else {
             return Vec::new();
         };
-        markup
-            .rows
-            .into_iter()
-            .flat_map(|row| match row {
-                tl::enums::KeyboardButtonRow::Row(r) => r.buttons,
-            })
+        let Some(IncomingReplyMarkup::Inline { rows }) = full.reply_markup.as_ref() else {
+            return Vec::new();
+        };
+        rows.iter()
+            .flat_map(|row| row.buttons.iter())
             .filter_map(|b| match b {
-                tl::enums::KeyboardButton::Callback(cb) => Some((cb.text, cb.data)),
+                KeyboardButtonKind::Callback { text, data } => {
+                    Some((text.clone(), data.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -62,25 +57,25 @@ impl TgManager {
     /// `BotFather` chat, whatever direction it has.
     async fn last_buttons(
         client: &Client,
-        peer_ref: PeerRef,
+        peer_ref: &PeerRef,
     ) -> Result<(i32, Vec<(String, Vec<u8>)>), String> {
-        let mut it = client.iter_messages(peer_ref).limit(1);
-        if let Ok(Some(msg)) = it.next().await {
-            let msg_id = msg.id();
-            return Ok((msg_id, Self::markup_buttons(msg.reply_markup())));
-        }
-        Err("BotFather did not answer".into())
+        let msgs = last_messages(client, peer_ref, 1).await?;
+        let Some(msg) = msgs.first() else {
+            return Err("BotFather did not answer".into());
+        };
+        let msg_id = msg.id().0 as i32;
+        Ok((msg_id, Self::markup_buttons(msg)))
     }
 
-    /// Waits for `BotFather`'s first INCOMING message newer than `after_id`
-    /// and returns its id plus callback buttons — his answer to a command.
+    /// Waits for `BotFather`'s first message newer than `after_id` and
+    /// returns its id plus callback buttons — his answer to a command.
     /// Polling is required: the reply arrives asynchronously, and reading
     /// too early would see our own outgoing request (which carries no
     /// keyboard) and mistake it for an empty answer. A text-only reply
     /// (e.g. "no bots yet") returns `Ok` with no buttons; silence errors.
     async fn await_reply_buttons(
         client: &Client,
-        peer_ref: PeerRef,
+        peer_ref: &PeerRef,
         after_id: i32,
     ) -> Result<(i32, Vec<(String, Vec<u8>)>), String> {
         for attempt in 0u32..16 {
@@ -90,13 +85,12 @@ impl TgManager {
                 600
             }))
             .await;
-            let mut it = client.iter_messages(peer_ref).limit(1);
-            if let Ok(Some(msg)) = it.next().await
-                && !msg.outgoing()
-                && msg.id() > after_id
+            let msgs = last_messages(client, peer_ref, 1).await?;
+            if let Some(msg) = msgs.first()
+                && msg.id().0 > i64::from(after_id)
             {
-                let msg_id = msg.id();
-                return Ok((msg_id, Self::markup_buttons(msg.reply_markup())));
+                let msg_id = msg.id().0 as i32;
+                return Ok((msg_id, Self::markup_buttons(msg)));
             }
         }
         Err("BotFather did not answer — try again shortly".into())
@@ -107,7 +101,7 @@ impl TgManager {
     async fn press_botfather_button(
         &self,
         client: &Client,
-        peer_ref: PeerRef,
+        peer_ref: &PeerRef,
         needle: &str,
     ) -> Result<(), String> {
         let (msg_id, buttons) = Self::last_buttons(client, peer_ref).await?;
@@ -118,42 +112,18 @@ impl TgManager {
         Self::press_callback(client, peer_ref, msg_id, &data).await
     }
 
-    /// Raw TL callback press — grammers has no click helper. `BotFather`
-    /// answers by editing the same message, so `msg_id` stays valid across
-    /// pages of a paginated menu.
+    /// Raw `messages.getBotCallbackAnswer` press. `BotFather` answers by
+    /// editing the same message, so `msg_id` stays valid across pages of a
+    /// paginated menu.
     async fn press_callback(
         client: &Client,
-        peer_ref: PeerRef,
+        peer_ref: &PeerRef,
         msg_id: i32,
         data: &[u8],
     ) -> Result<(), String> {
-        let peer = client
-            .resolve_peer(peer_ref)
-            .await
-            .map_err(|e| format!("resolve botfather failed: {e}"))?;
-        let input_peer = match &peer {
-            grammers_client::peer::Peer::User(u) => match u.raw {
-                tl::enums::User::User(ref usr) => {
-                    tl::enums::InputPeer::User(tl::types::InputPeerUser {
-                        user_id: usr.id,
-                        access_hash: usr.access_hash.unwrap_or(0),
-                    })
-                }
-                tl::enums::User::Empty(_) => {
-                    return Err("botfather resolved to an empty account".into());
-                }
-            },
-            _ => return Err("botfather is not a user".into()),
-        };
-        let req = tl::functions::messages::GetBotCallbackAnswer {
-            game: false,
-            peer: input_peer,
-            msg_id,
-            data: Some(data.to_vec()),
-            password: None,
-        };
+        let req = rpc::build_get_bot_callback_answer(peer_ref, msg_id, data);
         client
-            .invoke(&req)
+            .invoke_raw(req)
             .await
             .map_err(|e| friendly(format!("button press failed: {e}")))?;
         Ok(())
@@ -163,18 +133,14 @@ impl TgManager {
     /// menu (the button labels are the bot names). Waits for his reply,
     /// skips menu chrome such as pagination arrows and page counters, and
     /// follows `»` so owners of many bots get every page, not just one.
-    #[allow(clippy::large_futures)] // the send_message future is awaited directly; boxing adds no value
     pub async fn botfather_my_bots(&self) -> Result<Vec<String>, String> {
         const MAX_PAGES: usize = 12;
 
-        let client = self.ensure().await?;
+        let client = self.ensure_connected().await?;
         let peer_ref = self.storage_peer("botfather").await?;
-        let sent = client
-            .send_message(peer_ref, InputMessage::new().text("/mybots"))
-            .await
-            .map_err(|e| friendly(format!("botfather send failed: {e}")))?;
+        let sent = send_text(&*client.lock().await, &peer_ref, "/mybots").await?;
         let (mut msg_id, mut buttons) =
-            Self::await_reply_buttons(&client, peer_ref, sent.id()).await?;
+            Self::await_reply_buttons(&*client.lock().await, &peer_ref, sent.0 as i32).await?;
 
         let mut names: Vec<String> = Vec::new();
         let mut listed = std::collections::HashSet::new();
@@ -193,12 +159,14 @@ impl TgManager {
             if !visited.insert(data.clone()) {
                 break;
             }
-            if let Err(e) = Self::press_callback(&client, peer_ref, msg_id, data).await {
+            if let Err(e) = Self::press_callback(&*client.lock().await, &peer_ref, msg_id, data)
+                .await
+            {
                 tracing::warn!("botfather /mybots stopped at a page boundary: {e}");
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-            let (id, next) = Self::last_buttons(&client, peer_ref).await?;
+            let (id, next) = Self::last_buttons(&*client.lock().await, &peer_ref).await?;
             msg_id = id;
             buttons = next;
         }
@@ -208,23 +176,20 @@ impl TgManager {
     /// Retrieves the API token for `bot` by walking @`BotFather`'s menus:
     /// /mybots → pick the bot → "API Token". The token arrives as plain
     /// text in the follow-up message.
-    #[allow(clippy::large_futures)] // the send_message future is awaited directly; boxing adds no value
     pub async fn botfather_bot_token(&self, bot: &str) -> Result<String, String> {
-        let client = self.ensure().await?;
+        let client = self.ensure_connected().await?;
         let peer_ref = self.storage_peer("botfather").await?;
-        client
-            .send_message(peer_ref, InputMessage::new().text("/mybots"))
-            .await
-            .map_err(|e| friendly(format!("botfather send failed: {e}")))?;
+        send_text(&*client.lock().await, &peer_ref, "/mybots").await?;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        self.press_botfather_button(&client, peer_ref, bot).await?;
+        self.press_botfather_button(&*client.lock().await, &peer_ref, bot)
+            .await?;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        self.press_botfather_button(&client, peer_ref, "API Token")
+        self.press_botfather_button(&*client.lock().await, &peer_ref, "API Token")
             .await?;
 
-        // The token lands in a fresh incoming message; poll for it.
-        // Regex compiled once; a None here means the pattern itself is
-        // broken, so bail out with an error instead of matching anything.
+        // The token lands in a fresh message; poll for it. Regex compiled
+        // once; a None here means the pattern itself is broken, so bail out
+        // with an error instead of matching anything.
         let Some(token_re) = bot_token_regex() else {
             return Err("bot token matcher unavailable".into());
         };
@@ -235,12 +200,9 @@ impl TgManager {
                 600
             }))
             .await;
-            let mut it = client.iter_messages(peer_ref).limit(3);
-            while let Ok(Some(msg)) = it.next().await {
-                if let Some(m) = (!msg.outgoing())
-                    .then(|| token_re.find(msg.text()))
-                    .flatten()
-                {
+            let msgs = last_messages(&*client.lock().await, &peer_ref, 3).await?;
+            for msg in &msgs {
+                if let Some(m) = token_re.find(msg.text()) {
                     return Ok(m.as_str().to_string());
                 }
             }

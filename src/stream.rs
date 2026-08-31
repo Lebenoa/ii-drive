@@ -1,46 +1,64 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::{Stream, unfold};
+use mtprsto::client::Client;
+use mtprsto::pool::SenderPool;
+use mtprsto::rpc;
+use mtprsto::types::{self, InputPeer, MsgId};
 
-use crate::tg::{PeerRef, is_file_reference_error};
+use crate::tg::{TgManager, get_messages_by_id, is_file_reference_error, message_document};
 
-/// Telegram large-file chunk size (512 KiB = `MAX_CHUNK_SIZE`). Must be a
-/// multiple of the protocol minimum; used to compute skip offsets on retry.
-const CHUNK: i32 = 512 * 1024;
+/// `upload.getFile` alignment: Telegram requires offsets divisible by
+/// 4 KiB. A range start in the middle of a block aligns down, and the
+/// prefix bytes are dropped on the wire instead of being served.
+const ALIGN: u64 = 4096;
+/// Per-request chunk. 1 MiB is the server's cap per `upload.getFile`.
+const CHUNK: usize = 1024 * 1024;
 
-/// A byte stream backed by `iter_download` that transparently refetches the
-/// message when the stored `file_reference` expires mid-stream, resuming from
-/// the exact offset already served. Serves from byte `start` (HTTP Range
-/// support): whole chunks are skipped server-side on Telegram, the
-/// sub-chunk remainder is discarded on the wire.
+/// A byte stream backed by `upload.getFile` that transparently refetches
+/// the message when the stored `file_reference` expires mid-stream,
+/// resuming from the exact offset already served. Serves from byte `start`
+/// (HTTP Range support): whole blocks are skipped server-side on Telegram,
+/// the sub-block remainder is discarded on the wire.
 #[allow(
     clippy::arithmetic_side_effects, // byte offsets bounded by the file size and cap
-    clippy::as_conversions,          // i32/i64 chunk-offset bridging, bounded offset values
-    clippy::cast_possible_truncation, // chunk indices always fit i32 (Telegram caps docs)
-    clippy::cast_possible_wrap,       // u64 offset to i64: file sizes < i64::MAX
-    clippy::indexing_slicing,         // slice/len arithmetic on the validated chunk buffer
+    clippy::as_conversions,          // u64 offset to i64: file sizes < i64::MAX
+    clippy::indexing_slicing,        // slice/len arithmetic on the validated chunk buffer
 )]
 pub async fn file_stream_from(
-    tg: &crate::tg::TgManager,
+    tg: &TgManager,
     message_id: i32,
     chat: &str,
     start: u64,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
-    let (client, peer, _bot, _dc_id, _pools) = tg.pool_target(chat).await?;
+    let (client, peer, _bot, _dc_id, pool) = tg.pool_target(chat).await?;
 
     let st = StreamState {
         client,
         peer,
+        pool,
         msg_id: message_id,
-        iter: None,
-        pos: start.cast_signed(),
-        discard: start % CHUNK as u64,
+        loc: None,
+        offset: start - start % ALIGN,
+        discard: start % ALIGN,
+        done: false,
     };
 
     Ok(unfold(st, |mut st| async move {
         loop {
-            if st.iter.is_none() {
-                let msgs = match st.client.get_messages_by_id(st.peer, &[st.msg_id]).await {
+            if st.done {
+                return None;
+            }
+            if st.loc.is_none() {
+                // Fetch (or refetch) the message: its document carries the
+                // fresh file_reference every download needs.
+                let msgs = {
+                    let c = st.client.lock().await;
+                    get_messages_by_id(&c, &st.peer, &[MsgId(i64::from(st.msg_id))]).await
+                };
+                let msgs = match msgs {
                     Ok(m) => m,
                     Err(e) => {
                         return Some((
@@ -49,7 +67,7 @@ pub async fn file_stream_from(
                         ));
                     }
                 };
-                let Some(msg) = msgs.into_iter().next().flatten() else {
+                let Some(msg) = msgs.into_iter().next() else {
                     return Some((
                         Err(std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -58,53 +76,57 @@ pub async fn file_stream_from(
                         st,
                     ));
                 };
-                let Some(grammers_client::media::Media::Document(doc)) = msg.media() else {
+                let Some(doc) = message_document(&msg) else {
                     return Some((
                         Err(std::io::Error::other("message has no document media")),
                         st,
                     ));
                 };
-                let mut it = st.client.iter_download(&doc).chunk_size(CHUNK);
-                let chunks = st.pos / i64::from(CHUNK);
-                // chunk count = stream position / 512KiB. Telegram caps a
-                // single document at ~2 GiB, so this always fits i32.
-                let skipped = i32::try_from(chunks).unwrap_or(0);
-                if skipped > 0 {
-                    it = it.skip_chunks(skipped);
-                }
-                st.iter = Some(it);
+                let Some(loc) = doc.location() else {
+                    return Some((
+                        Err(std::io::Error::other("document is a placeholder with no media")),
+                        st,
+                    ));
+                };
+                st.loc = Some(loc);
             }
 
-            // The block above guarantees the iterator exists; fall through
-            // to a stream error rather than panicking if that invariant
-            // ever breaks.
-            let Some(iter) = st.iter.as_mut() else {
-                return Some((Err(std::io::Error::other("download iterator missing")), st));
+            let Some(loc) = st.loc.as_ref() else {
+                return Some((
+                    Err(std::io::Error::other("download location missing")),
+                    st,
+                ));
             };
-            match iter.next().await {
-                Ok(Some(chunk)) => {
-                    let mut chunk = Bytes::from(chunk);
-                    if st.discard > 0 && !chunk.is_empty() {
-                        let d = usize::try_from(st.discard).unwrap_or(chunk.len());
-                        chunk = chunk.slice(d..);
-                        st.discard -= d as u64;
-                        if chunk.is_empty() {
-                            // The entire chunk was consumed skipping the
-                            // range prefix — read the next one rather than
-                            // yield an empty Bytes (which the caller treats
-                            // as EOF). Not needless: `continue` is followed
-                            // by a `return` below.
-                            #[allow(clippy::needless_continue)]
-                            continue;
-                        }
+            let payload = rpc::build_get_file(loc, st.offset.cast_signed(), CHUNK as i32);
+            // Ok(None) means "file reference expired — location rebuilt,
+            // fetch again at the same offset".
+            let bytes = match st.pool.send_rpc(&payload).await {
+                Ok(raw) => match mtprsto::file::parse_get_file(&raw) {
+                    Ok(mtprsto::file::GetFile::File { bytes, .. }) => Some(bytes),
+                    Ok(_) => {
+                        return Some((
+                            Err(std::io::Error::other(
+                                "file is served from a CDN, which is not supported",
+                            )),
+                            st,
+                        ));
                     }
-                    st.pos += chunk.len() as i64;
-                    return Some((Ok(chunk), st));
-                }
-                Ok(None) => return None,
+                    Err(e) if is_file_reference_error(&e) => {
+                        tracing::info!("file reference expired mid-download; refetching");
+                        st.loc = None;
+                        None
+                    }
+                    Err(e) => {
+                        return Some((
+                            Err(std::io::Error::other(format!("download failed: {e}"))),
+                            st,
+                        ));
+                    }
+                },
                 Err(e) if is_file_reference_error(&e) => {
                     tracing::info!("file reference expired mid-download; refetching");
-                    st.iter = None;
+                    st.loc = None;
+                    None
                 }
                 Err(e) => {
                     return Some((
@@ -112,19 +134,49 @@ pub async fn file_stream_from(
                         st,
                     ));
                 }
+            };
+            let Some(bytes) = bytes else { continue };
+            if bytes.is_empty() {
+                // Nothing at this offset: the file is over.
+                return None;
             }
+            let raw_len = bytes.len();
+            // A short read means EOF: serve this chunk, then stop.
+            if raw_len < CHUNK {
+                st.done = true;
+            }
+            st.offset += raw_len as u64;
+            let mut chunk = Bytes::from(bytes);
+            if st.discard > 0 {
+                let d = usize::try_from(st.discard)
+                    .unwrap_or(chunk.len())
+                    .min(chunk.len());
+                chunk = chunk.slice(d..);
+                st.discard -= d as u64;
+                if chunk.is_empty() {
+                    // The entire chunk was consumed skipping the range
+                    // prefix — fetch the next one rather than yield an
+                    // empty Bytes (which the caller treats as EOF).
+                    continue;
+                }
+            }
+            return Some((Ok(chunk), st));
         }
     }))
 }
 
 struct StreamState {
-    client: grammers_client::Client,
-    peer: PeerRef,
+    client: Arc<tokio::sync::Mutex<Client>>,
+    peer: InputPeer,
+    pool: Arc<SenderPool>,
     msg_id: i32,
-    iter: Option<grammers_client::client::DownloadIter>,
-    pos: i64,
-    /// Bytes still to drop from the first served chunk (start % CHUNK).
+    /// Download location rebuilt from the message each time the file
+    /// reference goes stale.
+    loc: Option<types::FileLocation>,
+    offset: u64,
+    /// Bytes still to drop from the first served chunk (start % ALIGN).
     discard: u64,
+    done: bool,
 }
 
 /// Caps a byte stream at `limit` bytes: Range responses must send exactly
@@ -160,9 +212,6 @@ where
 
 type BoxedPart = std::pin::Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>;
 
-/// Serves a multi-part file as one contiguous byte stream: parts are fetched
-/// in order, each through `file_stream` (which itself resumes on expired
-/// file references), so the client sees a seamless download.
 /// Serves a multi-part file as one contiguous byte stream, optionally from
 /// byte `start` across part boundaries (HTTP Range support). Parts are
 /// fetched in order, each through `file_stream` (which itself resumes on
@@ -172,7 +221,7 @@ type BoxedPart = std::pin::Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + S
     clippy::indexing_slicing, // parts[idx] has an explicit idx < parts.len() guard
 )]
 pub async fn parts_stream_from(
-    tg: std::sync::Arc<crate::tg::TgManager>,
+    tg: Arc<TgManager>,
     parts: Vec<crate::db::FilePart>,
     start: u64,
 ) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
@@ -188,8 +237,8 @@ pub async fn parts_stream_from(
     if idx >= parts.len() {
         return Err("range start is beyond the file".into());
     }
-    let key: Option<std::sync::Arc<crate::crypt::Key>> =
-        crate::config::get().crypt_key_unconditional().map(std::sync::Arc::new);
+    let key: Option<Arc<crate::crypt::Key>> =
+        crate::config::get().crypt_key_unconditional().map(Arc::new);
     let cur: BoxedPart = part_stream(&tg, &parts, idx, skip, key.as_deref()).await?;
     let st = PartsState {
         tg,
@@ -217,11 +266,11 @@ pub async fn parts_stream_from(
 }
 
 struct PartsState {
-    tg: std::sync::Arc<crate::tg::TgManager>,
+    tg: Arc<TgManager>,
     parts: Vec<crate::db::FilePart>,
     idx: usize,
     cur: Option<BoxedPart>,
-    key: Option<std::sync::Arc<crate::crypt::Key>>,
+    key: Option<Arc<crate::crypt::Key>>,
 }
 
 /// Builds the byte stream for one part, decrypting it when the part carries
@@ -237,7 +286,7 @@ struct PartsState {
     clippy::indexing_slicing,        // parts[idx] from a caller-verified index
 )]
 async fn part_stream(
-    tg: &crate::tg::TgManager,
+    tg: &TgManager,
     parts: &[crate::db::FilePart],
     idx: usize,
     skip: u64,
@@ -246,7 +295,9 @@ async fn part_stream(
     let p = &parts[idx];
     let Some(nonce) = p.nonce.as_deref().and_then(crate::crypt::nonce_from_b64) else {
         // Plaintext part: serve the stored bytes as-is.
-        return Ok(Box::pin(file_stream_from(tg, p.message_id, &p.chat, skip).await?));
+        return Ok(Box::pin(
+            file_stream_from(tg, p.message_id, &p.chat, skip).await?,
+        ));
     };
     // Encrypted part — the stored bytes are a container. Decryption needs a
     // key; without one the operator has disabled or removed the key while

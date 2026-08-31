@@ -397,7 +397,7 @@ cd web && nub run dev  # Vite dev server with HMR (proxies /api to :8080) — `n
 ## Technology Stack
 
 - **Backend:** Rust, [axum](https://github.com/tokio-rs/axum) +
-  [grammers](https://github.com/Lonami/grammers) (MTProto), embedded
+  mtprsto (MTProto), embedded
   [SurrealDB](https://surrealdb.com) (SurrealKv) for metadata.
 - **Frontend:** [SvelteKit](https://kit.svelte.dev) (Svelte 5) with
   `adapter-static` — a pure-SPA build served by the Rust server from the
