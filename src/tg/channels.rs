@@ -1,10 +1,8 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use mtprsto::client::Client;
 use mtprsto::rpc;
 use mtprsto::types::{self, Chat, Dialogs, InputPeer};
-use tokio::sync::Mutex;
 
 use super::{ChannelInfo, PeerRef, TgManager, friendly};
 
@@ -22,21 +20,20 @@ impl TgManager {
             }
         }
 
-        let peer = if key.is_empty()
-            || key.eq_ignore_ascii_case("me")
-            || key.eq_ignore_ascii_case("self")
-        {
-            InputPeer::Self_
-        } else {
-            let client = self.ensure_connected().await?;
-            // mtprsto resolves numeric bot-api ids ("-100…"), plain ids and
-            // usernames (with or without the "@") against the session's
-            // access-hash cache and channels.getChannels.
-            let mut c = client.lock().await;
-            c.resolve_peer(key)
-                .await
-                .map_err(|e| friendly(format!("cannot resolve chat {key}: {e}")))?
-        };
+        let peer =
+            if key.is_empty() || key.eq_ignore_ascii_case("me") || key.eq_ignore_ascii_case("self")
+            {
+                InputPeer::Self_
+            } else {
+                let client = self.ensure_connected().await?;
+                // mtprsto resolves numeric bot-api ids ("-100…"), plain ids and
+                // usernames (with or without the "@") against the session's
+                // access-hash cache and channels.getChannels.
+                client
+                    .resolve_peer(key)
+                    .await
+                    .map_err(|e| friendly(format!("cannot resolve chat {key}: {e}")))?
+            };
 
         self.st.lock().await.peers.insert(cache_key, peer.clone());
         Ok(peer)
@@ -62,7 +59,7 @@ impl TgManager {
     /// one dialogs folder via raw `messages.getDialogs`, paginating until
     /// exhausted. Basic groups are skipped: bots cannot be wired into them.
     async fn collect_folder(
-        client: &Arc<Mutex<Client>>,
+        client: &Client,
         folder_id: Option<i32>,
         out: &mut Vec<ChannelInfo>,
         seen: &mut HashSet<String>,
@@ -72,14 +69,12 @@ impl TgManager {
         let mut offset_peer = InputPeer::InputPeerEmpty;
 
         for _page in 0..20 {
-            let resp = {
-                let c = client.lock().await;
-                let payload =
-                    rpc::build_get_dialogs(folder_id, offset_date, offset_id, &offset_peer, 100);
-                c.invoke_raw(payload)
-                    .await
-                    .map_err(|e| friendly(format!("listing dialogs failed: {e}")))?
-            };
+            let payload =
+                rpc::build_get_dialogs(folder_id, offset_date, offset_id, &offset_peer, 100);
+            let resp = client
+                .invoke_raw(payload)
+                .await
+                .map_err(|e| friendly(format!("listing dialogs failed: {e}")))?;
             let dialogs = Dialogs::parse(&resp).map_err(|e| e.to_string())?;
 
             Self::harvest_chats(&dialogs.chats, out, seen);
@@ -189,7 +184,9 @@ impl TgManager {
     fn input_peer_for(raw_id: i64, chats: &[Chat]) -> InputPeer {
         for c in chats {
             match c {
-                Chat::Channel { id, access_hash, .. } if id.0 == raw_id => {
+                Chat::Channel {
+                    id, access_hash, ..
+                } if id.0 == raw_id => {
                     return InputPeer::Channel {
                         channel_id: types::ChannelId(id.0),
                         access_hash: types::AccessHash(access_hash.map_or(0, |h| h.0)),
@@ -213,8 +210,6 @@ impl TgManager {
         // The wrapper also persists the fresh channel's access hash, which
         // is exactly what later "-100…" id resolution needs.
         let chats = client
-            .lock()
-            .await
             .create_channel(title, about, true, false)
             .await
             .map_err(|e| friendly(format!("creating channel failed: {e}")))?;

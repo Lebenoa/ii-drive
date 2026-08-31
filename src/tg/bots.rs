@@ -3,7 +3,6 @@ use std::sync::Arc;
 use mtprsto::client::Client;
 use mtprsto::pool::SenderPool;
 use mtprsto::types::{self, InputChannel, InputPeer, InputUser};
-use tokio::sync::Mutex;
 
 use super::{BotHandle, BotSession, PeerRef, TgManager, friendly};
 
@@ -17,9 +16,6 @@ impl TgManager {
 
     /// Signs a bot in (or restores its persisted session) and adds it to
     /// the download pool.
-    // The client guard must span connect + authorize_bot: signing in
-    // twice concurrently would race the bot's own auth state.
-    #[allow(clippy::significant_drop_tightening)]
     pub async fn configure_bot(&self, token: &str) -> Result<(String, i64), String> {
         if !self.cfg.tg_configured() {
             return Err(
@@ -28,20 +24,19 @@ impl TgManager {
         }
         let key = self.bot_session_key(token);
         let conn = self.open_conn(&key, crate::db::SessionKind::Bot).await?;
-        {
-            let mut c = conn.client.lock().await;
-            c.connect()
-                .await
-                .map_err(|e| friendly(format!("bot connection failed: {e}")))?;
-            // mtprsto handles bot home-DC migration inside authorize_bot
-            // and persists the bot's user id, so restarts skip re-auth.
-            c.authorize_bot(token)
-                .await
-                .map_err(|e| friendly(format!("bot sign-in failed: {e}")))?;
-        }
+        conn.client
+            .connect()
+            .await
+            .map_err(|e| friendly(format!("bot connection failed: {e}")))?;
+        // mtprsto handles bot home-DC migration inside authorize_bot
+        // and persists the bot's user id, so restarts skip re-auth.
+        conn.client
+            .authorize_bot(token)
+            .await
+            .map_err(|e| friendly(format!("bot sign-in failed: {e}")))?;
         let (id, access_hash, username) = {
-            let c = conn.client.lock().await;
-            match c
+            match conn
+                .client
                 .get_me()
                 .await
                 .map_err(|e| friendly(format!("bot profile failed: {e}")))?
@@ -106,22 +101,10 @@ impl TgManager {
     /// tuple. The pool is bound to the same session as the client, so
     /// file ids uploaded through it are valid for the follow-up send,
     /// whichever target was picked.
-    // The bot-client guard must span the connectivity check and the
-    // dc/pool snapshot, or a bot could drop its connection in between.
-    #[allow(clippy::significant_drop_tightening)]
     pub async fn pool_target(
         &self,
         chat: &str,
-    ) -> Result<
-        (
-            Arc<Mutex<Client>>,
-            PeerRef,
-            Option<String>,
-            i32,
-            Arc<SenderPool>,
-        ),
-        String,
-    > {
+    ) -> Result<(Arc<Client>, PeerRef, Option<String>, i32, Arc<SenderPool>), String> {
         let key = chat.trim();
         if key.parse::<i64>().is_ok() {
             let bots = self.st.lock().await.bots.len();
@@ -131,9 +114,9 @@ impl TgManager {
                 #[allow(clippy::arithmetic_side_effects)]
                 let skip = self.next_rotation() % bots;
                 // Snapshot everything we need from the bot sessions
-                // (including their connection pieces, which need a brief
-                // lock each), then rotate without holding any locks.
-                let snapshots: Vec<(Arc<Mutex<Client>>, String)> = {
+                // (including their connection pieces), then rotate
+                // without holding any locks.
+                let snapshots: Vec<(Arc<Client>, String)> = {
                     let st = self.st.lock().await;
                     st.bots
                         .values()
@@ -142,19 +125,16 @@ impl TgManager {
                 };
                 let mut sessions = Vec::with_capacity(snapshots.len());
                 for (client, username) in snapshots {
-                    let (dc_id, pool) = {
-                        let c = client.lock().await;
-                        if !c.is_connected() {
-                            continue;
-                        }
-                        (c.dc_id(), c.pool())
-                    };
-                    sessions.push(BotHandle {
+                    if !client.is_connected() {
+                        continue;
+                    }
+                    let handle = BotHandle {
+                        dc_id: client.dc_id(),
+                        pool: client.pool(),
                         client,
                         username,
-                        dc_id,
-                        pool,
-                    });
+                    };
+                    sessions.push(handle);
                 }
                 if sessions.is_empty() {
                     tracing::warn!("all bot sessions are disconnected; using user session");
@@ -166,8 +146,7 @@ impl TgManager {
                         // Only ids the bot can actually see resolve: wiring
                         // makes each bot index the channel, and its session
                         // file keeps the access hash for later boots.
-                        let mut c = bs.client.lock().await;
-                        match c.resolve_peer(key).await {
+                        match bs.client.resolve_peer(key).await {
                             Ok(peer) => {
                                 tracing::info!(
                                     bot = %bs.username,
@@ -193,11 +172,7 @@ impl TgManager {
         }
         let client = self.ensure_connected().await?;
         let peer = self.storage_peer(chat).await?;
-        let (dc_id, pool) = {
-            let c = client.lock().await;
-            (c.dc_id(), c.pool())
-        };
-        Ok((client, peer, None, dc_id, pool))
+        Ok((client.clone(), peer, None, client.dc_id(), client.pool()))
     }
 
     /// Invites every configured bot into the given storage chat and
@@ -207,7 +182,7 @@ impl TgManager {
         // A bot's stored identity: client handle, username, account id and
         // the access hash captured at its own sign-in (often unusable, but
         // the last resort when username resolution fails).
-        type BotSnapshot = (Arc<Mutex<Client>>, String, i64, Option<i64>);
+        type BotSnapshot = (Arc<Client>, String, i64, Option<i64>);
         let snapshots: Vec<BotSnapshot> = {
             let st = self.st.lock().await;
             st.bots
@@ -224,20 +199,17 @@ impl TgManager {
         };
         let mut bots: Vec<(BotHandle, Option<InputUser>)> = Vec::with_capacity(snapshots.len());
         for (client, username, id, hash) in snapshots {
-            let (dc_id, pool) = {
-                let c = client.lock().await;
-                if !c.is_connected() {
-                    continue;
-                }
-                (c.dc_id(), c.pool())
+            if !client.is_connected() {
+                continue;
+            }
+            let handle = BotHandle {
+                dc_id: client.dc_id(),
+                pool: client.pool(),
+                client,
+                username,
             };
             bots.push((
-                BotHandle {
-                    client,
-                    username,
-                    dc_id,
-                    pool,
-                },
+                handle,
                 hash.map(|h| InputUser::User {
                     user_id: types::UserId(id),
                     access_hash: types::AccessHash(h),
@@ -262,7 +234,12 @@ impl TgManager {
             return bots
                 .into_iter()
                 .map(|(b, _)| {
-                    (b.username, Err(format!("`{chat}` is not a channel; bots cannot be wired into it")))
+                    (
+                        b.username,
+                        Err(format!(
+                            "`{chat}` is not a channel; bots cannot be wired into it"
+                        )),
+                    )
                 })
                 .collect();
         };
@@ -293,8 +270,7 @@ impl TgManager {
             let username = bot.username.clone();
             let res = (|| async {
                 let input_user = {
-                    let mut uc = user_client.lock().await;
-                    match uc.resolve_username(&username).await {
+                    match user_client.resolve_username(&username).await {
                         Ok(InputPeer::User {
                             user_id,
                             access_hash,
@@ -316,8 +292,6 @@ impl TgManager {
                     }
                 };
                 match user_client
-                    .lock()
-                    .await
                     .invite_to_channel(&input_channel, std::slice::from_ref(&input_user))
                     .await
                 {
@@ -343,8 +317,6 @@ impl TgManager {
                 // post_messages (flags.1) + invite_users (flags.5): enough
                 // for the bot to post uploads and stay invitable.
                 user_client
-                    .lock()
-                    .await
                     .edit_admin(&input_channel, &input_user, (1 << 1) | (1 << 5), "storage")
                     .await
                     .map_err(|e| friendly(format!("promoting failed: {e}")))?;
@@ -356,8 +328,6 @@ impl TgManager {
                 // never reaches the bot's cache on its own — make the bot
                 // index it once now, while the membership is brand new.
                 bot.client
-                    .lock()
-                    .await
                     .get_channels(std::slice::from_ref(&input_channel))
                     .await
                     .map_err(|e| {

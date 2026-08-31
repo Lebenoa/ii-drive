@@ -35,9 +35,7 @@ pub(super) struct DbSessions {
 }
 
 /// Runs one async DB call from the synchronous trait surface.
-fn block_on_db<T>(
-    fut: impl std::future::Future<Output = Result<T, String>>,
-) -> mtprsto::Result<T> {
+fn block_on_db<T>(fut: impl std::future::Future<Output = Result<T, String>>) -> mtprsto::Result<T> {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
             .block_on(fut)
@@ -46,13 +44,13 @@ fn block_on_db<T>(
 }
 
 impl DbSessions {
-    pub(super) const fn new(
-        db: Db,
-        key: String,
-        kind: crate::db::SessionKind,
-        owner: i64,
-    ) -> Self {
-        Self { db, key, kind, owner }
+    pub(super) const fn new(db: Db, key: String, kind: crate::db::SessionKind, owner: i64) -> Self {
+        Self {
+            db,
+            key,
+            kind,
+            owner,
+        }
     }
 
     /// Persists `data` as this key's session blob, keeping the row's
@@ -182,7 +180,7 @@ impl TgManager {
             .build()
             .map_err(|e| format!("cannot build telegram client: {e}"))?;
         Ok(Conn {
-            client: Arc::new(Mutex::new(client)),
+            client: Arc::new(client),
         })
     }
 
@@ -199,7 +197,7 @@ impl TgManager {
 
     /// Client for this account; built on first use and cached forever.
     /// Missing credentials are remembered as a deterministic error.
-    pub async fn ensure(&self) -> Result<Arc<Mutex<Client>>, String> {
+    pub async fn ensure(&self) -> Result<Arc<Client>, String> {
         let mut st = self.st.lock().await;
         if let Some(conn) = &st.conn {
             return Ok(conn.client.clone());
@@ -219,18 +217,17 @@ impl TgManager {
     }
 
     /// Client with a live `MTProto` connection: connects on first use (auth
-    /// key handshake + connection pool), then only checks the flag.
-    #[allow(clippy::significant_drop_tightening)] // the guard must span check+connect: two tasks must not double-connect one client
-    pub(super) async fn ensure_connected(&self) -> Result<Arc<Mutex<Client>>, String> {
+    /// key handshake + connection pool), then only checks the flag. The
+    /// client itself serializes concurrent connects behind its internal
+    /// lock, so racing callers just wait it out.
+    pub(super) async fn ensure_connected(&self) -> Result<Arc<Client>, String> {
         let client = self.ensure().await?;
-        {
-            let mut c = client.lock().await;
-            if !c.is_connected() {
-                c.connect()
-                    .await
-                    .map_err(|e| friendly(format!("cannot connect to Telegram: {e}")))?;
-                tracing::info!(user_id = self.user_id, "connected to Telegram");
-            }
+        if !client.is_connected() {
+            client
+                .connect()
+                .await
+                .map_err(|e| friendly(format!("cannot connect to Telegram: {e}")))?;
+            tracing::info!(user_id = self.user_id, "connected to Telegram");
         }
         Ok(client)
     }
@@ -270,7 +267,7 @@ impl TgManager {
                 // while the handshake is still in flight).
                 let mut attempt = 0u32;
                 loop {
-                    let result = client.lock().await.get_me().await;
+                    let result = client.get_me().await;
                     match result {
                         Ok(user) => {
                             let info = UserInfo {
@@ -321,14 +318,12 @@ impl TgManager {
     /// server-side thumbnail), for the navbar avatar. `None` when the user
     /// has no photo or Telegram is unreachable — callers fall back to the
     /// initial-letter avatar.
-    // The client guard deliberately spans the whole fetch: the photo
-    // list and the chosen size's download must ride the same client.
-    #[allow(clippy::significant_drop_tightening)]
+    // The photo list and the chosen size's download must ride the same
+    // client: both calls go through this one handle.
     pub async fn avatar(&self) -> Option<Vec<u8>> {
         let client = self.ensure_connected().await.ok()?;
-        let c = client.lock().await;
         // The newest profile photo is the current one.
-        let raw = c
+        let raw = client
             .get_user_photos(&types::InputUser::Self_, 0, 0, 1)
             .await
             .ok()?;
@@ -383,11 +378,9 @@ impl TgManager {
         w.write_bytes(thumb_size.as_bytes());
         w.write_i64(0); // offset
         w.write_i32(1024 * 1024); // limit
-        let raw = c.invoke_raw(w.into_bytes()).await.ok()?;
+        let raw = client.invoke_raw(w.into_bytes()).await.ok()?;
         match mtprsto::file::parse_get_file(&raw).ok()? {
-            mtprsto::file::GetFile::File { bytes, .. } => {
-                (!bytes.is_empty()).then_some(bytes)
-            }
+            mtprsto::file::GetFile::File { bytes, .. } => (!bytes.is_empty()).then_some(bytes),
             // Thumbnails are never served from a CDN DC.
             mtprsto::file::GetFile::CdnRedirect { .. } => None,
         }

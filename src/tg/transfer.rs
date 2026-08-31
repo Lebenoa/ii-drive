@@ -22,8 +22,7 @@ impl TgManager {
     /// bench diagnostic.
     pub(super) async fn upload_pools(&self) -> Result<(i32, Arc<SenderPool>), String> {
         let client = self.ensure_connected().await?;
-        let c = client.lock().await;
-        Ok((c.dc_id(), c.pool()))
+        Ok((client.dc_id(), client.pool()))
     }
 
     /// Streams `reader` up to Telegram and posts it as a document message in
@@ -31,8 +30,7 @@ impl TgManager {
     /// thumb is the tiny JPEG Telegram generates, when it made one.
     #[allow(
         clippy::cast_possible_truncation, // file size u64→usize is lossless on this 64-bit host
-        clippy::as_conversions,           // ditto
-        clippy::significant_drop_tightening // the locked client is the RPC target of the refetch
+        clippy::as_conversions            // ditto
     )]
     pub async fn upload<S>(
         &self,
@@ -70,12 +68,10 @@ impl TgManager {
             file_name: name.to_string(),
         };
         let payload = rpc::build_send_media(&peer, &media, "", None, false, false, None);
-        let raw = {
-            let c = client.lock().await;
-            c.invoke_raw(payload)
-                .await
-                .map_err(|e| friendly(format!("sending message failed: {e}")))?
-        };
+        let raw = client
+            .invoke_raw(payload)
+            .await
+            .map_err(|e| friendly(format!("sending message failed: {e}")))?;
         let updates = Updates::parse(&raw).map_err(|e| format!("send response unreadable: {e}"))?;
         let (msg_id, doc) = updates.message_and_document();
 
@@ -85,8 +81,7 @@ impl TgManager {
             Some(doc) => Some(doc),
             None => match msg_id {
                 Some(id) => {
-                    let c = client.lock().await;
-                    let msgs = get_messages_by_id(&c, &peer, &[id]).await?;
+                    let msgs = get_messages_by_id(&client, &peer, &[id]).await?;
                     msgs.iter().find_map(types::Message::document)
                 }
                 None => None,
@@ -149,8 +144,6 @@ impl TgManager {
             _ => rpc::build_delete_messages(&[MsgId(i64::from(message_id))], false),
         };
         client
-            .lock()
-            .await
             .invoke_raw(payload)
             .await
             .map_err(|e| format!("deleting telegram message failed: {e}"))?;
@@ -165,7 +158,7 @@ impl TgManager {
     clippy::cast_possible_truncation, // ditto; message id is int32 on the wire
 )]
 async fn run_bench(
-    client: Arc<Mutex<Client>>,
+    client: Arc<Client>,
     peer: PeerRef,
     pool: Arc<SenderPool>,
     size: u64,
@@ -182,13 +175,12 @@ async fn run_bench(
         file_name: "bench.bin".to_string(),
     };
     let payload = rpc::build_send_media(&peer, &media, "", None, false, false, None);
-    let raw = {
-        let c = client.lock().await;
-        c.invoke_raw(payload)
-            .await
-            .map_err(|e| friendly(format!("bench send failed: {e}")))?
-    };
-    let updates = Updates::parse(&raw).map_err(|e| format!("bench send response unreadable: {e}"))?;
+    let raw = client
+        .invoke_raw(payload)
+        .await
+        .map_err(|e| friendly(format!("bench send failed: {e}")))?;
+    let updates =
+        Updates::parse(&raw).map_err(|e| format!("bench send response unreadable: {e}"))?;
     let (msg_id, _) = updates.message_and_document();
     let id = msg_id.ok_or("bench send returned no message id")?.0 as i32;
     Ok((id, start.elapsed().as_secs_f64()))
@@ -281,12 +273,7 @@ where
                     return Ok::<(), String>(());
                 };
                 let payload = if big {
-                    rpc::build_save_big_file_part(
-                        file_id,
-                        part as i32,
-                        total_parts as i32,
-                        &data,
-                    )
+                    rpc::build_save_big_file_part(file_id, part as i32, total_parts as i32, &data)
                 } else {
                     rpc::build_save_file_part(file_id, part as i32, &data)
                 };

@@ -59,10 +59,8 @@ pub async fn file_stream_from(
             if st.loc.is_none() {
                 // Fetch (or refetch) the message: its document carries the
                 // fresh file_reference every download needs.
-                let msgs = {
-                    let c = st.client.lock().await;
-                    get_messages_by_id(&c, &st.peer, &[MsgId(i64::from(st.msg_id))]).await
-                };
+                let msgs =
+                    get_messages_by_id(&st.client, &st.peer, &[MsgId(i64::from(st.msg_id))]).await;
                 let msgs = match msgs {
                     Ok(m) => m,
                     Err(e) => {
@@ -89,7 +87,9 @@ pub async fn file_stream_from(
                 };
                 let Some(loc) = doc.location() else {
                     return Some((
-                        Err(std::io::Error::other("document is a placeholder with no media")),
+                        Err(std::io::Error::other(
+                            "document is a placeholder with no media",
+                        )),
                         st,
                     ));
                 };
@@ -97,10 +97,7 @@ pub async fn file_stream_from(
             }
 
             let Some(loc) = st.loc.as_ref() else {
-                return Some((
-                    Err(std::io::Error::other("download location missing")),
-                    st,
-                ));
+                return Some((Err(std::io::Error::other("download location missing")), st));
             };
             let payload = rpc::build_get_file(loc, st.offset.cast_signed(), CHUNK as i32);
             // Ok(None) means "file reference expired — location rebuilt,
@@ -171,7 +168,7 @@ pub async fn file_stream_from(
 }
 
 struct StreamState {
-    client: Arc<tokio::sync::Mutex<Client>>,
+    client: Arc<Client>,
     peer: InputPeer,
     pool: Arc<SenderPool>,
     msg_id: i32,
@@ -324,13 +321,8 @@ async fn part_stream(
         // discard the intra-block plaintext remainder inside the decryptor.
         let ct_off = HEADER_SIZE + blocks * block_size;
         let inner = file_stream_from(tg, p.message_id, &p.chat, ct_off).await?;
-        let dec = crate::crypt::DecryptingStream::at_block(
-            Box::pin(inner),
-            key,
-            nonce,
-            blocks,
-            intra,
-        );
+        let dec =
+            crate::crypt::DecryptingStream::at_block(Box::pin(inner), key, nonce, blocks, intra);
         Ok(Box::pin(dec))
     }
 }

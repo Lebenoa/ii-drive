@@ -123,8 +123,7 @@ impl Pending {
     }
 
     pub(super) async fn sign_in(&mut self, code: &str) -> Result<CodeStep, LoginFailure> {
-        let (phone, phone_code_hash, mut tg) = match std::mem::replace(&mut self.flow, Flow::Idle)
-        {
+        let (phone, phone_code_hash, mut tg) = match std::mem::replace(&mut self.flow, Flow::Idle) {
             Flow::CodeSent {
                 phone,
                 phone_code_hash,
@@ -165,9 +164,9 @@ impl Pending {
                     "the code expired — a new one was sent; enter that",
                 ))
             }
-            Err(TgError::Rpc { ref error_message, .. })
-                if error_message.contains("SESSION_PASSWORD_NEEDED") =>
-            {
+            Err(TgError::Rpc {
+                ref error_message, ..
+            }) if error_message.contains("SESSION_PASSWORD_NEEDED") => {
                 let hint = password_hint(&mut tg).await;
                 self.flow = Flow::PasswordNeeded { tg };
                 Ok(CodeStep::PasswordRequired { hint })
@@ -214,7 +213,7 @@ impl Pending {
     /// the fallback for when the auth exchange itself did not report it.
     async fn known_user_id(&self) -> Result<i64, String> {
         let client = self.manager.ensure_connected().await?;
-        let me = get_me_info(&*client.lock().await).await;
+        let me = get_me_info(&client).await;
         me.map(|info| info.id)
             .ok_or_else(|| "signed in but Telegram did not report the account; try again".into())
     }

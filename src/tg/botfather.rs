@@ -19,7 +19,7 @@ impl TgManager {
     pub async fn botfather_send(&self, text: &str) -> Result<String, String> {
         let client = self.ensure_connected().await?;
         let peer = self.storage_peer("botfather").await?;
-        let sent = send_text(&mut *client.lock().await, &peer, text).await?;
+        let sent = send_text(&client, &peer, text).await?;
 
         // BotFather usually answers within a second; poll the dialog for a
         // newer message. Give up after ~8s so the HTTP request cannot hang.
@@ -30,7 +30,7 @@ impl TgManager {
                 600
             }))
             .await;
-            let msgs = last_messages(&*client.lock().await, &peer, 1).await?;
+            let msgs = last_messages(&client, &peer, 1).await?;
             if let Some(msg) = msgs.first()
                 && msg.id().0 > sent.0
             {
@@ -52,9 +52,7 @@ impl TgManager {
         rows.iter()
             .flat_map(|row| row.buttons.iter())
             .filter_map(|b| match b {
-                KeyboardButtonKind::Callback { text, data } => {
-                    Some((text.clone(), data.clone()))
-                }
+                KeyboardButtonKind::Callback { text, data } => Some((text.clone(), data.clone())),
                 _ => None,
             })
             .collect()
@@ -145,10 +143,9 @@ impl TgManager {
 
         let client = self.ensure_connected().await?;
         let peer_ref = self.storage_peer("botfather").await?;
-        let sent = send_text(&mut *client.lock().await, &peer_ref, "/mybots").await?;
+        let sent = send_text(&client, &peer_ref, "/mybots").await?;
         let (mut msg_id, mut buttons) =
-            Self::await_reply_buttons(&*client.lock().await, &peer_ref, narrow_msg_id(sent.0))
-                .await?;
+            Self::await_reply_buttons(&client, &peer_ref, narrow_msg_id(sent.0)).await?;
 
         let mut names: Vec<String> = Vec::new();
         let mut listed = std::collections::HashSet::new();
@@ -167,14 +164,12 @@ impl TgManager {
             if !visited.insert(data.clone()) {
                 break;
             }
-            if let Err(e) = Self::press_callback(&*client.lock().await, &peer_ref, msg_id, data)
-                .await
-            {
+            if let Err(e) = Self::press_callback(&client, &peer_ref, msg_id, data).await {
                 tracing::warn!("botfather /mybots stopped at a page boundary: {e}");
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-            let (id, next) = Self::last_buttons(&*client.lock().await, &peer_ref).await?;
+            let (id, next) = Self::last_buttons(&client, &peer_ref).await?;
             msg_id = id;
             buttons = next;
         }
@@ -187,12 +182,11 @@ impl TgManager {
     pub async fn botfather_bot_token(&self, bot: &str) -> Result<String, String> {
         let client = self.ensure_connected().await?;
         let peer_ref = self.storage_peer("botfather").await?;
-        send_text(&mut *client.lock().await, &peer_ref, "/mybots").await?;
+        send_text(&client, &peer_ref, "/mybots").await?;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        self.press_botfather_button(&*client.lock().await, &peer_ref, bot)
-            .await?;
+        self.press_botfather_button(&client, &peer_ref, bot).await?;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        self.press_botfather_button(&*client.lock().await, &peer_ref, "API Token")
+        self.press_botfather_button(&client, &peer_ref, "API Token")
             .await?;
 
         // The token lands in a fresh message; poll for it. Regex compiled
@@ -208,7 +202,7 @@ impl TgManager {
                 600
             }))
             .await;
-            let msgs = last_messages(&*client.lock().await, &peer_ref, 3).await?;
+            let msgs = last_messages(&client, &peer_ref, 3).await?;
             for msg in &msgs {
                 if let Some(m) = token_re.find(msg.text()) {
                     return Ok(m.as_str().to_string());

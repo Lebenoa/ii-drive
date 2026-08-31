@@ -75,7 +75,7 @@ pub struct ChannelInfo {
 
 /// Cheap snapshot of a bot's live pieces for rotation/invite loops.
 struct BotHandle {
-    client: Arc<Mutex<Client>>,
+    client: Arc<Client>,
     username: String,
     /// Upload DC id, cached so workers can talk about it without locking
     /// the bot's client again.
@@ -92,12 +92,11 @@ struct BotSession {
     access_hash: Option<i64>,
 }
 
-/// A live `MTProto` client over one account's session file. The session
-/// (a JSON file) is only touched atomically on save, so unlike the
-/// grammers runner nothing here holds the file open — closing a
-/// connection is dropping the client.
+/// A live `MTProto` client over one account's session. The session is a
+/// row in the embedded store, written atomically by mtprsto through the
+/// `DbSessions` bridge — closing a connection is dropping the client.
 struct Conn {
-    client: Arc<Mutex<Client>>,
+    client: Arc<Client>,
 }
 
 impl Conn {
@@ -161,11 +160,7 @@ async fn get_me_info(client: &Client) -> Option<UserInfo> {
 /// Sends one text message and returns its id. Thin wrapper over
 /// [`Client::send_to_peer`] mapping errors into this crate's `String`
 /// convention (auth-dead errors collapse to [`SESSION_INVALID_MSG`]).
-pub async fn send_text(
-    client: &mut Client,
-    peer: &PeerRef,
-    text: &str,
-) -> Result<MsgId, String> {
+pub async fn send_text(client: &Client, peer: &PeerRef, text: &str) -> Result<MsgId, String> {
     client
         .send_to_peer(peer, text)
         .await
