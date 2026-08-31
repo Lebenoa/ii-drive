@@ -2693,7 +2693,6 @@ dependencies = [
 [[package]]
 name = "mtprsto"
 version = "0.1.0"
-source = "git+https://github.com/Lebenoa/mtprsto?branch=docs-layer#494ec865f04cfe95df5d23a9c85317dee8df6660"
 dependencies = [
  "aes",
  "base64 0.23.1",

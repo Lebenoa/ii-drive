@@ -14,8 +14,7 @@ bytes = "1"
 futures = "0.3"
 mtprsto = { git = "https://github.com/Lebenoa/mtprsto", branch = "docs-layer" }
 hex = "0.4"
-hmac = "0.13"
-# Still-image decode, AVIF encode in-process (chosen over JPEG/WebP in a
+hmac = "0.13"# Still-image decode, AVIF encode in-process (chosen over JPEG/WebP in a
 # size bake-off — see thumbs.rs). `webp` is decode-only (its encoder is
 # lossless-only); bmp/tiff/ico keep coverage for camera/scanner formats;
 # AVIF stills are not decodable in-process (encode only).
@@ -57,3 +56,9 @@ codegen-units = 1
 # that task (tokio can no longer contain it).
 panic = "abort"
 strip = true
+
+# DEV ONLY — resolve the git dependency against the local ../mtprsto
+# checkout (branch docs-layer) while its new API is unpushed. Remove
+# before committing this manifest.
+[patch."https://github.com/Lebenoa/mtprsto"]
+mtprsto = { path = "../mtprsto" }
