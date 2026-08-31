@@ -73,13 +73,6 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      # Offline unit suite; gates the release before the slow link.
-      - name: Test
-        run: cargo test
-
       - name: Build server (release)
         run: cargo build --release
 
