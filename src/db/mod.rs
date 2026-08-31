@@ -3,6 +3,7 @@ mod files;
 mod folders;
 mod schema;
 mod settings;
+mod tg_session;
 
 pub use bots::{BotInfo, get_bots, remove_bot, set_bots};
 pub use files::{
@@ -19,6 +20,7 @@ pub use settings::{
     get_bot_draft, get_channels, get_instance, get_rules, get_split, get_token_epoch,
     set_bot_draft, set_channels, set_instance, set_rules, set_split,
 };
+pub use tg_session::{SessionKind, delete_session, delete_sessions_of, list_keys, read_session, write_session};
 
 type Conn = surrealdb::engine::local::Db;
 
@@ -53,6 +55,19 @@ pub async fn connect(db: &surrealdb::Surreal<Conn>, path: &str) -> Result<(), Db
     Ok(())
 }
 
+/// Points a *clone* of a connected handle at the app's namespace and
+/// database.
+///
+/// Namespace selection is session state, and every `Surreal` clone is
+/// its own session (each gets a fresh session id) — wiring the original
+/// handle does not carry over. Handles handed out to the hub and the
+/// Telegram managers call this once before their first query. Idempotent.
+pub async fn attach_session(db: &surrealdb::Surreal<Conn>) -> Result<(), DbError> {
+    db.use_ns("drive").await?;
+    db.use_db("drive").await?;
+    Ok(())
+}
+
 /// [`connect`] against a scratch in-memory store, for the process-wide state
 /// under test. Same `local::Db` client, so every query behaves identically.
 #[cfg(test)]
@@ -76,14 +91,14 @@ pub(crate) async fn open_mem() -> Result<surrealdb::Surreal<Conn>, DbError> {
 /// Selects the namespace, defines the tables and brings the schema up to
 /// date. Shared so a test store is never a different shape from a real one.
 async fn bootstrap(db: &surrealdb::Surreal<Conn>) -> Result<(), DbError> {
-    db.use_ns("drive").await?;
-    db.use_db("drive").await?;
+    attach_session(db).await?;
     // SELECTs against a not-yet-created table error out; define up front so
     // a fresh install serves an empty list instead of a 500.
     let mut res = db
         .query(
             "DEFINE TABLE IF NOT EXISTS file; DEFINE TABLE IF NOT EXISTS folder; \
-                DEFINE TABLE IF NOT EXISTS setting",
+                DEFINE TABLE IF NOT EXISTS setting; \
+                DEFINE TABLE IF NOT EXISTS tg_session",
         )
         .await?;
     let _ = res.take::<surrealdb::types::Value>(0usize)?;

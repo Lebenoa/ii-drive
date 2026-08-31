@@ -38,10 +38,15 @@ static STATE: LazyLock<AppState> = LazyLock::new(|| {
             thumbs_dir.display()
         );
     }
+    let db: surrealdb::Surreal<surrealdb::engine::local::Db> = surrealdb::Surreal::init();
+    // The hub (and every manager it builds) holds its own clone of the
+    // unconnected handle; clones share the router, so wiring it here in
+    // `db::connect` lights them all up.
+    let hub_db = db.clone();
     AppState {
-        db: surrealdb::Surreal::init(),
+        db,
         tokens: Tokens::new(&cfg.secret, cfg.token_ttl_secs),
-        hub: TgHub::new(cfg.clone()),
+        hub: TgHub::new(cfg.clone(), hub_db),
         epochs: tokio::sync::RwLock::new(HashMap::new()),
         instance: std::sync::RwLock::new(crate::db::Instance::default()),
         thumbs_dir,
@@ -210,10 +215,11 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn scratch(db: surrealdb::Surreal<surrealdb::engine::local::Db>) -> Self {
         let cfg = crate::config::get();
+        let hub_db = db.clone();
         AppState {
             db,
             tokens: Tokens::new(&cfg.secret, cfg.token_ttl_secs),
-            hub: TgHub::new(cfg.clone()),
+            hub: TgHub::new(cfg.clone(), hub_db),
             epochs: tokio::sync::RwLock::new(HashMap::new()),
             instance: std::sync::RwLock::new(crate::db::Instance::default()),
             // Each test gets an isolated thumbnail store of its own.
@@ -262,6 +268,12 @@ where
                 crate::db::connect_mem(&state.db)
                     .await
                     .expect("open test db");
+                // The hub's handle is its own session; give it the namespace.
+                state
+                    .hub
+                    .attach_session()
+                    .await
+                    .expect("attach hub session store");
             })
             .await;
         body(state).await;

@@ -1,10 +1,8 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use mtprsto::api::TelegramClient;
 use mtprsto::error::Error as TgError;
 use mtprsto::serialize::TLReader;
-use mtprsto::session::{SessionStore, SessionStorage};
 use mtprsto::types;
 
 use crate::config::Config;
@@ -63,45 +61,44 @@ impl LoginFailure {
     }
 }
 
-/// One sign-in in flight. It carries its own manager over its own throwaway
-/// session file, because the account — and therefore the file it will end up
-/// in — is unknown until Telegram accepts the last secret. Several of these
-/// run side by side without touching each other or any signed-in account.
+/// One sign-in in flight. It carries its own manager over its own
+/// throwaway session row, because the account — and therefore the row key
+/// it will end up under — is unknown until Telegram accepts the last
+/// secret. Several of these run side by side without touching each other
+/// or any signed-in account.
 pub(super) struct Pending {
     pub(super) manager: Arc<TgManager>,
-    /// Throwaway session file backing `manager` until the account is known.
-    pub(super) session_path: PathBuf,
+    /// Throwaway session row key backing `manager` until the account is
+    /// known.
+    pub(super) session_key: String,
     flow: Flow,
 }
 
 impl Pending {
-    pub(super) fn new(cfg: Config, session_path: PathBuf) -> Self {
-        let manager = TgManager::new(
-            cfg,
-            session_path.to_string_lossy().into_owned(),
-            UNKNOWN_USER,
-        );
+    pub(super) fn new(cfg: Config, db: super::Db, session_key: String) -> Self {
+        let manager = TgManager::new(cfg, db, session_key.clone(), UNKNOWN_USER);
         Self {
             manager: Arc::new(manager),
-            session_path,
+            session_key,
             flow: Flow::Idle,
         }
     }
 
-    /// Asks Telegram to deliver a confirmation code. The session file is
+    /// Asks Telegram to deliver a confirmation code. The session row is
     /// brand new, so there is no stale auth key to recover from here.
     pub(super) async fn send_code(&mut self, phone: &str) -> Result<(), String> {
         // The auth key must exist before the code request: connect once so
-        // the DH handshake runs and the throwaway session file is written.
+        // the DH handshake runs and the throwaway session row is written.
         let client = self.manager.ensure_connected().await?;
         drop(client);
         // The code exchange goes over mtprsto's one-shot auth client,
         // driven by the session's freshly persisted auth key — the pool
         // connection would work too, but the auth flow is what the
         // library ships it for.
-        let mut store = SessionStore::new(self.manager.session_path());
-        let data = SessionStorage::load(&mut store)
-            .map_err(|e| friendly(format!("cannot load login session: {e}")))?
+        let data = self
+            .manager
+            .session_data(&self.session_key)
+            .await?
             .ok_or_else(|| "login session vanished before the code request".to_string())?;
         let auth_key = data
             .decode_auth_key()

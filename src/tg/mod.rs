@@ -6,6 +6,10 @@ use mtprsto::pool::SenderPool;
 use mtprsto::types::{InputPeer, Message, MsgId};
 use tokio::sync::Mutex;
 
+// Embedded-store handle shared by the hub and every manager. Private
+// here: only this module's children touch it.
+type Db = surrealdb::Surreal<surrealdb::engine::local::Db>;
+
 mod botfather;
 mod bots;
 mod channels;
@@ -99,6 +103,9 @@ struct Conn {
 impl Conn {
     /// Releases the connection. mtprsto persists its session atomically
     /// and never keeps the file open, so there is nothing to wait for.
+    // Stays async so call sites keep their `.await` shape whatever the
+    // storage backend needs in the future.
+    #[allow(clippy::unused_async)]
     async fn close(self) {
         let _ = self;
     }
@@ -117,11 +124,14 @@ struct State {
 const UNKNOWN_USER: i64 = 0;
 
 /// Everything one Telegram account can do. Each instance owns exactly one
-/// session file, so several accounts can be served side by side.
+/// session row, so several accounts can be served side by side.
 pub struct TgManager {
     cfg: Config,
-    /// Session file backing this account only.
-    session_path: String,
+    /// Embedded store holding this account's session row.
+    pub(super) db: Db,
+    /// Session row key this account owns (e.g. `user-7` for a signed-in
+    /// account, `pending-<login id>` while a sign-in is in flight).
+    session_key: String,
     /// Account this manager serves, or [`UNKNOWN_USER`] while signing in.
     user_id: i64,
     st: Mutex<State>,
@@ -151,7 +161,7 @@ async fn get_me_info(client: &Client) -> Option<UserInfo> {
 /// Sends one text message and returns its id. Thin wrapper over
 /// [`Client::send_to_peer`] mapping errors into this crate's `String`
 /// convention (auth-dead errors collapse to [`SESSION_INVALID_MSG`]).
-pub(crate) async fn send_text(
+pub async fn send_text(
     client: &mut Client,
     peer: &PeerRef,
     text: &str,
@@ -163,7 +173,7 @@ pub(crate) async fn send_text(
 }
 
 /// The newest `limit` messages of a chat, newest first.
-pub(crate) async fn last_messages(
+pub async fn last_messages(
     client: &Client,
     peer: &PeerRef,
     limit: i32,
@@ -177,7 +187,7 @@ pub(crate) async fn last_messages(
 /// Fetches messages by id. Channel peers are routed through
 /// `channels.getMessages` inside mtprsto; the plain method answers
 /// `CHANNEL_INVALID` on channel peers.
-pub(crate) async fn get_messages_by_id(
+pub async fn get_messages_by_id(
     client: &Client,
     peer: &PeerRef,
     ids: &[MsgId],

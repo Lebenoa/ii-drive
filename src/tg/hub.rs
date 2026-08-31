@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
 use crate::config::Config;
+use crate::db::SessionKind;
 
 use super::TgManager;
 use super::login::{CodeStep, Pending};
@@ -15,7 +16,7 @@ const MAX_LOGIN_ATTEMPTS: u32 = 5;
 /// How long the block lasts.
 const LOGIN_BLOCK_SECS: u64 = 300;
 /// A login nobody finished (browser closed mid-flow) is dropped after this
-/// long, together with its throwaway session file.
+/// long, together with its throwaway session row.
 const LOGIN_TTL_SECS: u64 = 30 * 60;
 /// A number may be sent one login code per this window. Without it an
 /// allowlisted number can be made to receive unlimited Telegram codes,
@@ -24,11 +25,6 @@ const LOGIN_TTL_SECS: u64 = 30 * 60;
 const CODE_RESEND_COOLDOWN_SECS: u64 = 60;
 /// How often abandoned logins are swept up.
 const PRUNE_INTERVAL_SECS: u64 = 60;
-/// A session file plus the siblings SQLite keeps next to it.
-const SESSION_SUFFIXES: [&str; 3] = ["", "-wal", "-shm"];
-/// Moving a session file can lose a race against a request that still holds
-/// a client of the old connection; retry briefly instead of failing.
-const MOVE_ATTEMPTS: u32 = 10;
 
 /// Where a sign-in stands.
 pub enum LoginStep {
@@ -85,73 +81,103 @@ type LoginMap = Mutex<HashMap<String, Arc<Login>>>;
 /// still trying to become one.
 pub struct TgHub {
     cfg: Config,
-    /// Directory holding one session file per account.
-    dir: PathBuf,
+    /// Embedded store holding every Telegram session row. Clones share
+    /// the router, so this handle is live once `db::connect` has wired
+    /// the process-wide one it was cloned from.
+    db: super::Db,
+    /// Namespace attach for `db`, run once on the first store access:
+    /// namespace selection is per-`Surreal`-clone session state, so the
+    /// clone has to select it for itself.
+    attached: tokio::sync::OnceCell<()>,
     users: Mutex<HashMap<i64, Arc<TgManager>>>,
     logins: Arc<LoginMap>,
     /// One entry per normalized phone number.
     throttles: Mutex<HashMap<String, Throttle>>,
-    /// Serializes the close+move+insert section of [`TgHub::claim`]. Two
-    /// logins for the same account hold two different `pending` locks, so
-    /// without this both reach `move_session` for the same `<uid>.db`; that
-    /// move wipes its destination first, so the loser would delete the
-    /// winner's freshly filed session and leave the registered manager
-    /// pointing at a file that no longer exists — an account that looks
-    /// signed in with no session behind it. One hub-wide mutex rather than a
-    /// per-account guard map: a claim happens once at the end of a sign-in
-    /// and only renames a few files, so cross-account contention is
-    /// irrelevant next to a map that would need its own reaping.
-    claim_lock: Mutex<()>,
 }
 
 impl TgHub {
     /// Must be called from inside a Tokio runtime: the hub owns a pruning
     /// task from birth.
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: Config, db: super::Db) -> Self {
         let logins: Arc<LoginMap> = Arc::new(Mutex::new(HashMap::new()));
         // Pruning has to run on a timer rather than off `start_login`: an
-        // abandoned login otherwise keeps an open MTProto client and its
-        // `pending-*.db` alive for the whole process lifetime whenever
-        // nobody ever starts another login. The task holds only a `Weak`,
-        // so it ends by itself when the hub is dropped instead of
-        // outliving it or needing a handle somebody has to remember to
-        // cancel.
+        // abandoned login otherwise keeps an open MTProto client alive for
+        // the whole process lifetime whenever nobody ever starts another
+        // login. The task holds only a `Weak`, so it ends by itself when
+        // the hub is dropped instead of outliving it or needing a handle
+        // somebody has to remember to cancel.
         tokio::spawn(prune_loop(
             Arc::downgrade(&logins),
             Duration::from_secs(PRUNE_INTERVAL_SECS),
         ));
         Self {
-            dir: sessions_dir(&cfg.session_path),
             cfg,
+            db,
+            attached: tokio::sync::OnceCell::const_new(),
             users: Mutex::new(HashMap::new()),
             logins,
             throttles: Mutex::new(HashMap::new()),
-            claim_lock: Mutex::new(()),
         }
     }
 
-    /// Rebuilds a manager for every account with a session file on disk and
-    /// returns the ones that are live. Session files Telegram rejects are
-    /// deleted; leftovers from logins interrupted by a restart too.
+    /// Points the hub's handle (and, through [`TgManager::open_conn`],
+    /// every manager's clone) at the app namespace. Required once before
+    /// the first store access: namespace selection is session state, and
+    /// this handle is its own session. Idempotent.
+    pub async fn attach_session(&self) -> Result<(), String> {
+        let () = self
+            .attached
+            .get_or_try_init(|| async {
+                crate::db::attach_session(&self.db)
+                    .await
+                    .map_err(|e| format!("cannot attach telegram session store: {e}"))
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Rebuilds a manager for every account with a session row in the
+    /// store and returns the ones that are live. Sessions Telegram
+    /// rejects are deleted; leftovers from logins interrupted by a
+    /// restart too.
     pub async fn restore(&self) -> Vec<i64> {
-        let (uids, abandoned) = self.scan_sessions().await;
-        for path in abandoned {
-            tracing::info!(?path, "removing a session file left by an unfinished login");
-            let _ = remove_session(&path).await;
+        if let Err(e) = self.attach_session().await {
+            tracing::error!("{e}");
+            return Vec::new();
+        }
+        if let Err(e) = migrate_file_sessions(&self.db, &self.cfg.session_path).await {
+            tracing::warn!("session file migration failed: {e}");
         }
 
-        let known: Vec<i64> = {
-            let users = self.users.lock().await;
-            uids.into_iter()
-                .filter(|u| !users.contains_key(u))
-                .collect()
+        // Rows of logins that a restart interrupted: nothing can ever
+        // claim them again.
+        match crate::db::list_keys(&self.db, SessionKind::Pending).await {
+            Ok(keys) => {
+                for key in keys {
+                    tracing::info!(%key, "removing a session row left by an unfinished login");
+                    if let Err(e) = crate::db::delete_session(&self.db, &key).await {
+                        tracing::warn!("cannot delete session row {key}: {e}");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("cannot list pending session rows: {e}"),
+        }
+
+        let keys = match crate::db::list_keys(&self.db, SessionKind::Account).await {
+            Ok(keys) => keys,
+            Err(e) => {
+                tracing::error!("cannot list session rows: {e}");
+                return Vec::new();
+            }
         };
         // Each check is a network round trip; run them together so boot time
         // does not grow with the number of accounts.
-        let checked = futures::future::join_all(known.into_iter().map(|uid| async move {
+        let checked = futures::future::join_all(keys.into_iter().map(|key| async move {
+            let uid: i64 = key.strip_prefix("user-").and_then(|s| s.parse().ok()).unwrap_or(0);
             let manager = Arc::new(TgManager::new(
                 self.cfg.clone(),
-                path_string(&self.user_session(uid)),
+                self.db.clone(),
+                key,
                 uid,
             ));
             let status = manager.status().await;
@@ -163,10 +189,10 @@ impl TgHub {
         for (uid, manager, status) in checked {
             if !status.authorized && (status.connected || status.relogin) {
                 // Telegram answered, or answered with an auth error: either
-                // way it disowned the key, so the file is worthless.
+                // way it disowned the key, so the row is worthless.
                 tracing::warn!(user_id = uid, "stored session is no longer authorized");
                 manager.close().await;
-                let _ = remove_session(&self.user_session(uid)).await;
+                let _ = crate::db::delete_session(&self.db, manager.session_key()).await;
                 continue;
             }
             if !status.connected {
@@ -193,6 +219,7 @@ impl TgHub {
     /// present to finish this login. Nothing else ties a browser to the
     /// flow, so the handle is a secret.
     pub async fn start_login(&self, phone: &str) -> Result<String, String> {
+        self.attach_session().await?;
         // Asking Telegram to send a code is as much of an attack surface as
         // submitting one: it is the step that actually reaches the owner of
         // the number.
@@ -200,11 +227,11 @@ impl TgHub {
         self.gate(&key).await?;
         self.reserve_code_send(&key).await?;
         let login_id = new_login_id();
-        let path = self.dir.join(format!("pending-{login_id}.db"));
-        let mut pending = Pending::new(self.cfg.clone(), path.clone());
+        let session_key = format!("pending-{login_id}");
+        let mut pending = Pending::new(self.cfg.clone(), self.db.clone(), session_key);
         if let Err(e) = pending.send_code(phone).await {
             pending.manager.close().await;
-            let _ = remove_session(&path).await;
+            let _ = crate::db::delete_session(&self.db, &pending.session_key).await;
             return Err(e);
         }
         self.logins.lock().await.insert(
@@ -257,25 +284,31 @@ impl TgHub {
         }
     }
 
-    /// Forgets an account: its connections stop and its session files go.
+    /// Forgets an account: its connections stop and its session rows go.
     /// Idempotent, so a client may sign out twice without seeing an error.
     pub async fn logout(&self, user_id: i64) -> Result<(), String> {
+        self.attach_session().await?;
         let manager = self.users.lock().await.remove(&user_id);
         if let Some(manager) = manager {
             manager.close().await;
         }
-        remove_session(&self.user_session(user_id)).await?;
-        self.remove_bot_sessions(user_id).await;
-        tracing::info!(user_id, "signed out of Telegram; session file deleted");
+        crate::db::delete_session(&self.db, &format!("user-{user_id}"))
+            .await
+            .map_err(|e| format!("cannot delete session row: {e}"))?;
+        if let Err(e) =
+            crate::db::delete_sessions_of(&self.db, SessionKind::Bot, user_id).await
+        {
+            tracing::warn!("cannot delete bot session rows of {user_id}: {e}");
+        }
+        tracing::info!(user_id, "signed out of Telegram; session rows deleted");
         Ok(())
     }
 
     /// Files a finished login's session under its account and puts a fresh
-    /// manager in front of it. The throwaway session is closed first:
-    /// an open SQLite file cannot be moved on Windows. Everything from that
-    /// close to the registration of the new manager runs under
-    /// [`TgHub::claim_lock`], so two logins finishing for the same account
-    /// cannot interleave their moves and lose the session file.
+    /// manager in front of it. The throwaway row is re-keyed in place —
+    /// an upsert, not a file move — so two logins finishing for the same
+    /// account cannot interleave their way into a lost session: the last
+    /// completed sign-in wins the row, as it must.
     async fn claim(
         &self,
         login_id: &str,
@@ -283,24 +316,38 @@ impl TgHub {
         pending: &Pending,
         user_id: i64,
     ) -> Result<(), String> {
-        let _serialized = self.claim_lock.lock().await;
+        self.attach_session().await?;
         self.logins.lock().await.remove(login_id);
         self.record_success(phone).await;
         pending.manager.close().await;
         let previous = self.users.lock().await.remove(&user_id);
         if let Some(previous) = previous {
-            // Same account signing in again: the old session has to let go
-            // of the destination file before it is overwritten.
+            // Same account signing in again: its old session is stale now.
             tracing::info!(user_id, "replacing the previous session of this account");
             previous.close().await;
         }
-        let dest = self.user_session(user_id);
-        move_session(&pending.session_path, &dest).await?;
+        let blob = crate::db::read_session(&self.db, &pending.session_key)
+            .await
+            .map_err(|e| format!("cannot read login session: {e}"))?
+            .ok_or_else(|| "the login session vanished before it could be filed".to_string())?;
+        crate::db::write_session(
+            &self.db,
+            &format!("user-{user_id}"),
+            SessionKind::Account,
+            user_id,
+            &blob,
+        )
+        .await
+        .map_err(|e| format!("cannot file the login session: {e}"))?;
+        crate::db::delete_session(&self.db, &pending.session_key)
+            .await
+            .map_err(|e| format!("cannot clear the throwaway login session: {e}"))?;
         self.users.lock().await.insert(
             user_id,
             Arc::new(TgManager::new(
                 self.cfg.clone(),
-                path_string(&dest),
+                self.db.clone(),
+                format!("user-{user_id}"),
                 user_id,
             )),
         );
@@ -397,55 +444,27 @@ impl TgHub {
         }
     }
 
-    /// Session files in the directory: the accounts they belong to, and the
-    /// paths of files left behind by logins that never finished.
-    async fn scan_sessions(&self) -> (Vec<i64>, Vec<PathBuf>) {
+    /// Session rows in the store: the account user ids, and the keys of
+    /// rows left behind by logins that never finished.
+    #[cfg(test)]
+    async fn scan_sessions(&self) -> (Vec<i64>, Vec<String>) {
         let mut uids = Vec::new();
-        let mut abandoned = Vec::new();
-        let mut dir = match tokio::fs::read_dir(&self.dir).await {
-            Ok(dir) => dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (uids, abandoned),
-            Err(e) => {
-                tracing::error!("cannot read session directory {:?}: {e}", self.dir);
-                return (uids, abandoned);
-            }
-        };
-        while let Ok(Some(entry)) = dir.next_entry().await {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            // The `-wal`/`-shm` siblings travel with their database.
-            let Some(stem) = name.strip_suffix(".db") else {
-                continue;
-            };
-            if stem.starts_with("pending-") {
-                abandoned.push(entry.path());
-            } else if let Ok(uid) = stem.parse::<i64>() {
-                // Bot pool files (`<uid>_bot_<id>.db`) never parse as an id.
+        for key in crate::db::list_keys(&self.db, SessionKind::Account)
+            .await
+            .unwrap_or_default()
+        {
+            if let Ok(uid) = key.strip_prefix("user-").unwrap_or("").parse::<i64>() {
                 if uid > 0 {
                     uids.push(uid);
                 }
             }
         }
+        uids.sort_unstable();
+        let mut abandoned = crate::db::list_keys(&self.db, SessionKind::Pending)
+            .await
+            .unwrap_or_default();
+        abandoned.sort_unstable();
         (uids, abandoned)
-    }
-
-    /// Deletes the download bots' own session files for one account.
-    async fn remove_bot_sessions(&self, user_id: i64) {
-        let prefix = format!("{user_id}_bot_");
-        let Ok(mut dir) = tokio::fs::read_dir(&self.dir).await else {
-            return;
-        };
-        while let Ok(Some(entry)) = dir.next_entry().await {
-            if entry.file_name().to_string_lossy().starts_with(&prefix)
-                && let Err(e) = tokio::fs::remove_file(entry.path()).await
-            {
-                tracing::warn!("cannot delete bot session {:?}: {e}", entry.path());
-            }
-        }
-    }
-
-    fn user_session(&self, user_id: i64) -> PathBuf {
-        self.dir.join(format!("{user_id}.db"))
     }
 }
 
@@ -480,7 +499,10 @@ async fn prune_stale_logins(logins: &LoginMap) {
     for login in stale {
         let pending = login.pending.lock().await;
         pending.manager.close().await;
-        let _ = remove_session(&pending.session_path).await;
+        if let Err(e) = crate::db::delete_session(&pending.manager.db, &pending.session_key).await
+        {
+            tracing::warn!("cannot delete the throwaway session row: {e}");
+        }
         tracing::info!("dropped an abandoned login");
     }
 }
@@ -494,15 +516,6 @@ fn prune_throttles(throttles: &mut HashMap<String, Throttle>) {
     throttles.retain(|_, t| t.touched.elapsed() <= ttl);
 }
 
-/// Per-account session files live in a `sessions/` directory beside the
-/// configured session path.
-fn sessions_dir(session_path: &str) -> PathBuf {
-    Path::new(session_path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map_or_else(|| PathBuf::from("sessions"), |parent| parent.join("sessions"))
-}
-
 /// Unguessable handle for a login in flight; it is the only proof a client
 /// has that the flow is theirs, so it is sized like a bearer secret.
 fn new_login_id() -> String {
@@ -510,59 +523,94 @@ fn new_login_id() -> String {
     hex::encode(bytes)
 }
 
-fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
+/// One-time import of the file-era session store: `sessions/*.db` blobs
+/// move into `tg_session` rows, then the whole directory is set aside so
+/// a failed import can be retried and no file is ever trusted twice.
+///
+/// The directory is the one the configured session path implies — the
+/// location the previous storage derived from it.
+async fn migrate_file_sessions(db: &super::Db, session_path: &str) -> Result<(), String> {
+    let Some(dir) = Path::new(session_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|parent| parent.join("sessions"))
+    else {
+        return Ok(());
+    };
+    let mut entries = match tokio::fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read session directory {}: {e}", dir.display())),
+    };
 
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
-/// Deletes a session file and its SQLite siblings.
-async fn remove_session(path: &Path) -> Result<(), String> {
-    for suffix in SESSION_SUFFIXES {
-        let p = with_suffix(path, suffix);
-        match tokio::fs::remove_file(&p).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("cannot delete session file {}: {e}", p.display())),
-        }
+    // A non-empty store already owns the sessions; the files are leftovers
+    // of an earlier import, not a second account universe.
+    let known = crate::db::list_keys(db, SessionKind::Account)
+        .await
+        .map_err(|e| format!("cannot list session rows: {e}"))?;
+    if !known.is_empty() {
+        return Ok(());
     }
-    Ok(())
-}
 
-/// Moves a session file, siblings included, over whatever sits at the
-/// destination — a leftover `-wal` there would be replayed into the moved
-/// database and corrupt it. Both files must already be closed.
-async fn move_session(from: &Path, to: &Path) -> Result<(), String> {
-    // The per-account directory does not exist yet on an install being
-    // upgraded from the single-session layout: this move is what creates
-    // the first file in it.
-    if let Some(parent) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("cannot create session dir {}: {e}", parent.display()))?;
-    }
-    remove_session(to).await?;
-    for suffix in SESSION_SUFFIXES {
-        let src = with_suffix(from, suffix);
-        if !tokio::fs::try_exists(&src).await.unwrap_or(false) {
+    let mut imported = 0usize;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("cannot walk session directory {}: {e}", dir.display()))?
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".db") else {
+            continue;
+        };
+        if stem.starts_with("pending-") {
+            // A login interrupted mid-import-era: worthless now. It goes
+            // with the directory when the import sets it aside.
             continue;
         }
-        let dst = with_suffix(to, suffix);
-        for attempt in 1..=MOVE_ATTEMPTS {
-            match tokio::fs::rename(&src, &dst).await {
-                Ok(()) => break,
-                Err(e) if attempt == MOVE_ATTEMPTS => {
-                    return Err(format!("cannot move session {} to {}: {e}", src.display(), dst.display()));
-                }
-                Err(_) => {
-                    // A request still holding a client of the old connection
-                    // keeps the file open; that window is milliseconds wide.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+        let Ok(uid) = stem.parse::<i64>() else {
+            continue; // bot sessions and strays; they go with the directory
+        };
+        if uid <= 0 {
+            continue;
+        }
+        let blob = tokio::fs::read_to_string(entry.path())
+            .await
+            .map_err(|e| format!("cannot read session file {}: {e}", entry.path().display()))?;
+        // Sanity-check the blob before importing: an unparseable file
+        // (grammers SQLite leftovers) must not become a session row.
+        if serde_json::from_str::<mtprsto::session::SessionData>(&blob).is_err() {
+            tracing::warn!(
+                file = %entry.path().display(),
+                "unparseable old session file skipped"
+            );
+            continue;
+        }
+        crate::db::write_session(db, &format!("user-{uid}"), SessionKind::Account, uid, &blob)
+            .await
+            .map_err(|e| format!("cannot import session {uid}: {e}"))?;
+        // Bounded by the directory's entry count — cannot overflow.
+        imported = imported.saturating_add(1);
+    }
+
+    if imported > 0 {
+        tracing::info!(imported, "imported file-era Telegram sessions");
+    }
+    // Set the whole directory aside — imported files, unparseable ones,
+    // bot sessions and interrupted logins alike. Nothing reads it again.
+    let aside = dir.with_extension("imported");
+    for attempt in 1..=10 {
+        match tokio::fs::rename(&dir, &aside).await {
+            Ok(()) => break,
+            Err(e) if attempt == 10 => {
+                tracing::warn!(
+                    "cannot move {} aside after import ({}); imported files stay in place",
+                    dir.display(), e
+                );
+            }
+            Err(_) => {
+                // A still-live client of the previous storage keeps a file
+                // open on Windows; the window is milliseconds wide.
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
@@ -581,15 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_dir_sits_beside_the_configured_session() {
-        assert_eq!(
-            sessions_dir("data/session.db"),
-            PathBuf::from("data").join("sessions")
-        );
-        assert_eq!(sessions_dir("session.db"), PathBuf::from("sessions"));
-    }
-
-    #[test]
     fn login_ids_are_long_and_unique() {
         let a = new_login_id();
         let b = new_login_id();
@@ -598,98 +637,53 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    #[test]
-    fn suffixes_extend_the_file_name() {
-        assert_eq!(
-            with_suffix(Path::new("a/7.db"), "-wal"),
-            PathBuf::from("a/7.db-wal")
-        );
+    async fn scratch_db() -> super::super::Db {
+        let db = surrealdb::Surreal::init();
+        crate::db::connect_mem(&db).await.unwrap();
+        db
     }
 
-    fn hub(dir: &Path) -> TgHub {
-        TgHub::new(Config {
-            session_path: path_string(&dir.join("session.db")),
-            ..Config::default()
-        })
+    async fn hub(dir: &Path) -> TgHub {
+        let db = scratch_db().await;
+        TgHub::new(
+            Config {
+                session_path: dir.join("session.db").to_string_lossy().into_owned(),
+                ..Config::default()
+            },
+            db,
+        )
     }
 
-    #[tokio::test]
-    async fn moving_a_session_clears_a_stale_destination() {
-        let dir = tempfile::tempdir().unwrap();
-        let from = dir.path().join("pending-abc.db");
-        let to = dir.path().join("42.db");
-        tokio::fs::write(&from, b"new").await.unwrap();
-        tokio::fs::write(&to, b"old").await.unwrap();
-        // A write-ahead log of the session being replaced: replaying it into
-        // the new database would corrupt it, so it must go.
-        tokio::fs::write(with_suffix(&to, "-wal"), b"stale")
-            .await
-            .unwrap();
-
-        move_session(&from, &to).await.unwrap();
-
-        assert_eq!(tokio::fs::read(&to).await.unwrap(), b"new");
-        assert!(!from.exists());
-        assert!(!with_suffix(&to, "-wal").exists());
-    }
-
-    /// Upgrading a single-session install moves the old session into a
-    /// per-account directory that has never existed. The move has to create
-    /// it, or the legacy account is stranded and its files stay unowned.
-    #[tokio::test]
-    async fn moving_a_session_creates_the_target_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let from = dir.path().join("session.db");
-        let to = dir.path().join("sessions").join("42.db");
-        tokio::fs::write(&from, b"legacy").await.unwrap();
-
-        move_session(&from, &to)
-            .await
-            .expect("move creates the dir");
-
-        assert_eq!(tokio::fs::read(&to).await.unwrap(), b"legacy");
-        assert!(!from.exists());
-    }
-
+    /// The pending-rows listing is the whole scan now: accounts and
+    /// throwaway login rows separate by kind, not by filename shape.
     #[tokio::test]
     async fn scan_separates_accounts_from_leftovers() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
-        tokio::fs::create_dir_all(&hub.dir).await.unwrap();
-        for name in [
-            "7.db",
-            "7.db-wal",
-            "12.db",
-            "7_bot_555.db",
-            "pending-deadbeef.db",
-            "notes.txt",
-        ] {
-            tokio::fs::write(hub.dir.join(name), b"x").await.unwrap();
-        }
+        let hub = hub(dir.path()).await;
+        crate::db::write_session(&hub.db, "user-7", SessionKind::Account, 7, "a").await.unwrap();
+        crate::db::write_session(&hub.db, "user-12", SessionKind::Account, 12, "b").await.unwrap();
+        crate::db::write_session(&hub.db, "user-7-bot-555", SessionKind::Bot, 7, "c").await.unwrap();
+        crate::db::write_session(&hub.db, "pending-deadbeef", SessionKind::Pending, 0, "d").await.unwrap();
 
-        let (mut uids, abandoned) = hub.scan_sessions().await;
-        uids.sort_unstable();
+        let (uids, abandoned) = hub.scan_sessions().await;
         assert_eq!(uids, vec![7, 12]);
-        assert_eq!(abandoned, vec![hub.dir.join("pending-deadbeef.db")]);
+        assert_eq!(abandoned, vec!["pending-deadbeef".to_string()]);
     }
 
-    fn pending_login(hub: &TgHub, phone: &str, started: Instant, path: PathBuf) -> Arc<Login> {
+    fn pending_login(hub: &TgHub, phone: &str, started: Instant, key: String) -> Arc<Login> {
         Arc::new(Login {
             started,
             phone: phone.to_string(),
-            pending: Mutex::new(Pending::new(hub.cfg.clone(), path)),
+            pending: Mutex::new(Pending::new(hub.cfg.clone(), hub.db.clone(), key)),
         })
     }
 
     #[tokio::test]
-    async fn abandoned_logins_and_their_files_are_dropped() {
+    async fn abandoned_logins_and_their_rows_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
-        tokio::fs::create_dir_all(&hub.dir).await.unwrap();
-        let stale = hub.dir.join("pending-stale.db");
-        let fresh = hub.dir.join("pending-fresh.db");
-        tokio::fs::write(&stale, b"x").await.unwrap();
-        tokio::fs::write(&fresh, b"x").await.unwrap();
+        let hub = hub(dir.path()).await;
+        crate::db::write_session(&hub.db, "pending-stale", SessionKind::Pending, 0, "x").await.unwrap();
+        crate::db::write_session(&hub.db, "pending-fresh", SessionKind::Pending, 0, "y").await.unwrap();
         {
             let mut logins = hub.logins.lock().await;
             logins.insert(
@@ -698,12 +692,12 @@ mod tests {
                     &hub,
                     "15550102030",
                     Instant::now() - Duration::from_secs(LOGIN_TTL_SECS + 1),
-                    stale.clone(),
+                    "pending-stale".to_string(),
                 ),
             );
             logins.insert(
                 "fresh".to_string(),
-                pending_login(&hub, "15550102031", Instant::now(), fresh.clone()),
+                pending_login(&hub, "15550102031", Instant::now(), "pending-fresh".to_string()),
             );
         }
 
@@ -711,27 +705,31 @@ mod tests {
 
         let logins = hub.logins.lock().await;
         assert_eq!(logins.keys().collect::<Vec<_>>(), vec!["fresh"]);
-        assert!(!stale.exists());
-        assert!(fresh.exists());
+        assert_eq!(
+            crate::db::read_session(&hub.db, "pending-stale").await.unwrap(),
+            None
+        );
+        assert_eq!(
+            crate::db::read_session(&hub.db, "pending-fresh").await.unwrap().as_deref(),
+            Some("y")
+        );
     }
 
     /// The pruner has to reclaim an abandoned login on its own: before it ran
-    /// on a timer, a leftover client and its `pending-*.db` survived for the
+    /// on a timer, a leftover client and its session row survived for the
     /// whole process lifetime unless somebody started another login.
     #[tokio::test]
     async fn the_pruner_reclaims_abandoned_logins_on_its_own() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
-        tokio::fs::create_dir_all(&hub.dir).await.unwrap();
-        let stale = hub.dir.join("pending-stale.db");
-        tokio::fs::write(&stale, b"x").await.unwrap();
+        let hub = hub(dir.path()).await;
+        crate::db::write_session(&hub.db, "pending-stale", SessionKind::Pending, 0, "x").await.unwrap();
         hub.logins.lock().await.insert(
             "stale".to_string(),
             pending_login(
                 &hub,
                 "15550102030",
                 Instant::now() - Duration::from_secs(LOGIN_TTL_SECS + 1),
-                stale.clone(),
+                "pending-stale".to_string(),
             ),
         );
 
@@ -747,7 +745,10 @@ mod tests {
             hub.logins.lock().await.is_empty(),
             "the timer dropped the abandoned login without a new login arriving"
         );
-        assert!(!stale.exists());
+        assert_eq!(
+            crate::db::read_session(&hub.db, "pending-stale").await.unwrap(),
+            None
+        );
 
         // The task belongs to the hub, so it must end with it rather than
         // ticking on for the rest of the process.
@@ -758,16 +759,14 @@ mod tests {
             .expect("the pruner did not panic");
     }
 
-    /// Two logins finishing for the same account each hold only their own
-    /// `pending` lock, so their `claim`s used to be free to interleave — and
-    /// a move that wipes its destination first can then leave the account
-    /// with a database from one login and a write-ahead log from another,
-    /// or with nothing at all.
+    /// Two logins finishing for the same account used to interleave file
+    /// moves and could leave nothing behind at all. With rows there is no
+    /// window: every claim re-keys its own row, the last completed sign-in
+    /// wins, and a manager is always in front of the account.
     #[tokio::test]
     async fn concurrent_claims_for_one_account_file_exactly_one_session() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = Arc::new(hub(dir.path()));
-        tokio::fs::create_dir_all(&hub.dir).await.unwrap();
+        let hub = Arc::new(hub(dir.path()).await);
         let uid = 77;
 
         let claims: Vec<_> = ["a", "b", "c", "d", "e", "f", "g", "h"]
@@ -775,15 +774,11 @@ mod tests {
             .map(|tag| {
                 let hub = Arc::clone(&hub);
                 tokio::spawn(async move {
-                    let path = hub.dir.join(format!("pending-{tag}.db"));
-                    tokio::fs::write(&path, tag.as_bytes()).await.unwrap();
-                    // The log has to travel with its database; a pair from
-                    // two different logins is the corruption `move_session`
-                    // exists to prevent.
-                    tokio::fs::write(with_suffix(&path, "-wal"), tag.as_bytes())
+                    let key = format!("pending-{tag}");
+                    crate::db::write_session(&hub.db, &key, SessionKind::Pending, 0, tag)
                         .await
                         .unwrap();
-                    let pending = Pending::new(hub.cfg.clone(), path);
+                    let pending = Pending::new(hub.cfg.clone(), hub.db.clone(), key);
                     hub.claim(tag, "15550102030", &pending, uid).await
                 })
             })
@@ -792,24 +787,19 @@ mod tests {
             claim.await.unwrap().expect("every claim completes");
         }
 
-        let dest = hub.user_session(uid);
-        let filed = tokio::fs::read(&dest)
+        let filed = crate::db::read_session(&hub.db, &format!("user-{uid}"))
             .await
-            .expect("the account still has a session file");
-        let log = tokio::fs::read(with_suffix(&dest, "-wal"))
-            .await
-            .expect("with its write-ahead log");
-        assert_eq!(filed, log, "the session and its log come from one login");
+            .expect("the account has a session row");
+        assert!(filed.is_some(), "a session survives every racing claim");
         assert!(
             hub.get(uid).await.is_some(),
             "and a manager is in front of it"
         );
-        for tag in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-            assert!(
-                !hub.dir.join(format!("pending-{tag}.db")).exists(),
-                "no throwaway session is left behind"
-            );
-        }
+        assert_eq!(
+            hub.scan_sessions().await.1,
+            Vec::<String>::new(),
+            "no throwaway session row is left behind"
+        );
     }
 
     /// The throttle used to be hub-wide, so five wrong codes from anybody
@@ -817,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn failed_attempts_only_block_the_number_that_failed() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
+        let hub = hub(dir.path()).await;
         let attacker = "15550109999";
         let victim = "15550102030";
 
@@ -845,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn signing_in_clears_that_numbers_block() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
+        let hub = hub(dir.path()).await;
         let phone = "15550102030";
         for _ in 0..MAX_LOGIN_ATTEMPTS {
             hub.record_failure(phone).await;
@@ -862,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn a_second_code_for_one_number_waits_out_the_cooldown() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
+        let hub = hub(dir.path()).await;
         let phone = "15550102030";
         hub.reserve_code_send(phone).await.expect("first code");
 
@@ -882,8 +872,57 @@ mod tests {
     #[tokio::test]
     async fn unknown_login_ids_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let hub = hub(dir.path());
+        let hub = hub(dir.path()).await;
         assert!(hub.submit_code("nope", "12345").await.is_err());
         assert!(hub.submit_password("nope", "hunter2").await.is_err());
+    }
+
+    /// File-era sessions migrate into rows on restore, and the source
+    /// directory is set aside so nothing is imported twice.
+    #[tokio::test]
+    async fn file_sessions_migrate_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        tokio::fs::create_dir_all(&sessions).await.unwrap();
+        let blob = serde_json::to_string(&mtprsto::session::SessionData::from_auth_key(
+            &[7u8; 256],
+            0,
+            2,
+        ))
+        .unwrap();
+        tokio::fs::write(sessions.join("42.db"), &blob).await.unwrap();
+        tokio::fs::write(sessions.join("7.db"), b"not a session").await.unwrap();
+        tokio::fs::write(sessions.join("pending-old.db"), b"x").await.unwrap();
+        tokio::fs::write(sessions.join("42_bot_9.db"), b"x").await.unwrap();
+
+        let db = scratch_db().await;
+        let cfg = Config {
+            session_path: dir.path().join("session.db").to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        migrate_file_sessions(&db, &cfg.session_path).await.unwrap();
+
+        assert_eq!(
+            crate::db::read_session(&db, "user-42").await.unwrap().as_deref(),
+            Some(blob.as_str())
+        );
+        assert_eq!(
+            crate::db::list_keys(&db, SessionKind::Account).await.unwrap().len(),
+            1,
+            "only the parseable account session is imported"
+        );
+        assert!(
+            !sessions.exists(),
+            "the imported directory is moved aside"
+        );
+        assert!(dir.path().join("sessions.imported").exists());
+
+        // A second restore is a no-op: rows exist, no re-import, and the
+        // aside directory does not come back.
+        migrate_file_sessions(&db, &cfg.session_path).await.unwrap();
+        assert_eq!(
+            crate::db::list_keys(&db, SessionKind::Account).await.unwrap().len(),
+            1
+        );
     }
 }

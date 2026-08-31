@@ -8,12 +8,11 @@ use tokio::sync::Mutex;
 use super::{BotHandle, BotSession, PeerRef, TgManager, friendly};
 
 impl TgManager {
-    /// Deterministic per bot and per account: the owning account's session
-    /// file, plus the numeric prefix of the token.
-    fn bot_session_path(&self, token: &str) -> String {
+    /// Deterministic per bot and per account: the owning account's
+    /// session row key, plus the numeric prefix of the token.
+    fn bot_session_key(&self, token: &str) -> String {
         let key = token.split(':').next().unwrap_or("bot");
-        let base = self.session_path().trim_end_matches(".db");
-        format!("{base}_bot_{key}.db")
+        format!("{}-bot-{key}", self.session_key())
     }
 
     /// Signs a bot in (or restores its persisted session) and adds it to
@@ -24,8 +23,8 @@ impl TgManager {
                 "Telegram is not configured: set api_id and api_hash in config.toml".to_string(),
             );
         }
-        let path = self.bot_session_path(token);
-        let conn = self.open_conn(&path).await?;
+        let key = self.bot_session_key(token);
+        let conn = self.open_conn(&key, crate::db::SessionKind::Bot).await?;
         {
             let mut c = conn.client.lock().await;
             c.connect()
