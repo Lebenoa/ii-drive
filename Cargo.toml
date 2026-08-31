@@ -12,7 +12,7 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.23"
 bytes = "1"
 futures = "0.3"
-mtprsto = { path = "../mtprsto" }
+mtprsto = { git = "https://github.com/Lebenoa/mtprsto", branch = "docs-layer" }
 hex = "0.4"
 hmac = "0.13"
 # Still-image decode, AVIF encode in-process (chosen over JPEG/WebP in a
