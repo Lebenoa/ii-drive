@@ -548,6 +548,7 @@ pub(super) async fn collect_uploaders(
 /// it.  Used as a fallback when the overlap uploaders have already been
 /// consumed (e.g. after a failed `complete` that the client retries).
 #[allow(clippy::too_many_arguments)] // faithful port of the original; splitting adds indirection
+#[allow(clippy::too_many_lines)] // one part-fan-out + row-insert flow; a split would scatter the retry path
 pub(super) async fn store_from_file(
     state: &'static AppState,
     tg: Arc<crate::tg::TgManager>,

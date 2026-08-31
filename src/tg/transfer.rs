@@ -29,7 +29,11 @@ impl TgManager {
     /// Streams `reader` up to Telegram and posts it as a document message in
     /// the given storage chat. Returns `(message id, name, mime, thumb)` —
     /// thumb is the tiny JPEG Telegram generates, when it made one.
-    #[allow(clippy::cast_possible_truncation, clippy::as_conversions)] // file size u64→usize is lossless on this 64-bit host
+    #[allow(
+        clippy::cast_possible_truncation, // file size u64→usize is lossless on this 64-bit host
+        clippy::as_conversions,           // ditto
+        clippy::significant_drop_tightening // the locked client is the RPC target of the refetch
+    )]
     pub async fn upload<S>(
         &self,
         reader: &mut S,
@@ -106,40 +110,6 @@ impl TgManager {
         // size_mb is an admin diagnostic, so clamp rather than overflow on a
         // huge bogus value.
         let size = size_mb.saturating_mul(1024).saturating_mul(1024);
-
-        async fn run_bench(
-            client: Arc<Mutex<Client>>,
-            peer: PeerRef,
-            pool: Arc<SenderPool>,
-            size: u64,
-        ) -> Result<(i32, f64), String> {
-            let data = vec![0xAAu8; size as usize];
-            let mut reader: &[u8] = &data;
-            let start = std::time::Instant::now();
-            let uploaded = upload_stream(pool, &mut reader, size, "bench.bin".to_string())
-                .await
-                .map_err(|e| friendly(format!("bench upload failed: {e}")))?;
-            let media = InputMedia::UploadedDocument {
-                file: uploaded,
-                mime_type: "application/octet-stream".to_string(),
-                file_name: "bench.bin".to_string(),
-            };
-            let payload = rpc::build_send_media(&peer, &media, "", None, false, false, None);
-            let raw = {
-                let c = client.lock().await;
-                c.invoke_raw(payload)
-                    .await
-                    .map_err(|e| friendly(format!("bench send failed: {e}")))?
-            };
-            let updates = Updates::parse(&raw)
-                .map_err(|e| format!("bench send response unreadable: {e}"))?;
-            let (msg_id, _) = updates.message_and_document();
-            let id = msg_id
-                .ok_or("bench send returned no message id")?
-                .0 as i32;
-            Ok((id, start.elapsed().as_secs_f64()))
-        }
-
         let (bot_msg, bot_secs) = {
             let (client, peer, _, _, pool) = self.pool_target(chat).await?;
             run_bench(client, peer, pool, size).await?
@@ -188,12 +158,57 @@ impl TgManager {
     }
 }
 
+/// One bench leg: push `size` zero bytes through `pool` and post the
+/// resulting document message, returning (message id, elapsed seconds).
+#[allow(
+    clippy::as_conversions,           // bench buffer size u64→usize: diagnostic-only path
+    clippy::cast_possible_truncation, // ditto; message id is int32 on the wire
+)]
+async fn run_bench(
+    client: Arc<Mutex<Client>>,
+    peer: PeerRef,
+    pool: Arc<SenderPool>,
+    size: u64,
+) -> Result<(i32, f64), String> {
+    let data = vec![0xAAu8; size as usize];
+    let mut reader: &[u8] = &data;
+    let start = std::time::Instant::now();
+    let uploaded = upload_stream(pool, &mut reader, size, "bench.bin".to_string())
+        .await
+        .map_err(|e| friendly(format!("bench upload failed: {e}")))?;
+    let media = InputMedia::UploadedDocument {
+        file: uploaded,
+        mime_type: "application/octet-stream".to_string(),
+        file_name: "bench.bin".to_string(),
+    };
+    let payload = rpc::build_send_media(&peer, &media, "", None, false, false, None);
+    let raw = {
+        let c = client.lock().await;
+        c.invoke_raw(payload)
+            .await
+            .map_err(|e| friendly(format!("bench send failed: {e}")))?
+    };
+    let updates = Updates::parse(&raw).map_err(|e| format!("bench send response unreadable: {e}"))?;
+    let (msg_id, _) = updates.message_and_document();
+    let id = msg_id.ok_or("bench send returned no message id")?.0 as i32;
+    Ok((id, start.elapsed().as_secs_f64()))
+}
+
 /// Streams `reader` to Telegram in 512 KiB parts, keeping
 /// [`UPLOAD_WORKERS`] `upload.save{,Big}File` RPCs in flight while the
 /// reader is drained sequentially. mtprsto's own `file::upload` buffers
 /// the whole file in memory behind a blocking `std::io::Read`; this
 /// variant stays async and bounded so web uploads can stream through.
-#[allow(clippy::cast_possible_truncation)] // part counts bounded by the 4000-part Telegram cap
+// One producer + N workers pipeline; splitting it scatters the
+// short-read, failure and ordering invariants across functions.
+#[allow(
+    clippy::cast_possible_truncation, // part counts bounded by the 4000-part Telegram cap
+    clippy::cast_possible_wrap,       // part/total_parts < 4000, far below i32 range
+    clippy::arithmetic_side_effects,  // filled < PART_SIZE and part < total_parts bound every sum
+    clippy::indexing_slicing,         // filled <= buf.len() is the read loop's exit condition
+    clippy::as_conversions,           // PART_SIZE is a fixed 512 KiB const; parts < 4000
+    clippy::too_many_lines
+)]
 async fn upload_stream<R>(
     pool: Arc<SenderPool>,
     reader: &mut R,

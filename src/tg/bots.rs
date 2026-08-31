@@ -17,6 +17,9 @@ impl TgManager {
 
     /// Signs a bot in (or restores its persisted session) and adds it to
     /// the download pool.
+    // The client guard must span connect + authorize_bot: signing in
+    // twice concurrently would race the bot's own auth state.
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn configure_bot(&self, token: &str) -> Result<(String, i64), String> {
         if !self.cfg.tg_configured() {
             return Err(
@@ -99,9 +102,13 @@ impl TgManager {
     /// own, so concurrent transfers each get a separate connection with
     /// separate rate limits instead of queueing on the owner session.
     ///
-    /// Returns (client, peer, bot_name, dc_id, pool). The pool is bound to
-    /// the same session as the client, so file ids uploaded through it are
-    /// valid for the follow-up send, whichever target was picked.
+    /// Returns the (`client`, `peer`, `bot_name`, `dc_id`, `pool`)
+    /// tuple. The pool is bound to the same session as the client, so
+    /// file ids uploaded through it are valid for the follow-up send,
+    /// whichever target was picked.
+    // The bot-client guard must span the connectivity check and the
+    // dc/pool snapshot, or a bot could drop its connection in between.
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn pool_target(
         &self,
         chat: &str,
@@ -119,6 +126,9 @@ impl TgManager {
         if key.parse::<i64>().is_ok() {
             let bots = self.st.lock().await.bots.len();
             if bots > 0 {
+                // Rotation index within the live bot count — both bounded
+                // by the configured pool size.
+                #[allow(clippy::arithmetic_side_effects)]
                 let skip = self.next_rotation() % bots;
                 // Snapshot everything we need from the bot sessions
                 // (including their connection pieces, which need a brief

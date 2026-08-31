@@ -117,7 +117,11 @@ impl TgManager {
                 }
             }
             offset_date = msg_date;
-            offset_id = dd.top_message.0 as i32;
+            // Telegram message ids are int32 on the wire; the i64 MsgId is
+            // a library-side widening.
+            #[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
+            let narrowed = dd.top_message.0 as i32;
+            offset_id = narrowed;
             offset_peer = Self::input_peer_for(raw_id, &dialogs.chats);
         }
         Ok(())

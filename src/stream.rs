@@ -22,10 +22,15 @@ const CHUNK: usize = 1024 * 1024;
 /// resuming from the exact offset already served. Serves from byte `start`
 /// (HTTP Range support): whole blocks are skipped server-side on Telegram,
 /// the sub-block remainder is discarded on the wire.
+// One unfold closure produces the whole download stream; splitting it
+// would scatter the refetch/resume state machine across functions.
 #[allow(
     clippy::arithmetic_side_effects, // byte offsets bounded by the file size and cap
     clippy::as_conversions,          // u64 offset to i64: file sizes < i64::MAX
     clippy::indexing_slicing,        // slice/len arithmetic on the validated chunk buffer
+    clippy::cast_possible_truncation, // CHUNK is a fixed 1 MiB const, far below i32::MAX
+    clippy::cast_possible_wrap,      // CHUNK is a fixed 1 MiB const, always positive
+    clippy::too_many_lines
 )]
 pub async fn file_stream_from(
     tg: &TgManager,

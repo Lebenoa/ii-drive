@@ -165,21 +165,18 @@ Order of operations when the library changes: commit mtprsto → push
 - Comments explain **why**, never narrate the diff. Doc comments on
   public items; `# Errors` sections on fallible public functions in the
   library.
-- **`cargo strict-lint` is the lint gate.** It is a user-level cargo
-  alias (`~/.cargo/config.toml`) running clippy with
+- **`cargo strict-lint` is the lint gate, and the tree is clean under
+  it — keep it that way.** It is a user-level cargo alias
+  (`~/.cargo/config.toml`) running clippy with
   `-D pedantic -D nursery -D unwrap_used -D expect_used -D
   indexing_slicing -D arithmetic_side_effects -D as_conversions -D
   unreachable -D unimplemented -D todo -D string_slice -D
-  panic_in_result_fn -D panic -D exit` denied. The rules:
-  - New or rewritten code must pass it. When a lint is genuinely wrong
-    for a provable invariant, add the narrowest possible
-    `#[allow(clippy::…)]` with a justification comment — that is the
-    established pattern (`// bounded by the directory's entry count`).
-  - Older files (`routes/files/resume.rs`, `routes/files/upload.rs`,
-    `stream.rs`, `tg/botfather.rs`, `tg/channels.rs`, `tg/transfer.rs`,
-    `tg/bots.rs`) predate the gate and still carry violations. Fix them
-    when you touch the file; do not churn untouched code just to count
-    reductions, and never re-widen an existing allow.
+  panic_in_result_fn -D panic -D exit` denied. When a lint is
+  genuinely wrong for a provable invariant, add the narrowest possible
+  `#[allow(clippy::…)]` with a justification comment — that is the
+  established pattern (`// bounded by the directory's entry count`).
+  Never re-widen an existing allow; prefer real fixes
+  (`saturating_add`, `try_into`, explicit match arms) over allows.
 - Telegram-layer errors flow as `Result<_, String>`; auth-dead failures
   collapse to `SESSION_INVALID_MSG` via `friendly()` so the API can map
   them to HTTP 401 structurally. The DB layer uses `db::DbError`.

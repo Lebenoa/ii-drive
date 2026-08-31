@@ -124,6 +124,9 @@ pub struct InitReq {
 }
 
 // The sessions mutex guard must stay alive across the sweep+insert below.
+// One handler per upload phase: validation, spill-buffer setup and the
+// per-part uploader spawn form a single flow — splitting scatters it.
+#[allow(clippy::too_many_lines)]
 #[allow(clippy::significant_drop_tightening)]
 pub async fn init(
     Extension(Caller(uid)): Extension<Caller>,
@@ -169,6 +172,9 @@ pub async fn init(
     let mut uploaders = Vec::with_capacity(part_plan.nparts);
     for i in 0..part_plan.nparts {
         let expected = part_plan.expected(i);
+        // i < nparts <= 64 (Telegram's per-file part cap), so the widened
+        // arithmetic cannot wrap or overflow.
+        #[allow(clippy::as_conversions, clippy::arithmetic_side_effects)]
         let part_end = ((i as u64 + 1) * part_plan.part_size).min(part_plan.declared);
         let tg = tg.clone();
         let chat = part_plan.chat_for(i);
@@ -194,7 +200,7 @@ pub async fn init(
             }
 
             let part_name = if nparts > 1 {
-                format!("{name}.part{:03}", i + 1)
+                format!("{name}.part{:03}", i.saturating_add(1))
             } else {
                 name
             };
@@ -207,6 +213,8 @@ pub async fn init(
                 let mut f = tokio::fs::File::open(&path)
                     .await
                     .map_err(|e| format!("reopen upload buffer: {e}"))?;
+                // i < nparts <= 64, so the widened arithmetic cannot wrap.
+                #[allow(clippy::as_conversions, clippy::arithmetic_side_effects)]
                 f.seek(std::io::SeekFrom::Start(i as u64 * part_size))
                     .await
                     .map_err(|e| format!("seek upload buffer: {e}"))?;
@@ -233,7 +241,7 @@ pub async fn init(
                         break Ok((mid, part_name, mime.clone(), thumb, nonce));
                     }
                     Err(e) if attempt < PART_RETRIES && is_transient(&e) => {
-                        attempt += 1;
+                        attempt = attempt.saturating_add(1);
                         tracing::info!(
                             part = %part_name,
                             attempt,
@@ -404,6 +412,11 @@ pub async fn abort(
     Ok(Json(serde_json::json!({ "aborted": true })))
 }
 
+// One completion orchestration: gate concurrent calls, join the
+// overlap uploaders, derive the thumbnail, persist and clean up —
+// splitting it would scatter the retry invariants.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::significant_drop_tightening)] // the sessions guard must span get_mut through the mem::take
 pub async fn complete(
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
@@ -499,7 +512,22 @@ pub async fn complete(
     // were already consumed by a previous (failed) `complete` call, fall
     // back to the sequential `store_from_file` path which creates fresh
     // uploaders from the spill buffer.
-    let result = if !s.uploaders.is_empty() {
+    let result = if s.uploaders.is_empty() {
+        // Overlap uploaders were consumed by a prior attempt.  Fall back
+        // to sequential upload from the spill buffer.
+        store_from_file(
+            state,
+            tg,
+            uid,
+            &s.path,
+            s.declared,
+            &s.name,
+            &s.mime,
+            &s.folder,
+            &head,
+        )
+        .await
+    } else {
         let (parts, tg_thumb) = collect_uploaders(s.uploaders, &s.part_plan, &tg).await?;
         let mime = if s.mime.is_empty() {
             mime_guess::from_path(&s.name)
@@ -539,21 +567,6 @@ pub async fn complete(
             super::cleanup_parts(&tg, &parts).await;
         }
         r
-    } else {
-        // Overlap uploaders were consumed by a prior attempt.  Fall back
-        // to sequential upload from the spill buffer.
-        store_from_file(
-            state,
-            tg,
-            uid,
-            &s.path,
-            s.declared,
-            &s.name,
-            &s.mime,
-            &s.folder,
-            &head,
-        )
-        .await
     };
 
     // Only remove the session and spill file on success so the client

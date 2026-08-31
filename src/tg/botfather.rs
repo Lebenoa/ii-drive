@@ -4,6 +4,13 @@ use mtprsto::types::{IncomingReplyMarkup, KeyboardButtonKind, Message};
 
 use super::{PeerRef, TgManager, bot_token_regex, friendly, last_messages, send_text};
 
+/// Telegram message ids are `int` (i32) on the wire; mtprsto widens them
+/// to i64. The narrowing cannot truncate a real server-issued id.
+#[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
+const fn narrow_msg_id(id: i64) -> i32 {
+    id as i32
+}
+
 impl TgManager {
     /// Sends `text` to @`BotFather` and returns its reply text. The
     /// conversation state lives on `BotFather`'s side of this account's chat,
@@ -63,7 +70,7 @@ impl TgManager {
         let Some(msg) = msgs.first() else {
             return Err("BotFather did not answer".into());
         };
-        let msg_id = msg.id().0 as i32;
+        let msg_id = narrow_msg_id(msg.id().0);
         Ok((msg_id, Self::markup_buttons(msg)))
     }
 
@@ -89,7 +96,7 @@ impl TgManager {
             if let Some(msg) = msgs.first()
                 && msg.id().0 > i64::from(after_id)
             {
-                let msg_id = msg.id().0 as i32;
+                let msg_id = narrow_msg_id(msg.id().0);
                 return Ok((msg_id, Self::markup_buttons(msg)));
             }
         }
@@ -140,7 +147,8 @@ impl TgManager {
         let peer_ref = self.storage_peer("botfather").await?;
         let sent = send_text(&mut *client.lock().await, &peer_ref, "/mybots").await?;
         let (mut msg_id, mut buttons) =
-            Self::await_reply_buttons(&*client.lock().await, &peer_ref, sent.0 as i32).await?;
+            Self::await_reply_buttons(&*client.lock().await, &peer_ref, narrow_msg_id(sent.0))
+                .await?;
 
         let mut names: Vec<String> = Vec::new();
         let mut listed = std::collections::HashSet::new();
