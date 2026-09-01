@@ -112,10 +112,12 @@ pub async fn draft(
     Extension(Caller(uid)): Extension<Caller>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let state = crate::state::get();
-    crate::db::get_bot_draft(&state.db, &uid.to_string()).await?.map_or_else(
-        || Ok(Json(json!({ "active": false }))),
-        |d| Ok(Json(draft_json(&d))),
-    )
+    crate::db::get_bot_draft(&state.db, &uid.to_string())
+        .await?
+        .map_or_else(
+            || Ok(Json(json!({ "active": false }))),
+            |d| Ok(Json(draft_json(&d))),
+        )
 }
 
 /// DELETE /api/botfather/draft — tell `BotFather` to drop its pending

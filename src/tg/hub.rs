@@ -173,13 +173,11 @@ impl TgHub {
         // Each check is a network round trip; run them together so boot time
         // does not grow with the number of accounts.
         let checked = futures::future::join_all(keys.into_iter().map(|key| async move {
-            let uid: i64 = key.strip_prefix("user-").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let manager = Arc::new(TgManager::new(
-                self.cfg.clone(),
-                self.db.clone(),
-                key,
-                uid,
-            ));
+            let uid: i64 = key
+                .strip_prefix("user-")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let manager = Arc::new(TgManager::new(self.cfg.clone(), self.db.clone(), key, uid));
             let status = manager.status().await;
             (uid, manager, status)
         }))
@@ -295,9 +293,7 @@ impl TgHub {
         crate::db::delete_session(&self.db, &format!("user-{user_id}"))
             .await
             .map_err(|e| format!("cannot delete session row: {e}"))?;
-        if let Err(e) =
-            crate::db::delete_sessions_of(&self.db, SessionKind::Bot, user_id).await
-        {
+        if let Err(e) = crate::db::delete_sessions_of(&self.db, SessionKind::Bot, user_id).await {
             tracing::warn!("cannot delete bot session rows of {user_id}: {e}");
         }
         tracing::info!(user_id, "signed out of Telegram; session rows deleted");
@@ -499,8 +495,7 @@ async fn prune_stale_logins(logins: &LoginMap) {
     for login in stale {
         let pending = login.pending.lock().await;
         pending.manager.close().await;
-        if let Err(e) = crate::db::delete_session(&pending.manager.db, &pending.session_key).await
-        {
+        if let Err(e) = crate::db::delete_session(&pending.manager.db, &pending.session_key).await {
             tracing::warn!("cannot delete the throwaway session row: {e}");
         }
         tracing::info!("dropped an abandoned login");
@@ -540,7 +535,12 @@ async fn migrate_file_sessions(db: &super::Db, session_path: &str) -> Result<(),
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("cannot read session directory {}: {e}", dir.display())),
+        Err(e) => {
+            return Err(format!(
+                "cannot read session directory {}: {e}",
+                dir.display()
+            ));
+        }
     };
 
     // A non-empty store already owns the sessions; the files are leftovers
@@ -604,7 +604,8 @@ async fn migrate_file_sessions(db: &super::Db, session_path: &str) -> Result<(),
             Err(e) if attempt == 10 => {
                 tracing::warn!(
                     "cannot move {} aside after import ({}); imported files stay in place",
-                    dir.display(), e
+                    dir.display(),
+                    e
                 );
             }
             Err(_) => {
@@ -660,10 +661,18 @@ mod tests {
     async fn scan_separates_accounts_from_leftovers() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path()).await;
-        crate::db::write_session(&hub.db, "user-7", SessionKind::Account, 7, "a").await.unwrap();
-        crate::db::write_session(&hub.db, "user-12", SessionKind::Account, 12, "b").await.unwrap();
-        crate::db::write_session(&hub.db, "user-7-bot-555", SessionKind::Bot, 7, "c").await.unwrap();
-        crate::db::write_session(&hub.db, "pending-deadbeef", SessionKind::Pending, 0, "d").await.unwrap();
+        crate::db::write_session(&hub.db, "user-7", SessionKind::Account, 7, "a")
+            .await
+            .unwrap();
+        crate::db::write_session(&hub.db, "user-12", SessionKind::Account, 12, "b")
+            .await
+            .unwrap();
+        crate::db::write_session(&hub.db, "user-7-bot-555", SessionKind::Bot, 7, "c")
+            .await
+            .unwrap();
+        crate::db::write_session(&hub.db, "pending-deadbeef", SessionKind::Pending, 0, "d")
+            .await
+            .unwrap();
 
         let (uids, abandoned) = hub.scan_sessions().await;
         assert_eq!(uids, vec![7, 12]);
@@ -682,8 +691,12 @@ mod tests {
     async fn abandoned_logins_and_their_rows_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path()).await;
-        crate::db::write_session(&hub.db, "pending-stale", SessionKind::Pending, 0, "x").await.unwrap();
-        crate::db::write_session(&hub.db, "pending-fresh", SessionKind::Pending, 0, "y").await.unwrap();
+        crate::db::write_session(&hub.db, "pending-stale", SessionKind::Pending, 0, "x")
+            .await
+            .unwrap();
+        crate::db::write_session(&hub.db, "pending-fresh", SessionKind::Pending, 0, "y")
+            .await
+            .unwrap();
         {
             let mut logins = hub.logins.lock().await;
             logins.insert(
@@ -697,7 +710,12 @@ mod tests {
             );
             logins.insert(
                 "fresh".to_string(),
-                pending_login(&hub, "15550102031", Instant::now(), "pending-fresh".to_string()),
+                pending_login(
+                    &hub,
+                    "15550102031",
+                    Instant::now(),
+                    "pending-fresh".to_string(),
+                ),
             );
         }
 
@@ -706,11 +724,16 @@ mod tests {
         let logins = hub.logins.lock().await;
         assert_eq!(logins.keys().collect::<Vec<_>>(), vec!["fresh"]);
         assert_eq!(
-            crate::db::read_session(&hub.db, "pending-stale").await.unwrap(),
+            crate::db::read_session(&hub.db, "pending-stale")
+                .await
+                .unwrap(),
             None
         );
         assert_eq!(
-            crate::db::read_session(&hub.db, "pending-fresh").await.unwrap().as_deref(),
+            crate::db::read_session(&hub.db, "pending-fresh")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("y")
         );
     }
@@ -722,7 +745,9 @@ mod tests {
     async fn the_pruner_reclaims_abandoned_logins_on_its_own() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path()).await;
-        crate::db::write_session(&hub.db, "pending-stale", SessionKind::Pending, 0, "x").await.unwrap();
+        crate::db::write_session(&hub.db, "pending-stale", SessionKind::Pending, 0, "x")
+            .await
+            .unwrap();
         hub.logins.lock().await.insert(
             "stale".to_string(),
             pending_login(
@@ -746,7 +771,9 @@ mod tests {
             "the timer dropped the abandoned login without a new login arriving"
         );
         assert_eq!(
-            crate::db::read_session(&hub.db, "pending-stale").await.unwrap(),
+            crate::db::read_session(&hub.db, "pending-stale")
+                .await
+                .unwrap(),
             None
         );
 
@@ -890,10 +917,18 @@ mod tests {
             2,
         ))
         .unwrap();
-        tokio::fs::write(sessions.join("42.db"), &blob).await.unwrap();
-        tokio::fs::write(sessions.join("7.db"), b"not a session").await.unwrap();
-        tokio::fs::write(sessions.join("pending-old.db"), b"x").await.unwrap();
-        tokio::fs::write(sessions.join("42_bot_9.db"), b"x").await.unwrap();
+        tokio::fs::write(sessions.join("42.db"), &blob)
+            .await
+            .unwrap();
+        tokio::fs::write(sessions.join("7.db"), b"not a session")
+            .await
+            .unwrap();
+        tokio::fs::write(sessions.join("pending-old.db"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(sessions.join("42_bot_9.db"), b"x")
+            .await
+            .unwrap();
 
         let db = scratch_db().await;
         let cfg = Config {
@@ -903,25 +938,31 @@ mod tests {
         migrate_file_sessions(&db, &cfg.session_path).await.unwrap();
 
         assert_eq!(
-            crate::db::read_session(&db, "user-42").await.unwrap().as_deref(),
+            crate::db::read_session(&db, "user-42")
+                .await
+                .unwrap()
+                .as_deref(),
             Some(blob.as_str())
         );
         assert_eq!(
-            crate::db::list_keys(&db, SessionKind::Account).await.unwrap().len(),
+            crate::db::list_keys(&db, SessionKind::Account)
+                .await
+                .unwrap()
+                .len(),
             1,
             "only the parseable account session is imported"
         );
-        assert!(
-            !sessions.exists(),
-            "the imported directory is moved aside"
-        );
+        assert!(!sessions.exists(), "the imported directory is moved aside");
         assert!(dir.path().join("sessions.imported").exists());
 
         // A second restore is a no-op: rows exist, no re-import, and the
         // aside directory does not come back.
         migrate_file_sessions(&db, &cfg.session_path).await.unwrap();
         assert_eq!(
-            crate::db::list_keys(&db, SessionKind::Account).await.unwrap().len(),
+            crate::db::list_keys(&db, SessionKind::Account)
+                .await
+                .unwrap()
+                .len(),
             1
         );
     }

@@ -46,8 +46,7 @@ pub async fn write_session(
         "owner": owner,
         "data": data,
     });
-    let _: Option<serde_json::Value> =
-        db.upsert(("tg_session", key)).content(payload).await?;
+    let _: Option<serde_json::Value> = db.upsert(("tg_session", key)).content(payload).await?;
     Ok(())
 }
 
@@ -172,7 +171,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(list_keys(&db, SessionKind::Pending).await.unwrap(), Vec::<String>::new());
+        assert_eq!(
+            list_keys(&db, SessionKind::Pending).await.unwrap(),
+            Vec::<String>::new()
+        );
         assert_eq!(
             list_keys(&db, SessionKind::Account).await.unwrap(),
             vec!["pending-abc".to_string()]

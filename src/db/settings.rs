@@ -21,12 +21,10 @@ pub async fn get_rules(
     let Some(row) = rows.into_iter().next() else {
         return Ok(Vec::new());
     };
-    row.get("rules_json")
-        .and_then(|v| v.as_str())
-        .map_or_else(
-            || Ok(Vec::new()),
-            |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}"))),
-        )
+    row.get("rules_json").and_then(|v| v.as_str()).map_or_else(
+        || Ok(Vec::new()),
+        |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("rules shape: {e}"))),
+    )
 }
 
 pub async fn set_rules(
@@ -110,12 +108,10 @@ pub async fn get_channels(
     let Some(row) = rows.into_iter().next() else {
         return Ok(Vec::new());
     };
-    row.get("chats_json")
-        .and_then(|v| v.as_str())
-        .map_or_else(
-            || Ok(Vec::new()),
-            |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("channels shape: {e}"))),
-        )
+    row.get("chats_json").and_then(|v| v.as_str()).map_or_else(
+        || Ok(Vec::new()),
+        |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("channels shape: {e}"))),
+    )
 }
 
 pub async fn set_channels(

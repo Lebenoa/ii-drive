@@ -298,15 +298,21 @@ async fn download_bounded(
     // nonce, the stored bytes are ciphertext: wrap the stream in the
     // decryptor so the thumbnail decoder sees plaintext. Without a key the
     // file is unreadable — fail loudly rather than emit a garbage image.
-    let mut stream: std::pin::Pin<Box<dyn futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send>> =
-        match crate::stream::file_stream_from(tg, part0.message_id, &part0.chat, start).await {
-            Ok(s) => Box::pin(s),
-            Err(e) => {
-                tracing::warn!("thumb download start failed for {uid}: {e}");
-                return Err(());
-            }
-        };
-    if part0.nonce.as_deref().and_then(crate::crypt::nonce_from_b64).is_some() {
+    let mut stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send>,
+    > = match crate::stream::file_stream_from(tg, part0.message_id, &part0.chat, start).await {
+        Ok(s) => Box::pin(s),
+        Err(e) => {
+            tracing::warn!("thumb download start failed for {uid}: {e}");
+            return Err(());
+        }
+    };
+    if part0
+        .nonce
+        .as_deref()
+        .and_then(crate::crypt::nonce_from_b64)
+        .is_some()
+    {
         let Some(key) = crate::config::get().crypt_key_unconditional() else {
             tracing::warn!("thumb download needs crypt_password for encrypted part of {uid}");
             return Err(());

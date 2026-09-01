@@ -239,7 +239,9 @@ fn asset_root() -> std::path::PathBuf {
             std::env::current_dir().ok(),
             Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
         ];
-        let exists = |base: &std::path::Path| base.join("web/dist").is_dir() || base.join("locales").is_dir();
+        let exists = |base: &std::path::Path| {
+            base.join("web/dist").is_dir() || base.join("locales").is_dir()
+        };
         candidates
             .into_iter()
             .flatten()
@@ -367,7 +369,10 @@ impl Config {
         if self.crypt_password.is_empty() {
             return None;
         }
-        Some(crate::crypt::derive_key(&self.crypt_password, &self.crypt_salt))
+        Some(crate::crypt::derive_key(
+            &self.crypt_password,
+            &self.crypt_salt,
+        ))
     }
 
     pub fn tg_configured(&self) -> bool {

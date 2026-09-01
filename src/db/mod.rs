@@ -20,7 +20,9 @@ pub use settings::{
     get_bot_draft, get_channels, get_instance, get_rules, get_split, get_token_epoch,
     set_bot_draft, set_channels, set_instance, set_rules, set_split,
 };
-pub use tg_session::{SessionKind, delete_session, delete_sessions_of, list_keys, read_session, write_session};
+pub use tg_session::{
+    SessionKind, delete_session, delete_sessions_of, list_keys, read_session, write_session,
+};
 
 type Conn = surrealdb::engine::local::Db;
 

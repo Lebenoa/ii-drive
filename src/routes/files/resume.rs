@@ -12,8 +12,8 @@ use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 
 use super::upload::{
-    PartPlan, StoredFile, UploaderHandle, collect_uploaders, is_transient, persist_row,
-    store_from_file, PART_RETRIES,
+    PART_RETRIES, PartPlan, StoredFile, UploaderHandle, collect_uploaders, is_transient,
+    persist_row, store_from_file,
 };
 
 /// In-flight resumable uploads. Process-local on purpose: a restart
@@ -263,7 +263,8 @@ pub async fn init(
     {
         let mut guard = sessions().await;
         let map = &mut *guard;
-        sweep(map).await;            map.insert(
+        sweep(map).await;
+        map.insert(
             id.clone(),
             Session {
                 owner: uid,
@@ -514,15 +515,7 @@ pub async fn complete(
         // Overlap uploaders were consumed by a prior attempt.  Fall back
         // to sequential upload from the spill buffer.
         store_from_file(
-            state,
-            tg,
-            uid,
-            &s.path,
-            s.declared,
-            &s.name,
-            &s.mime,
-            &s.folder,
-            &head,
+            state, tg, uid, &s.path, s.declared, &s.name, &s.mime, &s.folder, &head,
         )
         .await
     } else {

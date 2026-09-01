@@ -36,8 +36,8 @@
 #![allow(clippy::expect_used)]
 
 use crypto_secretbox::{AeadInPlace, KeyInit, Nonce, XSalsa20Poly1305};
-use std::pin::Pin;
 use std::io;
+use std::pin::Pin;
 
 pub use crypto_secretbox::Key;
 
@@ -387,8 +387,8 @@ pub struct EncryptingReader<R> {
     inner: R,
     cipher: XSalsa20Poly1305,
     nonce: Nonce,
-    buf: Vec<u8>,     // encrypted bytes ready to serve
-    pend: Vec<u8>,    // plaintext waiting to be sealed
+    buf: Vec<u8>,  // encrypted bytes ready to serve
+    pend: Vec<u8>, // plaintext waiting to be sealed
     finished: bool,
 }
 
@@ -532,13 +532,7 @@ where
     /// the inner stream must already be positioned at the first needed
     /// byte (the caller slices the per-part stream past the header and the
     /// skipped blocks).
-    pub fn at_block(
-        inner: S,
-        key: &Key,
-        nonce: [u8; NONCE_SIZE],
-        blocks: u64,
-        skip: u64,
-    ) -> Self {
+    pub fn at_block(inner: S, key: &Key, nonce: [u8; NONCE_SIZE], blocks: u64, skip: u64) -> Self {
         Self {
             inner,
             cipher: XSalsa20Poly1305::new(key),
@@ -694,7 +688,6 @@ where
 #[allow(dead_code)]
 pub type CryptResult = io::Result<bytes::Bytes>;
 
-
 /// Like `read_exact`, but a short read at true EOF is fine — returns the
 /// bytes read (0 only when EOF hit before anything arrived).
 #[allow(dead_code)]
@@ -800,14 +793,23 @@ mod tests {
 
     #[test]
     fn sizes_correspond() {
-        for n in [0u64, 1, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1, 3 * 64 * 1024] {
+        for n in [
+            0u64,
+            1,
+            64 * 1024 - 1,
+            64 * 1024,
+            64 * 1024 + 1,
+            3 * 64 * 1024,
+        ] {
             let c = encrypted_size(n);
             assert_eq!(decrypted_size(c), Some(n), "n={n}");
         }
     }
     #[test]
     fn nonce_b64_roundtrips_and_rejects_garbage() {
-        let n = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+        let n = [
+            0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+        ];
         let s = nonce_b64(&n);
         assert_eq!(nonce_from_b64(&s), Some(n));
         // Wrong length decodes but fails to fit a nonce; junk fails to
@@ -898,6 +900,4 @@ mod tests {
         let first = dec.next().await.expect("a chunk");
         assert!(first.is_err());
     }
-
-
 }

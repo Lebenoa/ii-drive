@@ -3,8 +3,8 @@ use color_eyre::eyre::WrapErr;
 mod app;
 mod art;
 mod auth;
-mod crypt;
 mod config;
+mod crypt;
 mod db;
 mod error;
 mod routes;
@@ -59,7 +59,11 @@ async fn main() -> color_eyre::Result<()> {
         .wrap_err_with(|| format!("failed to open database `{}`", cfg.db_path))?;
     // The Telegram hub holds its own clone of the handle, and namespace
     // selection does not carry across clones — see `db::attach_session`.
-    state.hub.attach_session().await.map_err(color_eyre::Report::msg)?;
+    state
+        .hub
+        .attach_session()
+        .await
+        .map_err(color_eyre::Report::msg)?;
 
     // Before anything can serve a request, so no upload is ever checked
     // against the placeholder cap the lazy state had to start with.

@@ -23,12 +23,10 @@ async fn read_pool(db: &surrealdb::Surreal<Conn>, id: &str) -> Result<Vec<BotInf
     let Some(row) = rows.into_iter().next() else {
         return Ok(Vec::new());
     };
-    row.get("bots_json")
-        .and_then(|v| v.as_str())
-        .map_or_else(
-            || Ok(Vec::new()),
-            |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("bots shape: {e}"))),
-        )
+    row.get("bots_json").and_then(|v| v.as_str()).map_or_else(
+        || Ok(Vec::new()),
+        |s| serde_json::from_str(s).map_err(|e| DbError::Shape(format!("bots shape: {e}"))),
+    )
 }
 
 /// All bots configured by `owner`; empty when none.
