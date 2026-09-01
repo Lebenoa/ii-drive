@@ -4,31 +4,31 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-color-eyre = "0.6.5"
-crypto_secretbox = "0.1"
-scrypt = "0.11"
-regex = "1"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.23"
 bytes = "1"
+color-eyre = "0.6.5"
+crypto_secretbox = "0.1"
 futures = "0.3"
-mtprsto = { git = "https://github.com/Lebenoa/mtprsto", branch = "docs-layer" }
 hex = "0.4"
-hmac = "0.13"# Still-image decode, AVIF encode in-process (chosen over JPEG/WebP in a
+hmac = "0.13"  # Still-image decode, AVIF encode in-process (chosen over JPEG/WebP in a
 # size bake-off — see thumbs.rs). `webp` is decode-only (its encoder is
 # lossless-only); bmp/tiff/ico keep coverage for camera/scanner formats;
 # AVIF stills are not decodable in-process (encode only).
 image = { version = "0.25.10", default-features = false, features = ["avif", "bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 mime_guess = "2"
+mtprsto = { git = "https://github.com/Lebenoa/mtprsto", branch = "docs-layer" }
 rand = "0.10"
+regex = "1"
+scrypt = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 subtle = "2"
 surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-surrealkv"] }
 thiserror = "2"
+time = { version = "0.3", default-features = false, features = ["local-offset", "std"] }
 tokio = { version = "1", features = ["full"] }
-time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 toml = "1"
@@ -38,21 +38,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = "3"
 
 [dev-dependencies]
-tempfile = "3"
 # Tests open a store per case. The in-memory engine is the same `local::Db`
 # type as the file-backed one but needs no temp directory and runs the suite
 # in ~1.5s instead of ~6.5s; only the persistence test wants a real file.
 surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-mem"] }
+tempfile = "3"
 
 [profile.release]
 # Whole-program view: fat LTO plus a single codegen unit let LLVM inline
 # and prune across crate boundaries. Compile time rises sharply; that cost
 # belongs to releases only.
 opt-level = 3
+strip = true
 lto = "fat"
-codegen-units = 1
 # No unwinding machinery: smaller binary, faster panic path. Consequence:
 # a panic in ANY task takes down the whole process instead of killing only
 # that task (tokio can no longer contain it).
 panic = "abort"
-strip = true
+codegen-units = 1
