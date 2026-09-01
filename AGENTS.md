@@ -134,11 +134,14 @@ Split rule: if code knows TL constructors, byte layouts, or response
 shapes, it belongs in mtprsto; if it knows HTTP, storage chats, or the
 web client, it stays here. Wire notes worth keeping in mind:
 
-- `channels.getMessages`/`deleteMessages` builders use the **legacy
-  layer constructors** (`#e5906e3f` / `#84c1f4e6`) because Telegram
-  still serves them and the modern shapes differ (`Vector<InputMessage>`,
-  a `flags` word). Do not "upgrade" them without checking the schema
-  JSONs in the mtprsto repo.
+- The server dropped the legacy `channels.getMessages#e5906e3f`
+  (`INPUT_METHOD_INVALID_3851447871` — that number is the ctor). Both
+  getMessages builders now use the current schema shapes
+  (`#ad8c9a23` / `#63c66506`, ids wrapped in `inputMessageID#a676a322`),
+  and `channels.deleteMessages` uses `#84c1fd4e` (no flags word; the old
+  `#84c1f4e6` had transposed digits and was never real). Verify any ctor
+  against the `.tl` schemas in the mtprsto repo before changing it — the
+  two mistakes above both passed layout tests for months.
 - `rpc::build_get_dialogs` takes `folder_id: Option<i32>` **and**
   `offset_peer` — conditional TL fields serialize before mandatory ones
   (this exact ordering was once a real bug).
