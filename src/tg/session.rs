@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mtprsto::client::Client;
-use mtprsto::serialize::{TLReader, TLWriter};
+use mtprsto::rpc;
+use mtprsto::serialize::TLReader;
 use mtprsto::session::{SessionData, SessionStorage};
 use mtprsto::types;
 use tokio::sync::Mutex;
@@ -12,6 +13,12 @@ use crate::config::Config;
 use super::{Conn, ROTATION, State, TgManager, TgStatus, UserInfo, friendly};
 
 type Db = surrealdb::Surreal<surrealdb::engine::local::Db>;
+
+/// How long a verified-good [`TgStatus::status`] answer is served from the
+/// manager's cache. Short on purpose: a stale "authorized" only delays
+/// revocation detection by this much, while every second of TTL absorbs a
+/// whole refresh burst that Telegram would otherwise count per request.
+const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// mtprsto session persistence over the embedded store: one
 /// [`SessionData`] JSON blob per row of the `tg_session` table.
@@ -113,7 +120,9 @@ impl TgManager {
                 peers: HashMap::new(),
                 me: None,
                 bots: HashMap::new(),
+                status_cache: None,
             }),
+            status_flight: Mutex::new(()),
         }
     }
 
@@ -237,6 +246,9 @@ impl TgManager {
             let mut st = self.st.lock().await;
             st.peers.clear();
             st.me = None;
+            // A closed session's verified answer is worthless — logout and
+            // re-login must always probe fresh.
+            st.status_cache = None;
             (st.conn.take(), std::mem::take(&mut st.bots))
         };
         for (_, bot) in bots {
@@ -248,8 +260,27 @@ impl TgManager {
     }
 
     /// Status for /api/me. Never fails — reports degradation in the payload.
+    ///
+    /// Answers are cached for [`STATUS_TTL`]: every page load asks, and an
+    /// uncached `users.getFullUser` per load is exactly how the account
+    /// earns a flood-wait on `get_me`. Only a fully-good answer is cached —
+    /// failures and login transitions always re-probe — and concurrent
+    /// callers share one in-flight refresh via [`TgManager::status_flight`].
     #[allow(clippy::arithmetic_side_effects)] // retry counter is bounded at < 2, so `attempt += 1` cannot overflow
     pub async fn status(&self) -> TgStatus {
+        // Serialize refreshes. Queued callers re-read the cache the leader
+        // stored instead of issuing their own RPC; when the leader finished
+        // without a good answer (unreachable, flood), each caller in turn
+        // still probes once — today's degradation reporting, just ordered.
+        let _flight = self.status_flight.lock().await;
+        {
+            let st = self.st.lock().await;
+            if let Some((at, cached)) = &st.status_cache
+                && at.elapsed() < STATUS_TTL
+            {
+                return cached.clone();
+            }
+        }
         match self.ensure_connected().await {
             Err(e) => TgStatus {
                 connected: false,
@@ -274,17 +305,24 @@ impl TgManager {
                                 username: user.username().map(ToString::to_string),
                                 phone: user.phone().map(ToString::to_string),
                             };
-                            let mut st = self.st.lock().await;
-                            if st.me.is_none() {
-                                st.me = Some(info);
+                            let status;
+                            {
+                                // Scoped so the guard drops before the
+                                // return value moves out (drop tightening).
+                                let mut st = self.st.lock().await;
+                                if st.me.is_none() {
+                                    st.me = Some(info);
+                                }
+                                status = TgStatus {
+                                    connected: true,
+                                    authorized: true,
+                                    user: st.me.clone(),
+                                    relogin: false,
+                                    error: None,
+                                };
+                                st.status_cache = Some((std::time::Instant::now(), status.clone()));
                             }
-                            return TgStatus {
-                                connected: true,
-                                authorized: true,
-                                user: st.me.clone(),
-                                relogin: false,
-                                error: None,
-                            };
+                            return status;
                         }
                         Err(e) => {
                             let msg = e.to_string();
@@ -363,20 +401,19 @@ impl TgManager {
             | types::PhotoSize::PhotoSizeProgressive { r#type, .. } => r#type.clone(),
             _ => return None,
         };
-        // Photos download through inputPhotoFileLocation#401584e0 keyed by
-        // the photo's id/access hash plus the chosen size's type char —
-        // mtprsto's `build_get_file` only knows volume/document locations.
-        let mut w = TLWriter::new();
-        w.write_u32(types::UPLOAD_GET_FILE);
-        w.write_i32(0); // flags: no precise, no cdn_supported
-        w.write_u32(0x4015_84e0);
-        w.write_i64(id);
-        w.write_i64(access_hash);
-        w.write_bytes(&reference);
-        w.write_bytes(thumb_size.as_bytes());
-        w.write_i64(0); // offset
-        w.write_i32(1024 * 1024); // limit
-        let raw = client.invoke_raw(w.into_bytes()).await.ok()?;
+        // The avatar downloads through mtprsto's `build_get_file` with the
+        // photo location keyed by id/access hash plus the chosen size's
+        // type char; 1 MiB is plenty for the largest server-side thumb.
+        let location = types::FileLocation::Photo {
+            id,
+            access_hash,
+            reference,
+            thumb_size,
+            dc_id: 0,
+            size: 0,
+        };
+        let raw = rpc::build_get_file(&location, 0, 1024 * 1024);
+        let raw = client.invoke_raw(raw).await.ok()?;
         match mtprsto::file::parse_get_file(&raw).ok()? {
             mtprsto::file::GetFile::File { bytes, .. } => (!bytes.is_empty()).then_some(bytes),
             // Thumbnails are never served from a CDN DC.
@@ -502,6 +539,62 @@ mod tests {
             "the unreadable row is gone"
         );
         drop(conn);
+    }
+
+    /// The status cache absorbs repeated /api/me calls without any
+    /// Telegram RPC: a fresh cached answer is served verbatim, and one
+    /// older than [`STATUS_TTL`] forces a real probe (which, with no
+    /// reachable Telegram in the test, reports degradation). Regression
+    /// guard for the FLOOD_WAIT-on-refresh burst. The default config is
+    /// unconfigured (`api_id = 0`), so probes fail fast — no network.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_is_served_from_cache_within_the_ttl() {
+        use std::time::{Duration, Instant};
+
+        let db = scratch_db().await;
+        let manager = TgManager::new(Config::default(), db, "user-42".into(), 42);
+
+        let green = TgStatus {
+            connected: true,
+            authorized: true,
+            user: Some(UserInfo {
+                id: 42,
+                name: "test".into(),
+                username: None,
+                phone: None,
+            }),
+            relogin: false,
+            error: None,
+        };
+        // Seed the cache the way a successful get_me would.
+        manager.st.lock().await.status_cache = Some((Instant::now(), green));
+        let served = manager.status().await;
+        assert!(
+            served.authorized && served.error.is_none(),
+            "a fresh cached answer is served without probing"
+        );
+
+        // Age the entry past the TTL: the next status() must go to the
+        // network, which is unreachable here, so it degrades instead of
+        // serving stale truth.
+        let stale_at = Instant::now() - STATUS_TTL - Duration::from_secs(1);
+        let mut st = manager.st.lock().await;
+        st.status_cache = st.status_cache.take().map(|(_, s)| (stale_at, s));
+        drop(st);
+        let degraded = manager.status().await;
+        assert_eq!(
+            degraded.authorized, false,
+            "expired cache must not answer as authorized"
+        );
+
+        // close() invalidates, so a re-login over the same manager probes
+        // fresh rather than resurrecting the previous session's answer.
+        manager.st.lock().await.status_cache = Some((Instant::now(), degraded));
+        manager.close().await;
+        assert!(
+            manager.st.lock().await.status_cache.is_none(),
+            "close() clears the status cache"
+        );
     }
 
     fn base64_of(bytes: &[u8]) -> String {

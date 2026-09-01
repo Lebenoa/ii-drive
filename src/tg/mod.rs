@@ -116,6 +116,10 @@ struct State {
     peers: HashMap<String, PeerRef>,
     me: Option<UserInfo>,
     bots: HashMap<i64, BotSession>,
+    /// Last fully-good [`TgStatus::status`] answer and when it was
+    /// verified. [`TgManager::status`] serves it instead of re-asking
+    /// Telegram until it goes stale — see [`super::session::STATUS_TTL`].
+    status_cache: Option<(std::time::Instant, TgStatus)>,
 }
 
 /// Placeholder id for a manager whose account is not known yet — a login
@@ -134,6 +138,10 @@ pub struct TgManager {
     /// Account this manager serves, or [`UNKNOWN_USER`] while signing in.
     user_id: i64,
     st: Mutex<State>,
+    /// Serializes [`TgManager::status`] refreshes so concurrent callers
+    /// (page load, top bar, warm-up) share one `get_me` round trip instead
+    /// of each issuing their own — the burst that earns a flood-wait.
+    status_flight: Mutex<()>,
 }
 
 /// Sends one text message and returns its id. Thin wrapper over
