@@ -55,11 +55,6 @@ pub fn nonce_from_b64(s: &str) -> Option<[u8; NONCE_SIZE]> {
     raw.try_into().ok()
 }
 
-/// Alias so upload.rs reads naturally at the call site.
-pub fn base64_encode(nonce: &[u8; NONCE_SIZE]) -> String {
-    nonce_b64(nonce)
-}
-
 /// Magic that marks a container as encrypted.
 const MAGIC: &[u8; 10] = b"TELDRIVE\x00\x00";
 const NONCE_SIZE: usize = 24;

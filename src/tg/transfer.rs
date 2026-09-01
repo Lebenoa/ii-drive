@@ -18,13 +18,6 @@ const PART_SIZE: usize = 512 * 1024;
 const UPLOAD_WORKERS: usize = 4;
 
 impl TgManager {
-    /// Owner connection's pool and home DC id, for upload workers and the
-    /// bench diagnostic.
-    pub(super) async fn upload_pools(&self) -> Result<(i32, Arc<SenderPool>), String> {
-        let client = self.ensure_connected().await?;
-        Ok((client.dc_id(), client.pool()))
-    }
-
     /// Streams `reader` up to Telegram and posts it as a document message in
     /// the given storage chat. Returns `(message id, name, mime, thumb)` —
     /// thumb is the tiny JPEG Telegram generates, when it made one.
@@ -112,7 +105,7 @@ impl TgManager {
         let (own_msg, own_secs) = {
             let client = self.ensure_connected().await?;
             let peer = self.storage_peer(chat).await?;
-            let (_, pool) = self.upload_pools().await?;
+            let pool = client.pool();
             run_bench(client, peer, pool, size).await?
         };
 

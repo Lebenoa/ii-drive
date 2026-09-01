@@ -7,13 +7,6 @@ use mtprsto::types::{self, InputChannel, InputPeer, InputUser};
 use super::{BotHandle, BotSession, PeerRef, TgManager, friendly};
 
 impl TgManager {
-    /// Deterministic per bot and per account: the owning account's
-    /// session row key, plus the numeric prefix of the token.
-    fn bot_session_key(&self, token: &str) -> String {
-        let key = token.split(':').next().unwrap_or("bot");
-        format!("{}-bot-{key}", self.session_key())
-    }
-
     /// Signs a bot in (or restores its persisted session) and adds it to
     /// the download pool.
     pub async fn configure_bot(&self, token: &str) -> Result<(String, i64), String> {
@@ -22,7 +15,13 @@ impl TgManager {
                 "Telegram is not configured: set api_id and api_hash in config.toml".to_string(),
             );
         }
-        let key = self.bot_session_key(token);
+        // Session row key: deterministic per bot and per account — the
+        // owning account's session row key, plus the token's numeric prefix.
+        let key = format!(
+            "{}-bot-{}",
+            self.session_key(),
+            token.split(':').next().unwrap_or("bot")
+        );
         let conn = self.open_conn(&key, crate::db::SessionKind::Bot).await?;
         conn.client
             .connect()

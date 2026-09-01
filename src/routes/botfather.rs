@@ -15,12 +15,6 @@ pub struct BotFatherBody {
 /// this is a stuck conversation, and the row should not grow without bound.
 const MAX_DRAFT_LOG: usize = 40;
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
-}
-
 /// The stage the conversation is parked at, derived from the transcript so
 /// there is a single source of truth. `BotFather` asks for a display name
 /// first, then a username, then issues the token.
@@ -101,7 +95,9 @@ pub async fn send(
     if let Some(tok) = crate::tg::bot_token_regex().and_then(|re| re.find(&reply)) {
         draft.token = tok.as_str().to_string();
     }
-    draft.updated_at = now_secs();
+    draft.updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
     crate::db::set_bot_draft(&state.db, &key, &draft).await?;
 
     Ok(Json(json!({

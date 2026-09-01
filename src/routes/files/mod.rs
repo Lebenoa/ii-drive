@@ -28,22 +28,15 @@ pub use upload::*;
 const HEAD_CAP: usize = 512 * 1024;
 
 /// Human-readable byte count for error messages ("2.0 GiB").
+// Display-only: f64 precision loss past 2^52 is irrelevant for a human label.
+#[allow(clippy::cast_precision_loss, clippy::as_conversions)]
 fn bytes_repr(n: u64) -> String {
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
-    // Display-only: f64 precision loss past 2^52 is irrelevant for a human label.
-    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-    fn gib(n: u64) -> f64 {
-        n as f64 / GIB as f64
-    }
-    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
-    fn mib(n: u64) -> f64 {
-        n as f64 / MIB as f64
-    }
     if n >= GIB {
-        format!("{:.1} GiB", gib(n))
+        format!("{:.1} GiB", n as f64 / GIB as f64)
     } else if n >= MIB {
-        format!("{:.1} MiB", mib(n))
+        format!("{:.1} MiB", n as f64 / MIB as f64)
     } else {
         format!("{n} B")
     }

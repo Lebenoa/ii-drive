@@ -4,33 +4,16 @@ use super::{Conn, DbError};
 /// reset their data directory rather than migrate.
 pub(super) const SCHEMA_LATEST: u64 = 1;
 
-pub(super) async fn set_schema_version(
-    db: &surrealdb::Surreal<Conn>,
-    v: u64,
-) -> Result<(), DbError> {
-    #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
-    // Schema version is a small u64 counter; always fits i64.
-    let mut res = db
-        .query("UPSERT setting:schema SET version = $v")
-        .bind(("v", v as i64))
-        .await?;
-    let _ = res.take::<surrealdb::types::Value>(0usize)?;
-    Ok(())
-}
-
-/// Some(version) when `setting:schema` exists, None on a database that has
-/// never been through `migrate()`.
-async fn schema_version_recorded(db: &surrealdb::Surreal<Conn>) -> Result<Option<u64>, DbError> {
+pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
+    // Some(version) when `setting:schema` exists, None on a database that
+    // has never been through `migrate()`.
     let mut res = db.query("SELECT version FROM setting:schema").await?;
     let rows: Vec<serde_json::Value> = res.take(0)?;
-    Ok(rows
+    let recorded = rows
         .first()
         .and_then(|r| r.get("version"))
-        .and_then(serde_json::Value::as_u64))
-}
-
-pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
-    match schema_version_recorded(db).await? {
+        .and_then(serde_json::Value::as_u64);
+    match recorded {
         None => {
             // Fresh install: create everything the current layout needs and
             // stamp v1. Owner indexes keep per-tenant listings indexed from
@@ -43,7 +26,13 @@ pub async fn migrate(db: &surrealdb::Surreal<Conn>) -> Result<u64, DbError> {
                 .await?;
             let _ = res.take::<surrealdb::types::Value>(0usize)?;
             let _ = res.take::<surrealdb::types::Value>(1usize)?;
-            set_schema_version(db, SCHEMA_LATEST).await?;
+            #[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
+            // Schema version is a small u64 counter; always fits i64.
+            let mut stamp = db
+                .query("UPSERT setting:schema SET version = $v")
+                .bind(("v", SCHEMA_LATEST as i64))
+                .await?;
+            let _ = stamp.take::<surrealdb::types::Value>(0usize)?;
             tracing::info!("fresh database initialized at schema v{SCHEMA_LATEST}");
         }
         Some(v) if v == SCHEMA_LATEST => {}

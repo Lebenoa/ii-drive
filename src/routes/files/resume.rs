@@ -227,7 +227,7 @@ pub async fn init(
                     Ok(Some(key)) => {
                         let (er, used) = crate::crypt::EncryptingReader::new(r, &key);
                         reader = Box::new(er);
-                        nonce = Some(crate::crypt::base64_encode(&used));
+                        nonce = Some(crate::crypt::nonce_b64(&used));
                         upload_size = crate::crypt::encrypted_size(expected);
                     }
                     _ => reader = Box::new(r),
@@ -314,16 +314,6 @@ async fn owned_session(uid: i64, id: &str) -> ApiResult<Session> {
     })
 }
 
-async fn set_received(id: &str, n: u64) {
-    let mut map = SESSIONS.lock().await;
-    if let Some(s) = map.get_mut(id) {
-        s.received = n;
-        s.last_touch = Instant::now();
-        // Broadcast so background uploaders know their part is on disk.
-        let _ = s.progress_tx.send(n);
-    }
-}
-
 pub async fn status(
     Extension(Caller(uid)): Extension<Caller>,
     Path(id): Path<String>,
@@ -379,7 +369,15 @@ pub async fn chunk(
     // Bounded as above: never exceeds declared size.
     #[allow(clippy::arithmetic_side_effects, clippy::as_conversions)]
     let received = s.received + body.len() as u64;
-    set_received(&id, received).await;
+    {
+        let mut map = SESSIONS.lock().await;
+        if let Some(s) = map.get_mut(&id) {
+            s.received = received;
+            s.last_touch = Instant::now();
+            // Broadcast so background uploaders know their part is on disk.
+            let _ = s.progress_tx.send(received);
+        }
+    }
     Ok(Json(serde_json::json!({ "received": received })))
 }
 

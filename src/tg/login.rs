@@ -7,7 +7,7 @@ use mtprsto::types;
 
 use crate::config::Config;
 
-use super::{TgManager, UNKNOWN_USER, friendly, get_me_info};
+use super::{TgManager, UNKNOWN_USER, friendly};
 
 /// How far a sign-in has got. Each step consumes the previous one's
 /// exchange client, so a flow can never be replayed. Under grammers this
@@ -213,9 +213,13 @@ impl Pending {
     /// the fallback for when the auth exchange itself did not report it.
     async fn known_user_id(&self) -> Result<i64, String> {
         let client = self.manager.ensure_connected().await?;
-        let me = get_me_info(&client).await;
-        me.map(|info| info.id)
-            .ok_or_else(|| "signed in but Telegram did not report the account; try again".into())
+        match client.get_me().await {
+            Ok(u) => Ok(u.id().0),
+            Err(e) => {
+                tracing::warn!("get_me failed: {e}");
+                Err("signed in but Telegram did not report the account; try again".into())
+            }
+        }
     }
 }
 

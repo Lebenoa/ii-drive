@@ -52,17 +52,6 @@ impl DbSessions {
             owner,
         }
     }
-
-    /// Persists `data` as this key's session blob, keeping the row's
-    /// kind and owner so saves never re-key a pending login or a bot
-    /// session into an account row.
-    async fn save_data(&self, data: &SessionData) -> Result<(), String> {
-        let blob = serde_json::to_string(data)
-            .map_err(|e| format!("cannot serialize session {}: {e}", self.key))?;
-        crate::db::write_session(&self.db, &self.key, self.kind, self.owner, &blob)
-            .await
-            .map_err(|e| format!("cannot persist session {}: {e}", self.key))
-    }
 }
 
 impl SessionStorage for DbSessions {
@@ -82,7 +71,16 @@ impl SessionStorage for DbSessions {
     }
 
     fn save(&mut self, data: &SessionData) -> mtprsto::Result<()> {
-        block_on_db(self.save_data(data))
+        // Persists `data` as this key's session blob, keeping the row's
+        // kind and owner so saves never re-key a pending login or a bot
+        // session into an account row.
+        block_on_db(async {
+            let blob = serde_json::to_string(data)
+                .map_err(|e| format!("cannot serialize session {}: {e}", self.key))?;
+            crate::db::write_session(&self.db, &self.key, self.kind, self.owner, &blob)
+                .await
+                .map_err(|e| format!("cannot persist session {}: {e}", self.key))
+        })
     }
 
     fn delete(&mut self) -> mtprsto::Result<()> {

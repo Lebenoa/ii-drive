@@ -136,27 +136,6 @@ pub struct TgManager {
     st: Mutex<State>,
 }
 
-fn user_info(u: &mtprsto::types::User) -> UserInfo {
-    UserInfo {
-        id: u.id().0,
-        name: u.full_name(),
-        username: u.username().map(ToString::to_string),
-        // Always present for one's own account, which is the only user
-        // this is ever called for.
-        phone: u.phone().map(ToString::to_string),
-    }
-}
-
-async fn get_me_info(client: &Client) -> Option<UserInfo> {
-    match client.get_me().await {
-        Ok(u) => Some(user_info(&u)),
-        Err(e) => {
-            tracing::warn!("get_me failed: {e}");
-            None
-        }
-    }
-}
-
 /// Sends one text message and returns its id. Thin wrapper over
 /// [`Client::send_to_peer`] mapping errors into this crate's `String`
 /// convention (auth-dead errors collapse to [`SESSION_INVALID_MSG`]).

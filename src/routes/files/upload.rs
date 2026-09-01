@@ -333,7 +333,7 @@ async fn spill_upload(
                 Ok(Some(key)) => {
                     let (er, used) = crate::crypt::EncryptingReader::new(base_r, &key);
                     reader = Box::new(er);
-                    nonce = Some(crate::crypt::base64_encode(&used));
+                    nonce = Some(crate::crypt::nonce_b64(&used));
                     upload_size = crate::crypt::encrypted_size(expected);
                 }
                 _ => reader = Box::new(base_r),
@@ -604,7 +604,7 @@ pub(super) async fn store_from_file(
                     Ok(Some(key)) => {
                         let (er, used) = crate::crypt::EncryptingReader::new(r, &key);
                         reader = Box::new(er);
-                        nonce = Some(crate::crypt::base64_encode(&used));
+                        nonce = Some(crate::crypt::nonce_b64(&used));
                         upload_size = crate::crypt::encrypted_size(expected);
                     }
                     _ => reader = Box::new(r),
