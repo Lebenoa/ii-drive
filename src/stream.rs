@@ -16,20 +16,206 @@ use crate::tg::{TgManager, get_messages_by_id};
 const ALIGN: u64 = 4096;
 /// Per-request chunk. 1 MiB is the server's cap per `upload.getFile`.
 const CHUNK: usize = 1024 * 1024;
+/// Parallel `getFile` workers per part download — the pool spreads the
+/// requests over its bot connections, multiplying throughput on
+/// high-RTT links (the gotd-downloader model).
+const WORKERS: usize = 4;
+
+/// A shared, refreshable `FileLocation`: workers clone the current
+/// location; when a file reference expires, one worker refetches the
+/// message and bumps the generation so the rest reuse its result
+/// instead of stampeding `get_messages`.
+#[derive(Default)]
+struct LocSlot {
+    generation: u64,
+    loc: Option<types::FileLocation>,
+}
+
+type SharedLocSlot = Arc<std::sync::Mutex<LocSlot>>;
+
+/// Pulls the download location and document size out of a part message.
+async fn fetch_location(
+    client: &Client,
+    peer: &InputPeer,
+    msg_id: i32,
+) -> Result<(types::FileLocation, u64), String> {
+    let msgs = get_messages_by_id(client, peer, &[MsgId(i64::from(msg_id))]).await?;
+    let Some(msg) = msgs.into_iter().next() else {
+        return Err("message no longer exists".to_string());
+    };
+    let Some(doc) = msg.document() else {
+        return Err("message has no document media".to_string());
+    };
+    let size = match &doc {
+        mtprsto::types::Document::Document { size, .. } => u64::try_from(*size).unwrap_or(0),
+        mtprsto::types::Document::Empty { .. } => 0,
+    };
+    let loc = doc
+        .location()
+        .ok_or_else(|| "document is a placeholder with no media".to_string())?;
+    Ok((loc, size))
+}
+
+/// Fetches one aligned window, refetching the location through `slot`
+/// when the file reference expires. `limit` must already be aligned.
+///
+/// The refresh protocol: only the worker that observed the current
+/// generation refetches the message; the rest loop around and pick up
+/// the refreshed slot. The mutex is never held across an await.
+async fn fetch_window(
+    pool: &SenderPool,
+    slot: &SharedLocSlot,
+    client: &Client,
+    peer: &InputPeer,
+    msg_id: i32,
+    offset: u64,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    loop {
+        let (my_generation, loc) = {
+            let mut guard = slot.lock().expect("loc slot poisoned");
+            (guard.generation, guard.loc.clone())
+        };
+        let loc = match loc {
+            Some(loc) => loc,
+            None => {
+                let (loc, _) = fetch_location(client, peer, msg_id)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                let mut guard = slot.lock().expect("loc slot poisoned");
+                guard.generation += 1;
+                guard.loc = Some(loc.clone());
+                loc
+            }
+        };
+        let payload = rpc::build_get_file(&loc, offset.cast_signed(), limit as i32);
+        let raw = match pool.send_rpc(&payload).await {
+            Ok(raw) => raw,
+            Err(e) if e.is_file_reference() => {
+                mark_stale(slot, my_generation, client, peer, msg_id).await;
+                continue;
+            }
+            Err(e) => return Err(std::io::Error::other(format!("getFile: {e}"))),
+        };
+        return match mtprsto::file::parse_get_file(&raw) {
+            Ok(mtprsto::file::GetFile::File { bytes, .. }) => Ok(bytes),
+            Ok(_) => Err(std::io::Error::other(
+                "file is served from a CDN, which is not supported",
+            )),
+            Err(e) if e.is_file_reference() => {
+                mark_stale(slot, my_generation, client, peer, msg_id).await;
+                continue;
+            }
+            Err(e) => Err(std::io::Error::other(format!("getFile parse: {e}"))),
+        };
+    }
+}
+
+/// Refetches the download location if `my_generation` is still current —
+/// a stale-generation caller just adopts whoever refreshed it.
+async fn mark_stale(
+    slot: &SharedLocSlot,
+    my_generation: u64,
+    client: &Client,
+    peer: &InputPeer,
+    msg_id: i32,
+) {
+    {
+        let guard = slot.lock().expect("loc slot poisoned");
+        if guard.generation != my_generation {
+            return; // someone already refreshed it
+        }
+    }
+    match fetch_location(client, peer, msg_id).await {
+        Ok((loc, _)) => {
+            let mut guard = slot.lock().expect("loc slot poisoned");
+            guard.generation += 1;
+            guard.loc = Some(loc);
+        }
+        Err(e) => tracing::warn!("location refetch failed (msg {msg_id}): {e}"),
+    }
+}
+
+/// Fills one grid chunk of `expected` bytes at `offset`. The window
+/// never overshoots the document end: `limit` is the exact remaining
+/// byte count (the server rejects any window extending past the
+/// content, aligned or not). When a DC still rejects a valid-looking
+/// window with `LIMIT_INVALID` (observed on legacy 2-GiB parts,
+/// deterministically per offset), the fetch degrades to 4096-byte
+/// steps for this chunk rather than failing the whole file.
+async fn fetch_chunk(
+    pool: &SenderPool,
+    slot: &SharedLocSlot,
+    client: &Client,
+    peer: &InputPeer,
+    msg_id: i32,
+    offset: u64,
+    expected: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(expected);
+    let mut at = offset;
+    let mut min_limit = false;
+    let mut ladder_tries = 0u32;
+    while buf.len() < expected {
+        let want = expected - buf.len();
+        let limit = if min_limit {
+            (ALIGN as usize).min(want)
+        } else {
+            want
+        };
+        match fetch_window(pool, slot, client, peer, msg_id, at, limit).await {
+            Ok(bytes) if bytes.is_empty() => {
+                // Past the content end: the declared document size lies.
+                // Zero-fill the remainder so the byte positions the HTTP
+                // range promised still line up.
+                tracing::warn!(
+                    "getFile empty at {at} (msg {msg_id}); padding {} bytes",
+                    expected - buf.len()
+                );
+                buf.resize(expected, 0);
+                break;
+            }
+            Ok(bytes) => {
+                let take = bytes.len().min(want);
+                buf.extend_from_slice(&bytes[..take]);
+                at += take as u64;
+                // The window came back short of what was asked: EOF.
+                if bytes.len() < limit && buf.len() < expected {
+                    buf.resize(expected, 0);
+                    break;
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if !min_limit && msg.contains("LIMIT_INVALID") {
+                    // Degrade to aligned 4-KiB steps for this chunk.
+                    min_limit = true;
+                    ladder_tries += 1;
+                    if ladder_tries > 64 {
+                        return Err(std::io::Error::other(format!(
+                            "document window at {at} keeps failing; \
+                             part content is likely truncated"
+                        )));
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(buf)
+}
 
 /// A byte stream backed by `upload.getFile` that transparently refetches
-/// the message when the stored `file_reference` expires mid-stream,
-/// resuming from the exact offset already served. Serves from byte `start`
-/// (HTTP Range support): whole blocks are skipped server-side on Telegram,
-/// the sub-block remainder is discarded on the wire.
-// One unfold closure produces the whole download stream; splitting it
-// would scatter the refetch/resume state machine across functions.
+/// the message when the stored `file_reference` expires mid-stream, and
+/// fetches chunks through a bounded worker pool (gotd-downloader style):
+/// each worker grabs the next grid offset, the merger yields results in
+/// order, and HTTP Range prefixes are dropped from the first chunk.
+// The spawn/merge plumbing lives in one function: the worker contract
+// (index → ordered bytes) is only meaningful next to the merger.
 #[allow(
     clippy::arithmetic_side_effects, // byte offsets bounded by the file size and cap
     clippy::as_conversions,          // u64 offset to i64: file sizes < i64::MAX
-    clippy::indexing_slicing,        // slice/len arithmetic on the validated chunk buffer
-    clippy::cast_possible_truncation, // CHUNK is a fixed 1 MiB const, far below i32::MAX
-    clippy::cast_possible_wrap,      // CHUNK is a fixed 1 MiB const, always positive
     clippy::too_many_lines
 )]
 pub async fn file_stream_from(
@@ -37,195 +223,111 @@ pub async fn file_stream_from(
     message_id: i32,
     chat: &str,
     start: u64,
-) -> Result<impl Stream<Item = std::io::Result<Bytes>> + use<>, String> {
+) -> Result<(impl Stream<Item = std::io::Result<Bytes>> + use<>, u64), String> {
     let (client, peer, _bot, _dc_id, pool) = tg.pool_target(chat).await?;
 
-    let st = StreamState {
-        client,
-        peer,
-        pool,
-        msg_id: message_id,
-        loc: None,
-        doc_size: 0,
-        offset: start - start % ALIGN,
-        discard: start % ALIGN,
-        done: false,
-    };
+    // Grid: chunks of CHUNK bytes counted from the DOCUMENT start, so
+    // every window offset is 1 MiB-aligned — the server rejects
+    // full-size windows at merely-4-KiB-aligned offsets with
+    // LIMIT_INVALID. `base` is the grid cell holding `start`; the
+    // prefix before `start` is dropped from the first served chunk.
+    let first_idx = start / CHUNK as u64;
+    let base = first_idx * CHUNK as u64;
 
-    Ok(unfold(st, |mut st| async move {
-        loop {
-            if st.done {
-                return None;
+    let slot: SharedLocSlot = Arc::default();
+    let (loc, doc_size) = fetch_location(&client, &peer, message_id).await?;
+    {
+        let mut guard = slot.lock().expect("loc slot poisoned");
+        guard.loc = Some(loc);
+    }
+    // The part's actual content may fall short of the size the upload
+    // declared (a truncated upload). Everything past the real content
+    // is gone — the caller must surface that instead of desyncing the
+    // byte stream with made-up offsets.
+    let capacity = doc_size.saturating_sub(start);
+    if doc_size == 0 || capacity == 0 {
+        return Err(format!(
+            "part content truncated: document holds {doc_size} bytes, \
+             range starts at {start}"
+        ));
+    }
+    let total_chunks = doc_size.div_ceil(CHUNK as u64) - first_idx;
+    let first_discard = start - base;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, std::io::Result<Vec<u8>>)>(WORKERS * 2);
+    let next = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    for _ in 0..WORKERS.min(total_chunks as usize) {
+        let tx = tx.clone();
+        let next = next.clone();
+        let slot = slot.clone();
+        let client = client.clone();
+        let peer = peer.clone();
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if idx >= total_chunks {
+                    return;
+                }
+                let offset = base + idx * CHUNK as u64;
+                let expected = (CHUNK as u64).min(doc_size - offset) as usize;
+                let res =
+                    fetch_chunk(&pool, &slot, &client, &peer, message_id, offset, expected).await;
+                if tx.send((idx, res)).await.is_err() {
+                    return; // reader went away
+                }
             }
-            if st.loc.is_none() {
-                // Fetch (or refetch) the message: its document carries the
-                // fresh file_reference every download needs.
-                let msgs =
-                    get_messages_by_id(&st.client, &st.peer, &[MsgId(i64::from(st.msg_id))]).await;
-                let msgs = match msgs {
-                    Ok(m) => m,
-                    Err(e) => {
-                        return Some((
-                            Err(std::io::Error::other(format!("fetch message: {e}"))),
-                            st,
-                        ));
-                    }
-                };
-                let Some(msg) = msgs.into_iter().next() else {
-                    return Some((
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "message no longer exists",
-                        )),
-                        st,
-                    ));
-                };
-                let Some(doc) = msg.document() else {
-                    return Some((
-                        Err(std::io::Error::other("message has no document media")),
-                        st,
-                    ));
-                };
-                let Some(loc) = doc.location() else {
-                    return Some((
-                        Err(std::io::Error::other(
-                            "document is a placeholder with no media",
-                        )),
-                        st,
-                    ));
-                };
-                tracing::debug!(
-                    "msg={} doc {}",
-                    st.msg_id,
-                    match &doc {
-                        mtprsto::types::Document::Document {
-                            size, mime_type, ..
-                        } => {
-                            format!("size={size} mime={mime_type}")
+        });
+    }
+    drop(tx);
+
+    let pending: std::collections::BTreeMap<u64, Vec<u8>> = Default::default();
+    let stream = unfold(
+        (rx, pending, 0u64, first_discard, total_chunks),
+        |mut st| async move {
+            let (rx, pending, next_idx, discard, total_chunks) = &mut st;
+            loop {
+                let bytes = match pending.remove(next_idx) {
+                    Some(bytes) => bytes,
+                    None => match rx.recv().await {
+                        Some((idx, Ok(bytes))) => {
+                            if &idx != next_idx {
+                                pending.insert(idx, bytes);
+                                continue;
+                            }
+                            bytes
                         }
-                        mtprsto::types::Document::Empty { .. } => "empty".to_string(),
-                    }
-                );
-                st.doc_size = match &doc {
-                    mtprsto::types::Document::Document { size, .. } => {
-                        u64::try_from(*size).unwrap_or(0)
-                    }
-                    mtprsto::types::Document::Empty { .. } => 0,
+                        Some((_, Err(e))) => {
+                            return Some((Err(std::io::Error::other(e)), st));
+                        }
+                        None => {
+                            // Workers drained: only legitimate at EOF.
+                            return if next_idx >= total_chunks {
+                                None
+                            } else {
+                                Some((Err(std::io::Error::other("download worker died")), st))
+                            };
+                        }
+                    },
                 };
-                st.loc = Some(loc);
-            }
-
-            let Some(loc) = st.loc.as_ref() else {
-                return Some((Err(std::io::Error::other("download location missing")), st));
-            };
-            // Telegram answers LIMIT_INVALID unless BOTH offset and limit
-            // are 4096-divisible AND offset+limit stays within the
-            // document's 4096-aligned end — so the final chunk rounds the
-            // remaining bytes UP to the alignment instead of clamping.
-            let remaining = st.doc_size.saturating_sub(st.offset);
-            if remaining == 0 {
-                // Aligned start sits at (or past) the document end.
-                return None;
-            }
-            let limit = remaining.min(CHUNK as u64).next_multiple_of(4096);
-            let limit = limit.min(CHUNK as u64) as usize;
-            let payload = rpc::build_get_file(loc, st.offset.cast_signed(), limit as i32);
-            tracing::debug!(
-                "getFile offset={} limit={limit} discard={} msg={}",
-                st.offset,
-                st.discard,
-                st.msg_id
-            );
-            // Ok(None) means "file reference expired — location rebuilt,
-            // fetch again at the same offset".
-            let bytes = match st.pool.send_rpc(&payload).await {
-                Ok(raw) => match mtprsto::file::parse_get_file(&raw) {
-                    Ok(mtprsto::file::GetFile::File { bytes, .. }) => {
-                        tracing::debug!("getFile -> {} bytes", bytes.len());
-                        Some(bytes)
+                let mut chunk = Bytes::from(bytes);
+                if *discard > 0 {
+                    let d = usize::try_from(*discard)
+                        .unwrap_or(chunk.len())
+                        .min(chunk.len());
+                    chunk = chunk.slice(d..);
+                    *discard -= d as u64;
+                    if chunk.is_empty() {
+                        *next_idx += 1;
+                        continue;
                     }
-                    Ok(_) => {
-                        return Some((
-                            Err(std::io::Error::other(
-                                "file is served from a CDN, which is not supported",
-                            )),
-                            st,
-                        ));
-                    }
-                    Err(e) if e.is_file_reference() => {
-                        tracing::info!("file reference expired mid-download; refetching");
-                        st.loc = None;
-                        None
-                    }
-                    Err(e) => {
-                        return Some((
-                            Err(std::io::Error::other(format!("download failed: {e}"))),
-                            st,
-                        ));
-                    }
-                },
-                Err(e) if e.is_file_reference() => {
-                    tracing::info!("file reference expired mid-download; refetching");
-                    st.loc = None;
-                    None
                 }
-                Err(e) => {
-                    return Some((
-                        Err(std::io::Error::other(format!("download failed: {e}"))),
-                        st,
-                    ));
-                }
-            };
-            let Some(bytes) = bytes else { continue };
-            if bytes.is_empty() {
-                // Nothing at this offset: the file is over.
-                tracing::warn!(
-                    "getFile returned empty at offset {} (msg {})",
-                    st.offset,
-                    st.msg_id
-                );
-                return None;
+                *next_idx += 1;
+                return Some((Ok(chunk), st));
             }
-            let raw_len = bytes.len();
-            // The request was clamped to the document's remaining bytes,
-            // so a short read is the final chunk.
-            if raw_len < limit {
-                st.done = true;
-            }
-            st.offset += raw_len as u64;
-            let mut chunk = Bytes::from(bytes);
-            if st.discard > 0 {
-                let d = usize::try_from(st.discard)
-                    .unwrap_or(chunk.len())
-                    .min(chunk.len());
-                chunk = chunk.slice(d..);
-                st.discard -= d as u64;
-                if chunk.is_empty() {
-                    // The entire chunk was consumed skipping the range
-                    // prefix — fetch the next one rather than yield an
-                    // empty Bytes (which the caller treats as EOF).
-                    continue;
-                }
-            }
-            return Some((Ok(chunk), st));
-        }
-    }))
-}
-
-struct StreamState {
-    client: Arc<Client>,
-    peer: InputPeer,
-    pool: Arc<SenderPool>,
-    msg_id: i32,
-    /// Download location rebuilt from the message each time the file
-    /// reference goes stale.
-    loc: Option<types::FileLocation>,
-    /// The Telegram document's own byte size, from the fetched message.
-    doc_size: u64,
-    offset: u64,
-    /// Bytes still to drop from the first served chunk (start % ALIGN).
-    discard: u64,
-    done: bool,
+        },
+    );
+    Ok((stream, capacity))
 }
 
 /// Caps a byte stream at `limit` bytes: Range responses must send exactly
@@ -342,11 +444,21 @@ async fn part_stream(
     key: Option<&crate::crypt::Key>,
 ) -> Result<BoxedPart, String> {
     let p = &parts[idx];
+    // A truncated part (the Telegram document holds fewer bytes than
+    // the upload declared) cannot serve its full share: detect it up
+    // front and refuse with a diagnosis instead of desyncing output.
+    let declared = p.size.cast_unsigned().saturating_sub(skip);
     let Some(nonce) = p.nonce.as_deref().and_then(crate::crypt::nonce_from_b64) else {
         // Plaintext part: serve the stored bytes as-is.
-        return Ok(Box::pin(
-            file_stream_from(tg, p.message_id, &p.chat, skip).await?,
-        ));
+        let (stream, capacity) = file_stream_from(tg, p.message_id, &p.chat, skip).await?;
+        if capacity < declared {
+            return Err(format!(
+                "part {} is truncated: {capacity} of {declared} bytes \
+                 remain — the file needs re-uploading",
+                p.message_id
+            ));
+        }
+        return Ok(Box::pin(stream));
     };
     // Encrypted part — the stored bytes are a container. Decryption needs a
     // key; without one the operator has disabled or removed the key while
@@ -355,7 +467,7 @@ async fn part_stream(
         return Err("file is encrypted but no crypt_password is configured".into());
     };
     if skip == 0 {
-        let inner = file_stream_from(tg, p.message_id, &p.chat, 0).await?;
+        let (inner, _) = file_stream_from(tg, p.message_id, &p.chat, 0).await?;
         let dec = crate::crypt::DecryptingStream::from_header(Box::pin(inner), key);
         Ok(Box::pin(dec))
     } else {
@@ -367,7 +479,7 @@ async fn part_stream(
         // Skip whole 64 KiB-blocks of ciphertext in Telegram's stream, then
         // discard the intra-block plaintext remainder inside the decryptor.
         let ct_off = HEADER_SIZE + blocks * block_size;
-        let inner = file_stream_from(tg, p.message_id, &p.chat, ct_off).await?;
+        let (inner, _) = file_stream_from(tg, p.message_id, &p.chat, ct_off).await?;
         let dec =
             crate::crypt::DecryptingStream::at_block(Box::pin(inner), key, nonce, blocks, intra);
         Ok(Box::pin(dec))

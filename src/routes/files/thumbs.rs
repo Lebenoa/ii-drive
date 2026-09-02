@@ -301,7 +301,7 @@ async fn download_bounded(
     let mut stream: std::pin::Pin<
         Box<dyn futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send>,
     > = match crate::stream::file_stream_from(tg, part0.message_id, &part0.chat, start).await {
-        Ok(s) => Box::pin(s),
+        Ok((s, _)) => Box::pin(s),
         Err(e) => {
             tracing::warn!("thumb download start failed for {uid}: {e}");
             return Err(());
