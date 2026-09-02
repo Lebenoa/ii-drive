@@ -73,7 +73,7 @@ async fn fetch_window(
 ) -> std::io::Result<Vec<u8>> {
     loop {
         let (my_generation, loc) = {
-            let mut guard = slot.lock().expect("loc slot poisoned");
+            let guard = slot.lock().expect("loc slot poisoned");
             (guard.generation, guard.loc.clone())
         };
         let loc = match loc {
@@ -254,7 +254,7 @@ pub async fn file_stream_from(
     let total_chunks = doc_size.div_ceil(CHUNK as u64) - first_idx;
     let first_discard = start - base;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u64, std::io::Result<Vec<u8>>)>(WORKERS * 2);
+    let (tx, rx) = tokio::sync::mpsc::channel::<(u64, std::io::Result<Vec<u8>>)>(WORKERS * 2);
     let next = Arc::new(std::sync::atomic::AtomicU64::new(0));
     for _ in 0..WORKERS.min(total_chunks as usize) {
         let tx = tx.clone();
