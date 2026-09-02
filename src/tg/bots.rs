@@ -34,23 +34,27 @@ impl TgManager {
             .await
             .map_err(|e| friendly(format!("bot sign-in failed: {e}")))?;
         let (id, access_hash, username) = {
-            match conn
+            // A bare `users.getUsers` answer — the bot only needs
+            // id/access_hash/username, and the full-user walk in
+            // `get_me` keeps tripping over server-side botInfo
+            // extensions.
+            let mut users = conn
                 .client
-                .get_me()
+                .get_users(&[InputUser::Self_])
                 .await
-                .map_err(|e| friendly(format!("bot profile failed: {e}")))?
-            {
-                types::User::User {
+                .map_err(|e| friendly(format!("bot profile failed: {e}")))?;
+            match users.pop() {
+                Some(types::User::User {
                     id,
                     access_hash,
                     username,
                     ..
-                } => (
+                }) => (
                     id.0,
                     access_hash.map(|h| h.0),
                     username.unwrap_or_else(|| format!("bot{}", id.0)),
                 ),
-                types::User::Empty { .. } => return Err("bot account unavailable".to_string()),
+                _ => return Err("bot account unavailable".to_string()),
             }
         };
         let replaced = self.st.lock().await.bots.insert(

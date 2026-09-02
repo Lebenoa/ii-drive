@@ -46,6 +46,7 @@ pub async fn file_stream_from(
         pool,
         msg_id: message_id,
         loc: None,
+        doc_size: 0,
         offset: start - start % ALIGN,
         discard: start % ALIGN,
         done: false,
@@ -93,18 +94,56 @@ pub async fn file_stream_from(
                         st,
                     ));
                 };
+                tracing::debug!(
+                    "msg={} doc {}",
+                    st.msg_id,
+                    match &doc {
+                        mtprsto::types::Document::Document {
+                            size, mime_type, ..
+                        } => {
+                            format!("size={size} mime={mime_type}")
+                        }
+                        mtprsto::types::Document::Empty { .. } => "empty".to_string(),
+                    }
+                );
+                st.doc_size = match &doc {
+                    mtprsto::types::Document::Document { size, .. } => {
+                        u64::try_from(*size).unwrap_or(0)
+                    }
+                    mtprsto::types::Document::Empty { .. } => 0,
+                };
                 st.loc = Some(loc);
             }
 
             let Some(loc) = st.loc.as_ref() else {
                 return Some((Err(std::io::Error::other("download location missing")), st));
             };
-            let payload = rpc::build_get_file(loc, st.offset.cast_signed(), CHUNK as i32);
+            // Telegram answers LIMIT_INVALID unless BOTH offset and limit
+            // are 4096-divisible AND offset+limit stays within the
+            // document's 4096-aligned end — so the final chunk rounds the
+            // remaining bytes UP to the alignment instead of clamping.
+            let remaining = st.doc_size.saturating_sub(st.offset);
+            if remaining == 0 {
+                // Aligned start sits at (or past) the document end.
+                return None;
+            }
+            let limit = remaining.min(CHUNK as u64).next_multiple_of(4096);
+            let limit = limit.min(CHUNK as u64) as usize;
+            let payload = rpc::build_get_file(loc, st.offset.cast_signed(), limit as i32);
+            tracing::debug!(
+                "getFile offset={} limit={limit} discard={} msg={}",
+                st.offset,
+                st.discard,
+                st.msg_id
+            );
             // Ok(None) means "file reference expired — location rebuilt,
             // fetch again at the same offset".
             let bytes = match st.pool.send_rpc(&payload).await {
                 Ok(raw) => match mtprsto::file::parse_get_file(&raw) {
-                    Ok(mtprsto::file::GetFile::File { bytes, .. }) => Some(bytes),
+                    Ok(mtprsto::file::GetFile::File { bytes, .. }) => {
+                        tracing::debug!("getFile -> {} bytes", bytes.len());
+                        Some(bytes)
+                    }
                     Ok(_) => {
                         return Some((
                             Err(std::io::Error::other(
@@ -140,11 +179,17 @@ pub async fn file_stream_from(
             let Some(bytes) = bytes else { continue };
             if bytes.is_empty() {
                 // Nothing at this offset: the file is over.
+                tracing::warn!(
+                    "getFile returned empty at offset {} (msg {})",
+                    st.offset,
+                    st.msg_id
+                );
                 return None;
             }
             let raw_len = bytes.len();
-            // A short read means EOF: serve this chunk, then stop.
-            if raw_len < CHUNK {
+            // The request was clamped to the document's remaining bytes,
+            // so a short read is the final chunk.
+            if raw_len < limit {
                 st.done = true;
             }
             st.offset += raw_len as u64;
@@ -175,6 +220,8 @@ struct StreamState {
     /// Download location rebuilt from the message each time the file
     /// reference goes stale.
     loc: Option<types::FileLocation>,
+    /// The Telegram document's own byte size, from the fetched message.
+    doc_size: u64,
     offset: u64,
     /// Bytes still to drop from the first served chunk (start % ALIGN).
     discard: u64,
